@@ -2,3 +2,5 @@ __pycache__/
 data
 gene_sets
 input_processed_anndata
+outputs_*
+processed_input*
