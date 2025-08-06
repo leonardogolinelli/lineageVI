@@ -30,6 +30,7 @@ class Encoder(nn.Module):
         self.logvar_layer = nn.Linear(n_hidden, n_latent)
 
     def forward(self, x: torch.Tensor):
+        #u, s = torch.split(x, x.shape[1]//2, 1)
         h      = self.encoder(x)
         mean   = self.mean_layer(h)
         logvar = self.logvar_layer(h)

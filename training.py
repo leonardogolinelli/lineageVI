@@ -5,7 +5,7 @@ import numpy as np
 import scanpy as sc
 from datetime import datetime
 from dataloader import make_dataloader
-from model import VAEModel
+from model import lineageVI
 
 
 class VAETrainer:
@@ -39,7 +39,7 @@ class VAETrainer:
         self.save_path = save_path       # <-- store it
 
         # initialize model & optimizer
-        self.model = VAEModel(
+        self.model = lineageVI(
             adata,
             n_hidden=self.n_hidden,
             mask_key=self.mask_key,

@@ -24,7 +24,7 @@ def seed_everything(seed: int):
     except AttributeError:
         pass
 
-class VAEModel(nn.Module):
+class lineageVI(nn.Module):
     def __init__(
         self,
         adata: sc.AnnData,
