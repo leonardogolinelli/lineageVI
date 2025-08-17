@@ -8,16 +8,15 @@ import torch.optim as optim
 import numpy as np
 import scanpy as sc
 
-from dataloader import make_dataloader
-from model import lineageVIModel  # refactored impl below
-
+from .dataloader import make_dataloader
+from .model import LineageVIModel  # refactored impl below
 
 # -------------------- Trainer engine --------------------
 
 class LineageVITrainer:
     def __init__(
         self,
-        model: lineageVIModel,
+        model: LineageVIModel,
         adata: sc.AnnData,
         device: Optional[torch.device] = None,
         verbose: int = 1,
@@ -234,7 +233,7 @@ class LineageVITrainer:
 
 # -------------------- User-facing model wrapper --------------------
 
-class lineageVI(lineageVIModel):
+class LineageVI(LineageVIModel):
     """
     Initialize once with data + config; call .fit(...) to train.
     Users specify unspliced_key/spliced_key ONLY here.
@@ -301,9 +300,12 @@ class lineageVI(lineageVIModel):
 
 # -------------------- Example usage --------------------
 if __name__ == "__main__":
-    adata = sc.read_h5ad("/home/lgolinelli/git/lineageVI/input_processed_anndata/pancreas_PCA_on_Ms_200moments.h5ad")
+    processed_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/inputs/anndata/processed'
+    file_name = 'pancreas.h5ad'
+    path = os.path.join(processed_path, file_name)
+    adata = sc.read_h5ad(path)
 
-    model = lineageVI(
+    model = LineageVI(
         adata,
         n_hidden=128,
         mask_key="I",

@@ -1,8 +1,55 @@
+# --- OS / editor junk ---
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# --- Python bytecode / caches ---
 __pycache__/
-data
-gene_sets
-input_processed_anndata
-outputs_*
-processed_input*
-processed_anndatas*
-NOTES_*
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Packaging / build outputs ---
+build/
+dist/
+*.egg-info/
+
+# --- Torch / model artifacts ---
+*.pt
+*.pth
+*.ckpt
+
+# --- Large bio data files anywhere ---
+*.h5ad
+*.loom
+*.zarr
+*.h5
+*.bam
+*.bai
+*.mtx
+*.npz
+
+# --- Notebook-run data layout (current tree) ---
+# inputs
+notebooks/data/inputs/anndata/raw/**
+notebooks/data/inputs/anndata/processed/**
+# keep gene sets (small text files)
+# (do NOT ignore notebooks/data/inputs/gene_sets)
+
+# outputs produced by runs
+notebooks/data/outputs/**
+
+# --- If you later move to top-level data/ layout, pre-ignore it now ---
+data/inputs/anndata/raw/**
+data/inputs/anndata/processed/**
+data/outputs/**
+
+# --- Logs / figures (optional; uncomment if you don’t want them tracked) ---
+# *.log
+# logs/
+# figures/

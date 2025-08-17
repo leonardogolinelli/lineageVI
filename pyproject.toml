@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lineagevi"
+version = "0.1.0"
+description = "Deep learning-based RNA velocity with masked decoders and two-regime training"
+readme = "README.md"
+authors = [{ name = "Leonardo Golinelli" }]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+dependencies = [
+  "torch>=2.1",
+  "anndata>=0.10",
+  "scanpy>=1.10",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "scvelo>=0.3.3"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pytest-cov",
+  "pre-commit",
+  "ruff",
+  "mypy",
+  "ipykernel",
+  "jupyter"
+]
+docs = [
+  "mkdocs",
+  "mkdocs-material",
+  "mkdocstrings[python]"
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/leonardogolinelli/lineageVI"
+Documentation = "https://leonardogolinelli.github.io/lineageVI"

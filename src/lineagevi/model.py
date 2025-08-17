@@ -5,8 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scanpy as sc
 
-from modules import Encoder, MaskedLinearDecoder, VelocityDecoder
-
+from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder
 
 def seed_everything(seed: int):
     """Seed Python, NumPy, and torch (CPU and CUDA) for reproducibility."""
@@ -25,7 +24,7 @@ def seed_everything(seed: int):
     except AttributeError:
         pass
 
-class lineageVIModel(nn.Module):
+class LineageVIModel(nn.Module):
     def __init__(
         self,
         adata: sc.AnnData,
