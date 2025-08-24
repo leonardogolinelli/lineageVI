@@ -468,7 +468,7 @@ class LineageVIModel(nn.Module):
                 adata.layers[vkey] = velocity
                 scv.tl.velocity_graph(adata, vkey=vkey, sqrt_transform=False, approx=True)
                 t_mat = scv.utils.get_transition_matrix(
-                    adata, vkey=vkey, self_transitions=False, use_negative_cosines=True
+                    adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
                 )
                 extrapolated_cells = np.asarray(t_mat @ adata.layers["Ms"])
                 extrapolated_cells_list.append(extrapolated_cells)
