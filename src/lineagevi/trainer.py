@@ -27,6 +27,7 @@ class LineageVITrainer:
         self.verbose = int(verbose)
         self.model = self.model.to(self.device)
 
+
     # High-level procedure
     def fit(
         self,
@@ -130,8 +131,8 @@ class LineageVITrainer:
         with torch.no_grad():
             for x, idx, x_neigh in loader:
                 x = x.to(self.device)
-                z, _, _ = self.model.encoder(x)
-                latent_list.append(z.cpu())
+                _, mu, _ = self.model.encoder(x)
+                latent_list.append(mu.cpu())
                 idx_all.extend(idx.numpy().tolist())
 
         z_concat = torch.cat(latent_list, dim=0)
@@ -229,6 +230,12 @@ class LineageVITrainer:
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
 
 # -------------------- User-facing model wrapper --------------------
 
@@ -244,13 +251,12 @@ class LineageVI(LineageVIModel):
         n_hidden: int = 128,
         mask_key: str = "I",
         gene_prior: bool = True,
-        seed: int = 0,
         device: Optional[torch.device] = None,
         *,
         unspliced_key: str = "unspliced",
         spliced_key: str = "spliced",
     ):
-        super().__init__(adata, n_hidden=n_hidden, mask_key=mask_key, gene_prior=gene_prior, seed=seed)
+        super().__init__(adata, n_hidden=n_hidden, mask_key=mask_key, gene_prior=gene_prior, seed=None)
         self._adata_ref = adata
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.unspliced_key = unspliced_key
@@ -303,7 +309,7 @@ if __name__ == "__main__":
     processed_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/inputs/anndata/processed'
     output_base_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/outputs'
     dataset_name = 'pancreas'
-    time = datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
+    time = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
     output_dir_name =f'{dataset_name}_{time}'
     output_dir_path = os.path.join(output_base_path, output_dir_name)
     input_adata_path = os.path.join(processed_path, dataset_name+ '.h5ad')
@@ -314,7 +320,6 @@ if __name__ == "__main__":
         n_hidden=128,
         mask_key="I",
         gene_prior=True,
-        seed=0,
         unspliced_key="unspliced",
         spliced_key="spliced",
     )

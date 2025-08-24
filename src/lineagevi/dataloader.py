@@ -74,12 +74,9 @@ def make_dataloader(
     batch_size: int = 64,
     shuffle: bool = True,
     num_workers: int = 0,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> DataLoader:
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    # --- DO NOT reseed global RNGs here ---
 
     ds = RegimeDataset(
         adata, K,
@@ -95,10 +92,21 @@ def make_dataloader(
         gen = torch.Generator()
         gen.manual_seed(seed)
 
+    # Seed numpy/python per worker deterministically (doesn't touch torch model RNG)
+    def _worker_init_fn(worker_id: int):
+        if seed is None:
+            return
+        worker_seed = seed + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        generator=gen,
+        generator=gen,              # controls PyTorch shuffling deterministically
+        worker_init_fn=_worker_init_fn,
+        persistent_workers=(num_workers > 0),
     )
+

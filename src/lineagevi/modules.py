@@ -17,21 +17,22 @@ class Encoder(nn.Module):
         self.mean_layer = nn.Linear(n_hidden, n_latent)
         self.logvar_layer = nn.Linear(n_hidden, n_latent)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, *, generator: torch.Generator | None = None):
         # x is concatenated [u, s] so split then sum for the encoder signal
         u, s = torch.split(x, x.shape[1] // 2, dim=1)
         xs = u + s
         h = self.encoder(xs)
         mean = self.mean_layer(h)
         logvar = self.logvar_layer(h)
-        z = self.reparametrize(mean, logvar)
+        z = self.reparametrize(mean, logvar, generator=generator)
         return z, mean, logvar
 
     @staticmethod
-    def reparametrize(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    def reparametrize(mean, logvar, *, generator=None):
         std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
+        eps = torch.empty_like(std).normal_(mean=0.0, std=1.0, generator=generator)
         return mean + eps * std
+
 
 class MaskedLinearDecoder(nn.Module):
     """Linear decoder with hard mask on regression weights: outputs G from latent L."""

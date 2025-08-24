@@ -11,7 +11,6 @@ from typing import Tuple
 from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder
 
 
-
 def seed_everything(seed: int):
     """Seed Python, NumPy, and torch (CPU and CUDA) for reproducibility."""
     random.seed(seed)
@@ -120,9 +119,10 @@ class LineageVIModel(nn.Module):
         adata_gp.var_names_make_unique()
         return adata_gp
 
-    def _forward_encoder(self, x):
-        z, mean, logvar = self.encoder(x)
+    def _forward_encoder(self, x, *, generator: torch.Generator | None = None):
+        z, mean, logvar = self.encoder(x, generator=generator)
         return z, mean, logvar
+
 
     def _forward_gene_decoder(self, z):
         x_rec = self.gene_decoder(z)
@@ -291,11 +291,11 @@ class LineageVIModel(nn.Module):
     def get_velocity(
             self,
             adata,
-            n_samples=1,
-            return_mean = True,
-            return_negative_velo=True
+            n_samples: int = 1,
+            return_mean: bool = True,
+            return_negative_velo: bool = True,
+            base_seed: int | None = None,    # NEW: optional reproducibility seed
     ): 
-        
         from .dataloader import make_dataloader
 
         dataloader = make_dataloader(
@@ -309,34 +309,38 @@ class LineageVIModel(nn.Module):
             batch_size=256, 
             shuffle=False,
             num_workers=0,
-            seed=0
+            seed=None,                      # IMPORTANT: don’t reset global RNG
         )
+
+        # local generator for reproducible sampling
+        device = next(self.parameters()).device
+        gen = None
+        if base_seed is not None:
+            gen = torch.Generator(device=device).manual_seed(base_seed)
 
         all_vels = []
 
-        # 4) loop over minibatches
-        #with torch.no_grad():
         for x, idx, _ in iter(dataloader):
             samples: list[torch.Tensor] = []
             for _ in range(n_samples):
-                z, _, _ = self._forward_encoder(x)
+                # pass generator into encoder so sampling depends on gen, not global RNG
+                z, _, _ = self._forward_encoder(x, generator=gen)
                 vel, _ = self._forward_velocity_decoder(z, x)
-
                 samples.append(vel.cpu())
+
             samp_tensor = torch.stack(samples, dim=0)  # (n_samples, B, G)
 
             if return_mean:
                 batch_vel = samp_tensor.mean(dim=0)  # (B, G)
             else:
-                batch_vel = samp_tensor         # (n_samples, B, G)
-
+                batch_vel = samp_tensor              # (n_samples, B, G)
 
             if return_negative_velo:
                 batch_vel.neg_()
 
             all_vels.append(batch_vel)
 
-        # 5) stitch batches back together
+        # stitch batches back together
         first = all_vels[0]
         if first.ndim == 3:
             final = torch.cat(all_vels, dim=1)  # (n_samples, total_cells, G')
@@ -344,10 +348,10 @@ class LineageVIModel(nn.Module):
             final = torch.cat(all_vels, dim=0)  # (total_cells, G')
 
         velos = final.numpy()
-
         velocity_u, velocity = np.split(velos, 2, axis=-1)
 
         return velocity_u, velocity
+
     
     @torch.inference_mode()
     def get_directional_uncertainty(
@@ -356,11 +360,13 @@ class LineageVIModel(nn.Module):
         n_samples: int = 50,
         n_jobs: int = -1,
         show_plot: bool = True,
+        base_seed: int | None = None,  # optional reproducibility
     ):
-
+        # draw n_samples velocity fields in one call
         _, velocity = self.get_velocity(
-            adata, n_samples=n_samples, return_mean=False
+            adata, n_samples=n_samples, return_mean=False, base_seed=base_seed
         )  # (n_samples, n_cells, n_genes)
+
 
         df, cosine_sims = self._compute_directional_statistics_tensor(
             tensor=velocity, n_jobs=n_jobs, n_cells=adata.n_obs
@@ -447,44 +453,56 @@ class LineageVIModel(nn.Module):
         v2_u = self._centered_unit_vector(v2)
         return np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)
     
-    def compute_extrinisic_uncertainty(
+    @torch.inference_mode()
+    def compute_extrinsic_uncertainty(
             self,
             adata,
-            n_samples=25, 
-            n_jobs=-1,
-            show_plot=True
-        ) -> pd.DataFrame:
-
-        import scanpy as sc
+            n_samples: int = 25,
+            n_jobs: int = -1,
+            show_plot: bool = True,
+            base_seed: int | None = None,   # NEW: ensures distinct ε across iterations (while reproducible)
+    ) -> pd.DataFrame:
         import scvelo as scv
+        import scanpy as sc
         from contextlib import redirect_stdout
         import io
 
         extrapolated_cells_list = []
         for i in range(n_samples):
             with io.StringIO() as buf, redirect_stdout(buf):
-                vkey = "velocities_velovi_{i}".format(i=i)
-                velocity_u, velocity = self.get_velocity(adata, n_samples=1, return_mean=True)
-                adata.layers[vkey] = velocity
+                vkey = f"velocities_velovi_{i}"
+                # draw a fresh sample each iteration via distinct base_seed
+                _, velocity = self.get_velocity(
+                    adata, n_samples=1, return_mean=True,
+                    base_seed=(None if base_seed is None else base_seed + i)
+                )
+                adata.layers[vkey] = velocity  # (cells, genes)
+
                 scv.tl.velocity_graph(adata, vkey=vkey, sqrt_transform=False, approx=True)
-                t_mat = scv.utils.get_transition_matrix(
+                T = scv.utils.get_transition_matrix(
                     adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
                 )
-                extrapolated_cells = np.asarray(t_mat @ adata.layers["Ms"])
-                extrapolated_cells_list.append(extrapolated_cells)
-        extrapolated_cells = np.stack(extrapolated_cells_list)
-        df, _ = self._compute_directional_statistics_tensor(extrapolated_cells, n_jobs=n_jobs, n_cells=adata.n_obs)
+                X_extrap = np.asarray(T @ adata.layers["Ms"])  # (cells, genes)
+                extrapolated_cells_list.append(X_extrap.astype(np.float32))
 
+        extrapolated_cells = np.stack(extrapolated_cells_list, axis=0)  # (n_samples, cells, genes)
+
+        df, _ = self._compute_directional_statistics_tensor(
+            tensor=extrapolated_cells, n_jobs=n_jobs, n_cells=adata.n_obs
+        )
+        df.index = adata.obs_names
+
+        # original behavior: write log10 directly (may yield -inf if a stat==0)
         for c in df.columns:
-            adata.obs[c + "_extrinisic"] = np.log10(df[c].values)
+            adata.obs[c + "_extrinsic"] = np.log10(df[c].values.astype(np.float32))
 
         if show_plot:
             sc.pl.umap(
-                adata, 
-                color="directional_cosine_sim_variance_extrinisic",
-                vmin="p1", 
-                vmax="p99", 
+                adata,
+                color="directional_cosine_sim_variance_extrinsic",
+                vmin="p1",
+                vmax="p99",
             )
-
         return df
+
 
