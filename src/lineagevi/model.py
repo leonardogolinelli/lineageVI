@@ -4,8 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import scanpy as sc
+import pandas as pd
+from joblib import Parallel, delayed
+from typing import Tuple
 
 from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder
+
+
 
 def seed_everything(seed: int):
     """Seed Python, NumPy, and torch (CPU and CUDA) for reproducibility."""
@@ -282,7 +287,7 @@ class LineageVIModel(nn.Module):
 
             adata.uns[key_added] = scores
 
-
+    @torch.inference_mode()
     def get_velocity(
             self,
             adata,
@@ -310,53 +315,51 @@ class LineageVIModel(nn.Module):
         all_vels = []
 
         # 4) loop over minibatches
-        with torch.no_grad():
-            for x, idx, _ in iter(dataloader):
-                samples: list[torch.Tensor] = []
-                for _ in range(n_samples):
-                    z, _, _ = self._forward_encoder(x)
-                    vel, _ = self._forward_velocity_decoder(z, x)
+        #with torch.no_grad():
+        for x, idx, _ in iter(dataloader):
+            samples: list[torch.Tensor] = []
+            for _ in range(n_samples):
+                z, _, _ = self._forward_encoder(x)
+                vel, _ = self._forward_velocity_decoder(z, x)
 
-                    samples.append(vel.cpu())
-                samp_tensor = torch.stack(samples, dim=0)  # (n_samples, B, G)
+                samples.append(vel.cpu())
+            samp_tensor = torch.stack(samples, dim=0)  # (n_samples, B, G)
 
-                if return_mean:
-                    batch_vel = samp_tensor.mean(dim=0)  # (B, G)
-                else:
-                    batch_vel = samp_tensor         # (n_samples, B, G)
-
-
-                if return_negative_velo:
-                    batch_vel.neg_()
-
-                all_vels.append(batch_vel)
-
-            # 5) stitch batches back together
-            first = all_vels[0]
-            if first.ndim == 3:
-                final = torch.cat(all_vels, dim=1)  # (n_samples, total_cells, G')
+            if return_mean:
+                batch_vel = samp_tensor.mean(dim=0)  # (B, G)
             else:
-                final = torch.cat(all_vels, dim=0)  # (total_cells, G')
+                batch_vel = samp_tensor         # (n_samples, B, G)
 
-            velos = final.numpy()
 
-            velocity_u, velocity = np.split(velos, 2, axis=-1)
+            if return_negative_velo:
+                batch_vel.neg_()
 
-            return velocity_u, velocity
+            all_vels.append(batch_vel)
+
+        # 5) stitch batches back together
+        first = all_vels[0]
+        if first.ndim == 3:
+            final = torch.cat(all_vels, dim=1)  # (n_samples, total_cells, G')
+        else:
+            final = torch.cat(all_vels, dim=0)  # (total_cells, G')
+
+        velos = final.numpy()
+
+        velocity_u, velocity = np.split(velos, 2, axis=-1)
+
+        return velocity_u, velocity
     
-    '''@torch.inference_mode()
+    @torch.inference_mode()
     def get_directional_uncertainty(
         self,
+        adata,
         n_samples: int = 50,
-        gene_list: Iterable[str] = None,
         n_jobs: int = -1,
         show_plot: bool = True,
     ):
-        import scanpy as sc
-        adata = self._validate_anndata(self.adata)
 
-        velocity_u, velocity = self.get_velocity(
-            n_samples=n_samples, return_mean=False, gene_list=gene_list
+        _, velocity = self.get_velocity(
+            adata, n_samples=n_samples, return_mean=False
         )  # (n_samples, n_cells, n_genes)
 
         df, cosine_sims = self._compute_directional_statistics_tensor(
@@ -378,7 +381,7 @@ class LineageVIModel(nn.Module):
             )
 
         return df, cosine_sims
-
+    
     def _compute_directional_statistics_tensor(
         self, tensor: np.ndarray, n_jobs: int, n_cells: int
     ) -> pd.DataFrame:
@@ -388,7 +391,6 @@ class LineageVIModel(nn.Module):
         df["directional_cosine_sim_variance"] = np.nan
         df["directional_cosine_sim_difference"] = np.nan
         df["directional_cosine_sim_mean"] = np.nan
-        logger.info("Computing the uncertainties...")
         results = Parallel(n_jobs=n_jobs, verbose=3)(
             delayed(self._directional_statistics_per_cell)(tensor[:, cell_index, :])
             for cell_index in range(n_cells)
@@ -406,7 +408,7 @@ class LineageVIModel(nn.Module):
         df.loc[:, "directional_cosine_sim_mean"] = [results[i][5] for i in range(n_cells)]
 
         return df, cosine_sims
-    
+
     def _directional_statistics_per_cell(
         self,
         tensor: np.ndarray,
@@ -447,6 +449,7 @@ class LineageVIModel(nn.Module):
     
     def compute_extrinisic_uncertainty(
             self,
+            adata,
             n_samples=25, 
             n_jobs=-1,
             show_plot=True
@@ -454,26 +457,23 @@ class LineageVIModel(nn.Module):
 
         import scanpy as sc
         import scvelo as scv
-        from scvi.utils import track
         from contextlib import redirect_stdout
         import io
 
-        adata = self._validate_anndata(self.adata)
-
         extrapolated_cells_list = []
-        for i in track(range(n_samples)):
+        for i in range(n_samples):
             with io.StringIO() as buf, redirect_stdout(buf):
                 vkey = "velocities_velovi_{i}".format(i=i)
                 velocity_u, velocity = self.get_velocity(adata, n_samples=1, return_mean=True)
                 adata.layers[vkey] = velocity
                 scv.tl.velocity_graph(adata, vkey=vkey, sqrt_transform=False, approx=True)
                 t_mat = scv.utils.get_transition_matrix(
-                    adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
+                    adata, vkey=vkey, self_transitions=False, use_negative_cosines=True
                 )
                 extrapolated_cells = np.asarray(t_mat @ adata.layers["Ms"])
                 extrapolated_cells_list.append(extrapolated_cells)
         extrapolated_cells = np.stack(extrapolated_cells_list)
-        df, _ = self._compute_directional_statistics_tensor(extrapolated_cells, n_jobs=n_jobs, n_cells=self.adata.n_obs)
+        df, _ = self._compute_directional_statistics_tensor(extrapolated_cells, n_jobs=n_jobs, n_cells=adata.n_obs)
 
         for c in df.columns:
             adata.obs[c + "_extrinisic"] = np.log10(df[c].values)
@@ -487,5 +487,4 @@ class LineageVIModel(nn.Module):
             )
 
         return df
-        '''
 
