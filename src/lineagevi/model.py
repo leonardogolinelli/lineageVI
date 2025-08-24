@@ -283,3 +283,209 @@ class LineageVIModel(nn.Module):
             adata.uns[key_added] = scores
 
 
+    def get_velocity(
+            self,
+            adata,
+            n_samples=1,
+            return_mean = True,
+            return_negative_velo=True
+    ): 
+        
+        from .dataloader import make_dataloader
+
+        dataloader = make_dataloader(
+            adata,
+            first_regime=True,
+            K=10,
+            unspliced_key='Mu',
+            spliced_key='Ms',
+            latent_key='z',
+            nn_key='indices',
+            batch_size=256, 
+            shuffle=False,
+            num_workers=0,
+            seed=0
+        )
+
+        all_vels = []
+
+        # 4) loop over minibatches
+        with torch.no_grad():
+            for x, idx, _ in iter(dataloader):
+                samples: list[torch.Tensor] = []
+                for _ in range(n_samples):
+                    z, _, _ = self._forward_encoder(x)
+                    vel, _ = self._forward_velocity_decoder(z, x)
+
+                    samples.append(vel.cpu())
+                samp_tensor = torch.stack(samples, dim=0)  # (n_samples, B, G)
+
+                if return_mean:
+                    batch_vel = samp_tensor.mean(dim=0)  # (B, G)
+                else:
+                    batch_vel = samp_tensor         # (n_samples, B, G)
+
+
+                if return_negative_velo:
+                    batch_vel.neg_()
+
+                all_vels.append(batch_vel)
+
+            # 5) stitch batches back together
+            first = all_vels[0]
+            if first.ndim == 3:
+                final = torch.cat(all_vels, dim=1)  # (n_samples, total_cells, G')
+            else:
+                final = torch.cat(all_vels, dim=0)  # (total_cells, G')
+
+            velos = final.numpy()
+
+            velocity_u, velocity = np.split(velos, 2, axis=-1)
+
+            return velocity_u, velocity
+    
+    '''@torch.inference_mode()
+    def get_directional_uncertainty(
+        self,
+        n_samples: int = 50,
+        gene_list: Iterable[str] = None,
+        n_jobs: int = -1,
+        show_plot: bool = True,
+    ):
+        import scanpy as sc
+        adata = self._validate_anndata(self.adata)
+
+        velocity_u, velocity = self.get_velocity(
+            n_samples=n_samples, return_mean=False, gene_list=gene_list
+        )  # (n_samples, n_cells, n_genes)
+
+        df, cosine_sims = self._compute_directional_statistics_tensor(
+            tensor=velocity, n_jobs=n_jobs, n_cells=adata.n_obs
+        )
+        df.index = adata.obs_names
+
+        for c in df.columns:
+            print(f'Adding {c} to adata.obs')
+            adata.obs[c] = np.log10(df[c].values) 
+
+        if show_plot:
+            print('Plotting directional_cosine_sim_variance')
+            sc.pl.umap(
+                adata, 
+                color="directional_cosine_sim_variance",
+                vmin="p1",
+                vmax="p99",
+            )
+
+        return df, cosine_sims
+
+    def _compute_directional_statistics_tensor(
+        self, tensor: np.ndarray, n_jobs: int, n_cells: int
+    ) -> pd.DataFrame:
+        df = pd.DataFrame(index=np.arange(n_cells))
+        df["directional_variance"] = np.nan
+        df["directional_difference"] = np.nan
+        df["directional_cosine_sim_variance"] = np.nan
+        df["directional_cosine_sim_difference"] = np.nan
+        df["directional_cosine_sim_mean"] = np.nan
+        logger.info("Computing the uncertainties...")
+        results = Parallel(n_jobs=n_jobs, verbose=3)(
+            delayed(self._directional_statistics_per_cell)(tensor[:, cell_index, :])
+            for cell_index in range(n_cells)
+        )
+        # cells by samples
+        cosine_sims = np.stack([results[i][0] for i in range(n_cells)])
+        df.loc[:, "directional_cosine_sim_variance"] = [
+            results[i][1] for i in range(n_cells)
+        ]
+        df.loc[:, "directional_cosine_sim_difference"] = [
+            results[i][2] for i in range(n_cells)
+        ]
+        df.loc[:, "directional_variance"] = [results[i][3] for i in range(n_cells)]
+        df.loc[:, "directional_difference"] = [results[i][4] for i in range(n_cells)]
+        df.loc[:, "directional_cosine_sim_mean"] = [results[i][5] for i in range(n_cells)]
+
+        return df, cosine_sims
+    
+    def _directional_statistics_per_cell(
+        self,
+        tensor: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Internal function for parallelization.
+
+        Parameters
+        ----------
+        tensor
+            Shape of samples by genes for a given cell.
+        """
+        n_samples = tensor.shape[0]
+        # over samples axis
+        mean_velocity_of_cell = tensor.mean(0)
+        cosine_sims = [
+            self._cosine_sim(tensor[i, :], mean_velocity_of_cell) for i in range(n_samples)
+        ]
+        angle_samples = [np.arccos(el) for el in cosine_sims]
+        return (
+            cosine_sims,
+            np.var(cosine_sims),
+            np.percentile(cosine_sims, 95) - np.percentile(cosine_sims, 5),
+            np.var(angle_samples),
+            np.percentile(angle_samples, 95) - np.percentile(angle_samples, 5),
+            np.mean(cosine_sims),
+        )
+    
+    def _centered_unit_vector(self, vector: np.ndarray) -> np.ndarray:
+        """Returns the centered unit vector of the vector."""
+        vector = vector - np.mean(vector)
+        return vector / np.linalg.norm(vector)
+
+    def _cosine_sim(self, v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
+        """Returns cosine similarity of the vectors."""
+        v1_u = self._centered_unit_vector(v1)
+        v2_u = self._centered_unit_vector(v2)
+        return np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)
+    
+    def compute_extrinisic_uncertainty(
+            self,
+            n_samples=25, 
+            n_jobs=-1,
+            show_plot=True
+        ) -> pd.DataFrame:
+
+        import scanpy as sc
+        import scvelo as scv
+        from scvi.utils import track
+        from contextlib import redirect_stdout
+        import io
+
+        adata = self._validate_anndata(self.adata)
+
+        extrapolated_cells_list = []
+        for i in track(range(n_samples)):
+            with io.StringIO() as buf, redirect_stdout(buf):
+                vkey = "velocities_velovi_{i}".format(i=i)
+                velocity_u, velocity = self.get_velocity(adata, n_samples=1, return_mean=True)
+                adata.layers[vkey] = velocity
+                scv.tl.velocity_graph(adata, vkey=vkey, sqrt_transform=False, approx=True)
+                t_mat = scv.utils.get_transition_matrix(
+                    adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
+                )
+                extrapolated_cells = np.asarray(t_mat @ adata.layers["Ms"])
+                extrapolated_cells_list.append(extrapolated_cells)
+        extrapolated_cells = np.stack(extrapolated_cells_list)
+        df, _ = self._compute_directional_statistics_tensor(extrapolated_cells, n_jobs=n_jobs, n_cells=self.adata.n_obs)
+
+        for c in df.columns:
+            adata.obs[c + "_extrinisic"] = np.log10(df[c].values)
+
+        if show_plot:
+            sc.pl.umap(
+                adata, 
+                color="directional_cosine_sim_variance_extrinisic",
+                vmin="p1", 
+                vmax="p99", 
+            )
+
+        return df
+        '''
+
