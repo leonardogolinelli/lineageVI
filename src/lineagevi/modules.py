@@ -33,7 +33,6 @@ class Encoder(nn.Module):
         eps = torch.randn_like(std)
         return mean + eps * std
 
-
 class MaskedLinearDecoder(nn.Module):
     """Linear decoder with hard mask on regression weights: outputs G from latent L."""
     def __init__(self, n_latent: int, n_output: int, mask: torch.Tensor):
@@ -54,7 +53,6 @@ class MaskedLinearDecoder(nn.Module):
         masked_w = self.linear.weight * self.mask
         return F.linear(x, masked_w, self.linear.bias)
 
-
 class VelocityDecoder(nn.Module):
     """
     Produces:
@@ -62,6 +60,7 @@ class VelocityDecoder(nn.Module):
       - velocity:    (B, 2G)  per-gene [u_vel, s_vel] if gene_prior=True,
                               else free (B, 2G) projection
     """
+
     def __init__(self, n_latent: int, n_hidden: int, n_output: int, gene_prior: bool):
         super().__init__()
         self.gene_prior = gene_prior

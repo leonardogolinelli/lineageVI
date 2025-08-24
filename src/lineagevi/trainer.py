@@ -230,7 +230,6 @@ class LineageVITrainer:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-
 # -------------------- User-facing model wrapper --------------------
 
 class LineageVI(LineageVIModel):
@@ -298,14 +297,19 @@ class LineageVI(LineageVIModel):
     def get_adata(self) -> sc.AnnData:
         return self._adata_ref
 
-# -------------------- Example usage --------------------
 if __name__ == "__main__":
+    import datetime
+    import lineagevi as linvi
     processed_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/inputs/anndata/processed'
-    file_name = 'pancreas.h5ad'
-    path = os.path.join(processed_path, file_name)
-    adata = sc.read_h5ad(path)
+    output_base_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/outputs'
+    dataset_name = 'pancreas'
+    time = datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
+    output_dir_name =f'{dataset_name}_{time}'
+    output_dir_path = os.path.join(output_base_path, output_dir_name)
+    input_adata_path = os.path.join(processed_path, dataset_name+ '.h5ad')
+    adata = sc.read_h5ad(input_adata_path)
 
-    model = LineageVI(
+    model = linvi.trainer.LineageVI(
         adata,
         n_hidden=128,
         mask_key="I",
@@ -324,7 +328,7 @@ if __name__ == "__main__":
         shuffle_regime1=True,
         shuffle_regime2=False,
         seeds=(0, 1, 2),
-        output_dir="output_model_test2",
+        output_dir=output_dir_path,
         verbose=1,
     )
 
