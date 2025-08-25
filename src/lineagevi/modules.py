@@ -33,7 +33,6 @@ class Encoder(nn.Module):
         eps = torch.empty_like(std).normal_(mean=0.0, std=1.0, generator=generator)
         return mean + eps * std
 
-
 class MaskedLinearDecoder(nn.Module):
     """Linear decoder with hard mask on regression weights: outputs G from latent L."""
     def __init__(self, n_latent: int, n_output: int, mask: torch.Tensor):
@@ -62,10 +61,8 @@ class VelocityDecoder(nn.Module):
                               else free (B, 2G) projection
     """
 
-    def __init__(self, n_latent: int, n_hidden: int, n_output: int, gene_prior: bool):
+    def __init__(self, n_latent: int, n_hidden: int, n_output: int):
         super().__init__()
-        self.gene_prior = gene_prior
-
         self.shared_decoder = nn.Sequential(
             nn.Linear(n_latent, n_hidden),
             nn.LayerNorm(n_hidden),
@@ -75,32 +72,24 @@ class VelocityDecoder(nn.Module):
         # latent GP-ish velocity head (L-dim)
         self.gp_velocity_decoder = nn.Linear(n_hidden, n_latent)
 
-        # gene velocity head
-        if self.gene_prior:
-            # outputs [alpha, beta, gamma] each in R^G; n_output here is 2G, so G = n_output//2
-            G2 = n_output
-            G = G2 // 2
-            self.gene_velocity_decoder = nn.Sequential(
-                nn.Linear(n_hidden, 3 * G),
-                nn.Softplus()
-            )
-            self._G = G
-        else:
-            # free projection to 2G
-            self.gene_velocity_decoder = nn.Linear(n_hidden, n_output)
+        # outputs [alpha, beta, gamma] each in R^G; n_output here is 2G, so G = n_output//2
+        G2 = n_output
+        G = G2 // 2
+        self.gene_velocity_decoder = nn.Sequential(
+            nn.Linear(n_hidden, 3 * G),
+            nn.Softplus()
+        )
+        self._G = G
 
     def forward(self, z: torch.Tensor, x: torch.Tensor):
         h = self.shared_decoder(z)
         velocity_gp = self.gp_velocity_decoder(h)
 
-        if not self.gene_prior:
-            velocity = self.gene_velocity_decoder(h)  # (B, 2G)
-        else:
-            kinetic_params = self.gene_velocity_decoder(h)  # (B, 3G)
-            alpha, beta, gamma = torch.split(kinetic_params, self._G, dim=1)
-            unspliced, spliced = torch.split(x, x.size(1) // 2, dim=1)
-            velocity_u = alpha - beta * unspliced
-            velocity_s = beta * unspliced - gamma * spliced
-            velocity = torch.cat([velocity_u, velocity_s], dim=1)  # (B, 2G)
-
-        return velocity, velocity_gp
+        kinetic_params = self.gene_velocity_decoder(h)  # (B, 3G)
+        alpha, beta, gamma = torch.split(kinetic_params, self._G, dim=1)
+        unspliced, spliced = torch.split(x, x.size(1) // 2, dim=1)
+        velocity_u = alpha - beta * unspliced
+        velocity_s = beta * unspliced - gamma * spliced
+        velocity = torch.cat([velocity_u, velocity_s], dim=1)  # (B, 2G)
+        
+        return velocity, velocity_gp, alpha, beta, gamma

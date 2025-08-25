@@ -34,7 +34,6 @@ class LineageVIModel(nn.Module):
         adata: sc.AnnData,
         n_hidden: int = 128,
         mask_key: str = "I",
-        gene_prior: bool = False,
         seed: int | None = None,
     ):
         # If a seed is provided, lock all RNGs *before* instantiating any layers
@@ -57,7 +56,7 @@ class LineageVIModel(nn.Module):
         # submodules
         self.encoder = Encoder(n_input, n_hidden, n_latent)
         self.gene_decoder = MaskedLinearDecoder(n_latent, n_output, mask)
-        self.velocity_decoder = VelocityDecoder(n_latent, n_hidden, 2 * G, gene_prior)
+        self.velocity_decoder = VelocityDecoder(n_latent, n_hidden, 2 * G)
 
         # keep mask buffer around if needed elsewhere
         self.register_buffer("mask", mask)
@@ -69,13 +68,21 @@ class LineageVIModel(nn.Module):
         z, mean, logvar = self.encoder(x)
         recon = self.gene_decoder(z)
 
-        # only run velocity‐decoder if we're *not* in first_regime
         if not self.first_regime:
-            velocity, velocity_gp = self.velocity_decoder(z, x)
+            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         else:
-            velocity, velocity_gp = None, None
+            velocity = velocity_gp = alpha = beta = gamma = None
 
-        return recon, velocity, velocity_gp, mean, logvar
+        return {
+            "recon": recon,           # (B, G)
+            "z": z,                   # (B, L)
+            "mean": mean,             # (B, L)
+            "logvar": logvar,         # (B, L)
+            "velocity": velocity,     # (B, 2G) or None
+            "velocity_gp": velocity_gp,  # (B, L) or None
+            "alpha": alpha, "beta": beta, "gamma": gamma,  # (B, G) or None
+        }
+
 
     def reconstruction_loss(self, recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         # recon targets u+s
@@ -105,17 +112,71 @@ class LineageVIModel(nn.Module):
         max_sim, _ = cos_sim.max(dim=1)                               # (B,)
         return (1.0 - max_sim).mean()
     
-    def build_gp_adata(self) -> sc.AnnData:
+    def build_gp_adata(
+        self,
+        adata,
+        n_samples: int = 1,
+        return_negative_velo: bool = True,
+        base_seed: int | None = None,
+    ) -> sc.AnnData:
         """
-        Returns a new AnnData with gene programs as obs.
-        Useful for downstream analysis.
+        Return an AnnData in GP space (features = L).
+
+        - X and layers["Ms"] hold μ (encoder mean).
+        - layers["z"] holds sampled z (averaged over samples if n_samples>1).
+        - layers["logvar"] holds encoder log-variance (averaged if n_samples>1).
+        - obsm["velocity_gp"] holds GP velocity.
         """
-        adata_gp = sc.AnnData(X=self.get_latent())
-        adata_gp.obs = self._adata_ref.obs.copy()
-        adata_gp.var_names = self._adata_ref.uns['terms']
-        adata_gp.layers['velocity'] = self._adata_ref.obsm['velocity_gp']
-        adata_gp.layers['spliced'] = self.get_latent()
-        adata_gp.obsm['X_umap'] = self._adata_ref.obsm['X_umap']
+        outs = self.get_model_outputs(
+            adata=adata,
+            n_samples=n_samples,
+            return_mean=True,              # recon/vel/vel_gp averaged; z/mean/logvar kept per-sample by design
+            return_negative_velo=return_negative_velo,
+            base_seed=base_seed,
+            save_to_adata=False,
+        )
+
+        mu     = np.asarray(outs["mean"])         # (cells, L) or (n_samples, cells, L)
+        v_gp   = np.asarray(outs["velocity_gp"])  # (cells, L) or (n_samples, cells, L)
+        z_arr  = np.asarray(outs["z"])            # (n_samples, cells, L) or (cells, L)
+        lv_arr = np.asarray(outs["logvar"])       # (n_samples, cells, L) or (cells, L)
+
+        # collapse any sample axis defensively to (cells, L)
+        def _to_2d(a: np.ndarray) -> np.ndarray:
+            return a.mean(axis=0) if a.ndim == 3 else a
+
+        mu     = _to_2d(mu)
+        v_gp   = _to_2d(v_gp)
+        z_arr  = _to_2d(z_arr)
+        lv_arr = _to_2d(lv_arr)
+
+        if not (mu.ndim == v_gp.ndim == z_arr.ndim == lv_arr.ndim == 2):
+            raise RuntimeError(
+                f"Expected 2D arrays after collapsing sample axis; got shapes "
+                f"mu={mu.shape}, v_gp={v_gp.shape}, z={z_arr.shape}, logvar={lv_arr.shape}"
+            )
+
+        # Build GP-space AnnData
+        adata_gp = sc.AnnData(X=mu.astype(np.float32))
+        adata_gp.obs = adata.obs.copy()
+
+        if "terms" in adata.uns and len(adata.uns["terms"]) == mu.shape[1]:
+            adata_gp.var_names = adata.uns["terms"]
+        else:
+            adata_gp.var_names = pd.Index([f"GP_{i}" for i in range(mu.shape[1])])
+
+        # Treat μ as "Ms" (state) in this space; stash extras in layers
+        adata_gp.layers["Ms"]      = mu.astype(np.float32)
+        adata_gp.layers["z"]       = z_arr.astype(np.float32)
+        adata_gp.layers["logvar"]  = lv_arr.astype(np.float32)
+
+        # Velocity in GP space goes to obsm (not required by scVelo, just convenient)
+        adata_gp.layers["velocity_gp"] = v_gp.astype(np.float32)
+
+        # Optional visuals
+        if "X_umap" in adata.obsm:
+            adata_gp.obsm["X_umap"] = adata.obsm["X_umap"].copy()
+
         adata_gp.var_names_make_unique()
         return adata_gp
 
@@ -123,14 +184,13 @@ class LineageVIModel(nn.Module):
         z, mean, logvar = self.encoder(x, generator=generator)
         return z, mean, logvar
 
-
     def _forward_gene_decoder(self, z):
         x_rec = self.gene_decoder(z)
         return x_rec
 
     def _forward_velocity_decoder(self, z, x):
-        velocity, velocity_u = self.velocity_decoder(z, x)
-        return velocity, velocity_u
+        velocity, velocity_gp = self.velocity_decoder(z, x)
+        return velocity, velocity_gp
 
     def latent_enrich(
             self,
@@ -288,85 +348,272 @@ class LineageVIModel(nn.Module):
             adata.uns[key_added] = scores
 
     @torch.inference_mode()
-    def get_velocity(
-            self,
-            adata,
-            n_samples: int = 1,
-            return_mean: bool = True,
-            return_negative_velo: bool = True,
-            base_seed: int | None = None,    # NEW: optional reproducibility seed
-    ): 
+    def get_model_outputs(
+        self,
+        adata,
+        n_samples: int = 1,
+        return_mean: bool = True,
+        return_negative_velo: bool = True,
+        base_seed: int | None = None,
+        save_to_adata: bool = False,
+    ):
+        """
+        Samples the model over the dataset.
+
+        If save_to_adata=False:
+        Returns a dict of NumPy arrays (recon, z, mean, logvar, velocity_u, velocity,
+        velocity_gp, alpha, beta, gamma) with shapes:
+            - return_mean=True:                  (cells, F)
+            - return_mean=False & n_samples>1:   (n_samples, cells, F)
+            - return_mean=False & n_samples==1:  (cells, F)
+
+        If save_to_adata=True:
+        Writes to AnnData (and returns None):
+            layers["recon"]        (cells, G)
+            layers["velocity_u"]   (cells, G)
+            layers["velocity"]   (cells, G)
+            obsm["velocity_gp"]    (cells, L)
+            obsm["z"]              (cells, L)
+            obsm["mean"]           (cells, L)
+            obsm["logvar"]         (cells, L)
+            layers["alpha"/"beta"/"gamma"] if available (cells, G)
+
+        NOTE: If n_samples > 1, averages across samples BEFORE writing,
+                overriding a potential return_mean=False.
+        """
         from .dataloader import make_dataloader
 
-        dataloader = make_dataloader(
+        dl = make_dataloader(
             adata,
-            first_regime=True,
+            first_regime=True,     # encoder uses Mu/Ms; we decode per-batch
             K=10,
-            unspliced_key='Mu',
-            spliced_key='Ms',
-            latent_key='z',
-            nn_key='indices',
-            batch_size=256, 
+            unspliced_key="Mu",
+            spliced_key="Ms",
+            latent_key="z",
+            nn_key="indices",
+            batch_size=256,
             shuffle=False,
             num_workers=0,
-            seed=None,                      # IMPORTANT: don’t reset global RNG
+            seed=None,
         )
 
-        # local generator for reproducible sampling
         device = next(self.parameters()).device
-        gen = None
-        if base_seed is not None:
-            gen = torch.Generator(device=device).manual_seed(base_seed)
+        gen = torch.Generator(device=device).manual_seed(base_seed) if base_seed is not None else None
 
-        all_vels = []
+        # per-output batch accumulators (lists of tensors)
+        recon_batches = []
+        vel_batches = []
+        velgp_batches = []
+        z_batches = []
+        mean_batches = []
+        logvar_batches = []
+        alpha_batches, beta_batches, gamma_batches = [], [], []
 
-        for x, idx, _ in iter(dataloader):
-            samples: list[torch.Tensor] = []
+        for x, idx, _ in iter(dl):
+            # per-sample collectors (stack on dim=0 later)
+            recon_s, vel_s, velgp_s = [], [], []
+            z_s, mean_s, logvar_s = [], [], []
+            alpha_s, beta_s, gamma_s = [], [], []
+
             for _ in range(n_samples):
-                # pass generator into encoder so sampling depends on gen, not global RNG
-                z, _, _ = self._forward_encoder(x, generator=gen)
-                vel, _ = self._forward_velocity_decoder(z, x)
-                samples.append(vel.cpu())
+                z, mean, logvar = self._forward_encoder(x, generator=gen)
+                recon = self._forward_gene_decoder(z)  # (B, G)
+                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)  # (B, 2G), (B, L), (B, G)x3
 
-            samp_tensor = torch.stack(samples, dim=0)  # (n_samples, B, G)
+                # collect CPU tensors
+                recon_s.append(recon.cpu())
+                vel_s.append(velocity.cpu())
+                velgp_s.append(velocity_gp.cpu())
+                z_s.append(z.cpu())
+                mean_s.append(mean.cpu())
+                logvar_s.append(logvar.cpu())
+                alpha_s.append(alpha.cpu())
+                beta_s.append(beta.cpu())
+                gamma_s.append(gamma.cpu())
 
-            if return_mean:
-                batch_vel = samp_tensor.mean(dim=0)  # (B, G)
-            else:
-                batch_vel = samp_tensor              # (n_samples, B, G)
+            # stack along sample axis
+            recon_s   = torch.stack(recon_s,   dim=0)  # (n_samples, B, G)
+            vel_s     = torch.stack(vel_s,     dim=0)  # (n_samples, B, 2G)
+            velgp_s   = torch.stack(velgp_s,   dim=0)  # (n_samples, B, L)
+            z_s       = torch.stack(z_s,       dim=0)  # (n_samples, B, L)
+            mean_s    = torch.stack(mean_s,    dim=0)  # (n_samples, B, L)
+            logvar_s  = torch.stack(logvar_s,  dim=0)  # (n_samples, B, L)
+            alpha_s   = torch.stack(alpha_s,   dim=0)  # (n_samples, B, G)
+            beta_s    = torch.stack(beta_s,    dim=0)  # (n_samples, B, G)
+            gamma_s   = torch.stack(gamma_s,   dim=0)  # (n_samples, B, G)
+
+            # apply sample mean where requested (for tensor outputs we might average)
+            recon_b  = recon_s.mean(0)  if return_mean else recon_s
+            vel_b    = vel_s.mean(0)    if return_mean else vel_s
+            velgp_b  = velgp_s.mean(0)  if return_mean else velgp_s
+
+            # keep per-sample tensors for z/mean/logvar/α/β/γ (downstream may want dispersion)
+            z_b, mean_b, logvar_b = z_s, mean_s, logvar_s
+            alpha_b, beta_b, gamma_b = alpha_s, beta_s, gamma_s
 
             if return_negative_velo:
-                batch_vel.neg_()
+                vel_b.neg_()
+                velgp_b.neg_()
 
-            all_vels.append(batch_vel)
+            recon_batches.append(recon_b)
+            vel_batches.append(vel_b)
+            velgp_batches.append(velgp_b)
+            z_batches.append(z_b)
+            mean_batches.append(mean_b)
+            logvar_batches.append(logvar_b)
+            alpha_batches.append(alpha_b)
+            beta_batches.append(beta_b)
+            gamma_batches.append(gamma_b)
 
-        # stitch batches back together
-        first = all_vels[0]
-        if first.ndim == 3:
-            final = torch.cat(all_vels, dim=1)  # (n_samples, total_cells, G')
-        else:
-            final = torch.cat(all_vels, dim=0)  # (total_cells, G')
+        # stitch over batches (dim=1 if we have a sample axis)
+        def _stitch(lst: list[torch.Tensor]) -> torch.Tensor:
+            first = lst[0]
+            return torch.cat(lst, dim=1 if first.ndim == 3 else 0)
 
-        velos = final.numpy()
-        velocity_u, velocity = np.split(velos, 2, axis=-1)
+        recon_all  = _stitch(recon_batches)    # (n_samples?, cells, G) or (cells, G)
+        vel_all    = _stitch(vel_batches)      # (n_samples?, cells, 2G) or (cells, 2G)
+        velgp_all  = _stitch(velgp_batches)    # (n_samples?, cells, L)  or (cells, L)
+        z_all      = _stitch(z_batches)        # (n_samples, cells, L)
+        mean_all   = _stitch(mean_batches)     # (n_samples, cells, L)
+        logvar_all = _stitch(logvar_batches)   # (n_samples, cells, L)
+        alpha_all  = _stitch(alpha_batches)    # (n_samples, cells, G)
+        beta_all   = _stitch(beta_batches)     # (n_samples, cells, G)
+        gamma_all  = _stitch(gamma_batches)    # (n_samples, cells, G)
 
-        return velocity_u, velocity
+        # squeeze leading n_samples dim if it's a singleton AND return_mean=False
+        def _maybe_squeeze(t: torch.Tensor | None) -> torch.Tensor | None:
+            if t is None:
+                return None
+            return t.squeeze(0) if (not return_mean and n_samples == 1 and t.ndim == 3) else t
 
-    
+        recon_all  = _maybe_squeeze(recon_all)
+        vel_all    = _maybe_squeeze(vel_all)
+        velgp_all  = _maybe_squeeze(velgp_all)
+        z_all      = _maybe_squeeze(z_all)
+        mean_all   = _maybe_squeeze(mean_all)
+        logvar_all = _maybe_squeeze(logvar_all)
+        alpha_all  = _maybe_squeeze(alpha_all)
+        beta_all   = _maybe_squeeze(beta_all)
+        gamma_all  = _maybe_squeeze(gamma_all)
+
+        # split velocity into u/s in NumPy space
+        vel_u_np = vel_s_np = None
+        if vel_all is not None:
+            vel_np = vel_all.numpy()
+            vel_u_np, vel_s_np = np.split(vel_np, 2, axis=-1)
+
+        if not save_to_adata:
+            # return everything as NumPy arrays
+            return {
+                "recon": recon_all.numpy(),
+                "z": z_all.numpy(),
+                "mean": mean_all.numpy(),
+                "logvar": logvar_all.numpy(),
+                "velocity_u": vel_u_np,
+                "velocity": vel_s_np,
+                "velocity_gp": None if velgp_all is None else velgp_all.numpy(),
+                "alpha": None if alpha_all is None else alpha_all.numpy(),
+                "beta":  None if beta_all  is None else beta_all.numpy(),
+                "gamma": None if gamma_all is None else gamma_all.numpy(),
+            }
+
+        # ---------------------------
+        # save_to_adata=True path
+        # ---------------------------
+        # If multiple samples, FORCE averaging before writing (overrules return_mean)
+        force_mean = (n_samples > 1)
+
+        def _maybe_mean_first_axis(t: torch.Tensor | None) -> np.ndarray | None:
+            if t is None:
+                return None
+            # t can be (n_samples, cells, F) OR (cells, F)
+            if t.ndim == 3 and (force_mean or return_mean):
+                t = t.mean(0)  # -> (cells, F)
+            elif t.ndim == 3 and not (force_mean or return_mean):
+                # n_samples==1 case keeps (cells, F) after squeeze above,
+                # but if somehow still (1, cells, F), average it anyway
+                t = t.mean(0)
+            # ensure 2D (cells, F)
+            if t.ndim == 2:
+                arr = t.numpy()
+            else:
+                # defensive: last resort, mean again
+                arr = t.mean(0).numpy()
+            return arr.astype(np.float32, copy=False)
+
+        # write recon
+        adata.layers["recon"] = _maybe_mean_first_axis(recon_all)
+
+        # write velocities: we already split in NumPy; apply forced mean if needed
+        def _maybe_mean_np_first_axis(arr: np.ndarray | None) -> np.ndarray | None:
+            if arr is None:
+                return None
+            # arr can be (n_samples, cells, F) or (cells, F)
+            if arr.ndim == 3 and (force_mean or return_mean):
+                arr = arr.mean(axis=0)  # -> (cells, F)
+            elif arr.ndim == 3:
+                arr = arr.mean(axis=0)  # defensive
+            return arr.astype(np.float32, copy=False)
+
+        adata.layers["velocity_u"] = _maybe_mean_np_first_axis(vel_u_np)
+        adata.layers["velocity"] = _maybe_mean_np_first_axis(vel_s_np)
+
+        # write velocity_gp, z, mean, logvar to .obsm
+        Vgp = _maybe_mean_first_axis(velgp_all)
+        Z   = _maybe_mean_first_axis(z_all)
+        MU  = _maybe_mean_first_axis(mean_all)
+        LV  = _maybe_mean_first_axis(logvar_all)
+
+        if Vgp is not None:
+            adata.obsm["velocity_gp"] = Vgp
+        if Z is not None:
+            adata.obsm["z"] = Z
+        if MU is not None:
+            adata.obsm["mean"] = MU
+        if LV is not None:
+            adata.obsm["logvar"] = LV
+
+        # kinetics into layers (G each)
+        A = _maybe_mean_first_axis(alpha_all)
+        B = _maybe_mean_first_axis(beta_all)
+        G = _maybe_mean_first_axis(gamma_all)
+        if A is not None:
+            adata.layers["alpha"] = A
+        if B is not None:
+            adata.layers["beta"] = B
+        if G is not None:
+            adata.layers["gamma"] = G
+
+        # function returns nothing when saving into AnnData
+        return None
+
     @torch.inference_mode()
     def get_directional_uncertainty(
         self,
         adata,
+        use_gp_velo: bool = False,
         n_samples: int = 50,
         n_jobs: int = -1,
         show_plot: bool = True,
-        base_seed: int | None = None,  # optional reproducibility
+        base_seed: int | None = None,
     ):
-        # draw n_samples velocity fields in one call
-        _, velocity = self.get_velocity(
-            adata, n_samples=n_samples, return_mean=False, base_seed=base_seed
-        )  # (n_samples, n_cells, n_genes)
+        # draw n_samples velocity fields in one call (no averaging)
+        outs = self.get_model_outputs(
+            adata=adata,
+            n_samples=n_samples,
+            return_mean=False,               # keep each sample
+            return_negative_velo=True,
+            base_seed=base_seed,
+        )
 
+        if not use_gp_velo:
+            velocity = outs["velocity"]    # (n_samples, cells, genes) or (cells, genes) if n_samples==1
+        else:
+            velocity = outs["velocity_gp"]   # (n_samples, cells, L) or (cells, L)
+
+        # Ensure we have a sample axis for the per-cell routine
+        if velocity.ndim == 2:               # came back as (cells, F) because n_samples==1
+            velocity = velocity[None, ...]   # -> (1, cells, F)
 
         df, cosine_sims = self._compute_directional_statistics_tensor(
             tensor=velocity, n_jobs=n_jobs, n_cells=adata.n_obs
@@ -374,19 +621,15 @@ class LineageVIModel(nn.Module):
         df.index = adata.obs_names
 
         for c in df.columns:
-            print(f'Adding {c} to adata.obs')
-            adata.obs[c] = np.log10(df[c].values) 
+            print(f"Adding {c} to adata.obs")
+            adata.obs[c] = np.log10(df[c].values)
 
         if show_plot:
-            print('Plotting directional_cosine_sim_variance')
-            sc.pl.umap(
-                adata, 
-                color="directional_cosine_sim_variance",
-                vmin="p1",
-                vmax="p99",
-            )
+            print("Plotting directional_cosine_sim_variance")
+            sc.pl.umap(adata, color="directional_cosine_sim_variance", vmin="p1", vmax="p99")
 
         return df, cosine_sims
+
     
     def _compute_directional_statistics_tensor(
         self, tensor: np.ndarray, n_jobs: int, n_cells: int
@@ -455,44 +698,86 @@ class LineageVIModel(nn.Module):
     
     @torch.inference_mode()
     def compute_extrinsic_uncertainty(
-            self,
-            adata,
-            n_samples: int = 25,
-            n_jobs: int = -1,
-            show_plot: bool = True,
-            base_seed: int | None = None,   # NEW: ensures distinct ε across iterations (while reproducible)
+        self,
+        adata,
+        use_gp_velo: bool = False,
+        n_samples: int = 25,
+        n_jobs: int = -1,
+        show_plot: bool = True,
+        base_seed: int | None = None,   # ensures distinct ε across iterations (while reproducible)
     ) -> pd.DataFrame:
         import scvelo as scv
         import scanpy as sc
         from contextlib import redirect_stdout
         import io
+        import numpy as np
+        import pandas as pd
+
+        # choose the working AnnData and state space
+        if use_gp_velo:
+            # work in GP space (cells × L)
+            working_adata = self.build_gp_adata(adata, base_seed=base_seed)
+            # state used for extrapolation in this space
+            state_matrix = working_adata.layers["Ms"]               # (cells, L) == μ
+            # function to fetch the matching velocity each iteration
+            def _fetch_velocity(i_seed):
+                outs = self.get_model_outputs(
+                    adata=adata,
+                    n_samples=1,
+                    return_mean=True,
+                    return_negative_velo=True,
+                    base_seed=i_seed,
+                    save_to_adata=False,
+                )
+                return outs["velocity_gp"]  # (cells, L)
+        else:
+            # work in gene space (cells × G)
+            working_adata = adata
+            state_matrix = adata.layers["Ms"]                       # (cells, G)
+            def _fetch_velocity(i_seed):
+                outs = self.get_model_outputs(
+                    adata=adata,
+                    n_samples=1,
+                    return_mean=True,
+                    return_negative_velo=True,
+                    base_seed=i_seed,
+                    save_to_adata=False,
+                )
+                return outs["velocity"]  # (cells, G)
 
         extrapolated_cells_list = []
+
         for i in range(n_samples):
             with io.StringIO() as buf, redirect_stdout(buf):
-                vkey = f"velocities_velovi_{i}"
-                # draw a fresh sample each iteration via distinct base_seed
-                _, velocity = self.get_velocity(
-                    adata, n_samples=1, return_mean=True,
-                    base_seed=(None if base_seed is None else base_seed + i)
-                )
-                adata.layers[vkey] = velocity  # (cells, genes)
+                vkey = f"velocities_lineagevi_{i}"
+                i_seed = None if base_seed is None else base_seed + i
 
-                scv.tl.velocity_graph(adata, vkey=vkey, sqrt_transform=False, approx=True)
+                velocity = _fetch_velocity(i_seed)
+                if velocity is None or state_matrix is None:
+                    raise RuntimeError("compute_extrinsic_uncertainty: required velocity/state not available.")
+
+                # write velocity to the *correct* matrix shape for this space
+                working_adata.layers[vkey] = velocity.astype(np.float32)
+
+                # build transitions in the same space
+                scv.tl.velocity_graph(working_adata, vkey=vkey, sqrt_transform=False, approx=True)
                 T = scv.utils.get_transition_matrix(
-                    adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
+                    working_adata, vkey=vkey, self_transitions=True, use_negative_cosines=True
                 )
-                X_extrap = np.asarray(T @ adata.layers["Ms"])  # (cells, genes)
+
+                # extrapolate the corresponding state in-place
+                X_extrap = np.asarray(T @ state_matrix)  # (cells, features)
                 extrapolated_cells_list.append(X_extrap.astype(np.float32))
 
-        extrapolated_cells = np.stack(extrapolated_cells_list, axis=0)  # (n_samples, cells, genes)
+        extrapolated_cells = np.stack(extrapolated_cells_list, axis=0)  # (n_samples, cells, features)
 
+        # Directional stats over the samples axis
         df, _ = self._compute_directional_statistics_tensor(
-            tensor=extrapolated_cells, n_jobs=n_jobs, n_cells=adata.n_obs
+            tensor=extrapolated_cells, n_jobs=n_jobs, n_cells=working_adata.n_obs
         )
-        df.index = adata.obs_names
+        df.index = working_adata.obs_names
 
-        # original behavior: write log10 directly (may yield -inf if a stat==0)
+        # Log-transform into the *original* adata.obs for convenience/consistency
         for c in df.columns:
             adata.obs[c + "_extrinsic"] = np.log10(df[c].values.astype(np.float32))
 
@@ -503,6 +788,10 @@ class LineageVIModel(nn.Module):
                 vmin="p1",
                 vmax="p99",
             )
+
         return df
+
+
+
 
 

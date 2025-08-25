@@ -106,7 +106,11 @@ class LineageVITrainer:
                 x = x.to(self.device)
                 x_neigh = x_neigh.to(self.device)
 
-                recon, v_pred, v_gp, mean, logvar = self.model(x)
+                out = self.model(x)                 # <-- dict
+                recon  = out["recon"]
+                mean   = out["mean"]
+                logvar = out["logvar"]
+
                 loss_recon = self.model.reconstruction_loss(recon, x)
                 loss_kl = self.model.kl_divergence(mean, logvar)
                 loss = loss_recon + 1e-5 * loss_kl
@@ -159,11 +163,15 @@ class LineageVITrainer:
             for x, idx, x_neigh, z, z_neigh in loader:
                 x, x_neigh, z, z_neigh = [t.to(self.device) for t in (x, x_neigh, z, z_neigh)]
 
-                _, v_pred, v_gp, _, _ = self.model(x)
+                out = self.model(x)                      # <-- dict
+                v_pred = out["velocity"]                 # (B, G) spliced velocities
+                v_gp   = out["velocity_gp"]              # (B, L)
 
-                xz = torch.cat([x, z], dim=1)
+                # concatenate inputs/targets the same way as before
+                xz       = torch.cat([x, z], dim=1)
                 xz_neigh = torch.cat([x_neigh, z_neigh], dim=2)
-                v_comb = torch.cat([v_pred, v_gp], dim=1)
+                v_comb   = torch.cat([v_pred, v_gp], dim=1)
+
                 loss_vel = self.model.velocity_loss(v_comb, xz, xz_neigh)
 
                 optimizer.zero_grad()
@@ -178,50 +186,19 @@ class LineageVITrainer:
                 print(f"[Regime2] Epoch {epoch}/{epochs} - Velocity Loss: {epoch_loss:.4f}")
         return losses
 
+
     def _annotate_adata(self, loader) -> None:
-        """Write recon, velocity (u/s), and velocity_gp into AnnData."""
+        """Write recon, velocity_u (u), velocity (s), velocity_gp, z, mean, logvar, alpha/beta/gamma into AnnData."""
         self.model.eval()
-        adata = self.adata
-        n_cells = adata.n_obs
+        # Force mean if multiple samples; write directly into adata
+        self.model.get_model_outputs(
+            adata=self.adata,
+            n_samples=1,            # or >1 if you want sample-averaged annotations
+            return_mean=True,
+            return_negative_velo=True,
+            save_to_adata=True,
+        )
 
-        # layer keys live on the model
-        unspliced_key = getattr(self.model, "unspliced_key", "unspliced")
-        spliced_key = getattr(self.model, "spliced_key", "spliced")
-
-        # Infer G from the unspliced layer
-        u = adata.layers[unspliced_key]
-        G = u.shape[1]
-
-        recon_all = np.zeros((n_cells, G), dtype=np.float32)
-        vel_all = np.zeros((n_cells, 2 * G), dtype=np.float32)
-        gp_all = None
-        gp_dim = None
-
-        with torch.no_grad():
-            for x, idx, x_neigh, z, z_neigh in loader:
-                x = x.to(self.device)
-                recon_batch, vel_batch, gp_batch, _, _ = self.model(x)
-
-                recon_np = recon_batch.cpu().numpy()
-                vel_np = vel_batch.cpu().numpy()
-                gp_np = gp_batch.cpu().numpy()
-                batch_idx = idx.numpy()
-
-                recon_all[batch_idx] = recon_np
-                vel_all[batch_idx] = vel_np
-
-                if gp_dim is None:
-                    gp_dim = gp_np.shape[1]
-                    gp_all = np.zeros((n_cells, gp_dim), dtype=np.float32)
-                gp_all[batch_idx] = gp_np
-
-        vel_u = vel_all[:, :G]
-        vel_s = vel_all[:, G:]
-
-        adata.layers["recon"] = recon_all
-        adata.layers["velocity_u"] = vel_u
-        adata.layers["velocity"] = vel_s
-        adata.obsm["velocity_gp"] = gp_all
 
     @staticmethod
     def _set_seeds(seed: int):
@@ -250,13 +227,12 @@ class LineageVI(LineageVIModel):
         adata: sc.AnnData,
         n_hidden: int = 128,
         mask_key: str = "I",
-        gene_prior: bool = True,
         device: Optional[torch.device] = None,
         *,
         unspliced_key: str = "unspliced",
         spliced_key: str = "spliced",
     ):
-        super().__init__(adata, n_hidden=n_hidden, mask_key=mask_key, gene_prior=gene_prior, seed=None)
+        super().__init__(adata, n_hidden=n_hidden, mask_key=mask_key, seed=None)
         self._adata_ref = adata
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.unspliced_key = unspliced_key
@@ -319,7 +295,6 @@ if __name__ == "__main__":
         adata,
         n_hidden=128,
         mask_key="I",
-        gene_prior=True,
         unspliced_key="unspliced",
         spliced_key="spliced",
     )
