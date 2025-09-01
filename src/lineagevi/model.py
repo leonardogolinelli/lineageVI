@@ -191,7 +191,7 @@ class LineageVIModel(nn.Module):
     def _forward_velocity_decoder(self, z, x):
         velocity, velocity_gp = self.velocity_decoder(z, x)
         return velocity, velocity_gp
-
+    
     def latent_enrich(
             self,
             adata,
