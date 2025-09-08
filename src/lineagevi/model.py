@@ -83,7 +83,6 @@ class LineageVIModel(nn.Module):
             "alpha": alpha, "beta": beta, "gamma": gamma,  # (B, G) or None
         }
 
-
     def reconstruction_loss(self, recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         # recon targets u+s
         u, s = torch.split(x, x.shape[1] // 2, dim=1)
@@ -189,8 +188,8 @@ class LineageVIModel(nn.Module):
         return x_rec
 
     def _forward_velocity_decoder(self, z, x):
-        velocity, velocity_gp = self.velocity_decoder(z, x)
-        return velocity, velocity_gp
+        velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
+        return velocity, velocity_gp, alpha, beta, gamma
     
     def latent_enrich(
             self,
@@ -789,9 +788,240 @@ class LineageVIModel(nn.Module):
                 vmax="p99",
             )
 
-        return df
+        return 
+    
+    def _get_cell_type_idxs(self, adata, cell_type_key):
+        ctype_indices = {}
+        adata.obs['numerical_idx_linvi'] = np.arange(len(adata))
+        for cluster, df in adata.obs.groupby(cell_type_key, observed=True):
+            ctype_indices[cluster] = df['numerical_idx_linvi'].to_numpy()
+
+        return ctype_indices
+        
+    
+    def _get_gene_idxs(self, adata, genes):
+        return np.where(adata.var_names.isin(genes))[0]
+    
+    def _get_gp_idxs(self, adata, gp_key, gps):
+        return np.where(pd.Series(adata.uns[gp_key]).isin(gps))[0]
+    
+    @torch.inference_mode()
+    def perturb_genes(
+            self, 
+            adata, 
+            cell_type_key, 
+            cell_type_to_perturb, 
+            genes_to_perturb, 
+            perturb_value,
+            perturb_spliced = True,
+            perturb_unspliced = False,
+            perturb_both = False):
+        
+        perturbed_genes_idxs = self._get_gene_idxs(adata, genes_to_perturb)
+        cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
+        cells_to_perturb_idxs = cell_type_idxs[cell_type_to_perturb]
+
+        # allow both int and list
+        cell_idx = cells_to_perturb_idxs   # could also be 0
+        gene_idx = perturbed_genes_idxs   # could also be 0
+        spliced = perturb_spliced
+        unspliced = perturb_unspliced
+        both = perturb_both
+
+        # Always ensure we index properly
+        mu_unperturbed = adata.layers['Mu'][cell_idx, :]
+        ms_unperturbed = adata.layers['Ms'][cell_idx, :]
+
+        # Convert to 2D consistently
+        mu_unperturbed = np.atleast_2d(mu_unperturbed)
+        ms_unperturbed = np.atleast_2d(ms_unperturbed)
+
+        mu_perturbed = mu_unperturbed.copy()
+        ms_perturbed = ms_unperturbed.copy()
+
+        if unspliced:
+            mu_perturbed[:, gene_idx] = perturb_value
+        if spliced:
+            ms_perturbed[:, gene_idx] = perturb_value
+        if both:
+            mu_perturbed[:, gene_idx] = perturb_value
+            ms_perturbed[:, gene_idx] = perturb_value
+
+        # Concatenate along feature axis
+        mu_ms_unpert = np.concatenate([mu_unperturbed, ms_unperturbed], axis=1)
+        mu_ms_pert = np.concatenate([mu_perturbed, ms_perturbed], axis=1)
+
+        # Convert to torch tensors (float type for model)
+        x_unpert = torch.tensor(mu_ms_unpert, dtype=torch.float32)
+        x_pert = torch.tensor(mu_ms_pert, dtype=torch.float32)
+
+        self.first_regime = False
+        out_unpert = self.forward(x_unpert)
+        out_pert = self.forward(x_pert)
+
+        recon_unpert = out_unpert['recon']
+        mean_unpert = out_unpert['mean']
+        logvar_unpert = out_unpert['logvar']
+        gp_velo_unpert = out_unpert['velocity_gp']
+        velo_concat_unpert = out_unpert['velocity']
+        velo_u_unpert, velo_unpert = np.split(velo_concat_unpert, 2, axis=1)
+        alpha_unpert = out_unpert['alpha']
+        beta_unpert = out_unpert['beta']
+        gamma_unpert = out_unpert['gamma']
+
+        recon_pert = out_pert['recon']
+        mean_pert = out_pert['mean']
+        logvar_pert = out_pert['logvar']
+        gp_velo_pert = out_pert['velocity_gp']
+        velo_concat_pert = out_pert['velocity']
+        velo_u_pert, velo_pert = np.split(velo_concat_pert, 2, axis=1)
+        alpha_pert = out_pert['alpha']
+        beta_pert = out_pert['beta']
+        gamma_pert = out_pert['gamma']
 
 
+        if recon_unpert.shape[0] > 1:
+            to_numpy = lambda x : x.cpu().numpy()
+
+        else:
+            to_numpy = lambda x : x.cpu().numpy().reshape(x.size(1))
+
+
+        perturbed_outputs = {
+            'recon' : to_numpy(recon_pert), 
+            'mean' : to_numpy(mean_pert), 
+            'logvar' : to_numpy(logvar_pert), 
+            'velocity_gp' : to_numpy(gp_velo_pert), 
+            'velo_u_pert' : to_numpy(velo_u_pert), 
+            'velo_pert' : to_numpy(velo_pert),
+            'alpha_pert' : to_numpy(alpha_pert), 
+            'beta_pert' : to_numpy(beta_pert), 
+            'gamma_pert' : to_numpy(gamma_pert), 
+        }
+
+        recon_diff = recon_pert - recon_unpert
+        mean_diff = mean_pert - mean_unpert
+        logvar_diff = logvar_pert - logvar_unpert
+        gp_velo_diff = gp_velo_pert - gp_velo_unpert
+        velo_u_diff = velo_u_pert - velo_u_unpert
+        velo_diff = velo_pert - velo_unpert
+        alpha_diff = alpha_pert - alpha_unpert
+        beta_diff = beta_pert - beta_unpert
+        gamma_diff = gamma_pert - gamma_unpert
+
+        recon_diff = to_numpy(recon_diff).mean(0)
+        mean_diff = to_numpy(mean_diff).mean(0)
+        logvar_diff = to_numpy(logvar_diff).mean(0)
+        gp_velo_diff = to_numpy(gp_velo_diff).mean(0)
+        velo_u_diff = to_numpy(velo_u_diff).mean(0)
+        velo_diff = to_numpy(velo_diff).mean(0)
+        alpha_diff = to_numpy(alpha_diff).mean(0)
+        beta_diff = to_numpy(beta_diff).mean(0)
+        gamma_diff = to_numpy(gamma_diff).mean(0)
+
+        df_gp = pd.DataFrame({
+            'terms' : adata.uns['terms'],
+            'mean' : mean_diff,
+            'abs_mean' : abs(mean_diff),
+            'logvar' : logvar_diff,
+            'abs_logvar' : abs(logvar_diff),
+            'gp_velocity' : gp_velo_diff,
+            'abs_gp_velocity' : abs(gp_velo_diff),
+        })
+
+        df_genes = pd.DataFrame({
+            'genes' : adata.var_names,
+            'recon' : recon_diff,
+            'abs_recon' : abs(recon_diff),
+            'unspliced_velocity' : velo_u_diff,
+            'abs_unspliced_velocity' : abs(velo_u_diff),
+            'velocity' : velo_diff,
+            'abs_velocity' : abs(velo_diff),
+            'alpha' : alpha_diff,
+            'abs_alpha' : abs(alpha_diff),
+            'beta' : beta_diff,
+            'abs_beta' : abs(beta_diff),
+            'gamma' : gamma_diff,
+            'abs_gamma' : abs(gamma_diff),
+        })
+
+        return df_genes, df_gp, perturbed_outputs
+
+    @torch.inference_mode()
+    def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, cell_type_key, ctypes_to_perturb, perturb_value):
+        cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
+        cell_idx = cell_type_idxs[ctypes_to_perturb]
+
+        gp_idx = self._get_gp_idxs(adata, gp_uns_key, gps_to_perturb)
+
+        mu = adata.layers['Mu'][cell_idx, :]
+        ms = adata.layers['Ms'][cell_idx, :]
+
+        mu_ms = torch.from_numpy(np.concatenate([mu, ms], axis=1))
+
+        self.first_regime = False
+        z_unpert, _, _ = self._forward_encoder(mu_ms)
+        z_pert = z_unpert.clone()
+        z_pert[:, gp_idx] = perturb_value
+        velocity_unpert, velocity_gp_unpert, alpha_unpert, beta_unpert, gamma_unpert = self._forward_velocity_decoder(z_unpert, mu_ms)
+        velocity_pert, velocity_gp_pert, alpha_pert, beta_pert, gamma_pert = self._forward_velocity_decoder(z_pert, mu_ms)
+        x_dec_unpert = self._forward_gene_decoder(z_unpert)
+        x_dec_pert = self._forward_gene_decoder(z_pert)
+
+        to_numpy = lambda x : x.cpu().numpy()
+        
+        velo_u_pert, velo_pert = np.split(velocity_pert, 2, axis=1)
+
+        perturbed_outputs = {
+            'velocity_gp_pert' : to_numpy(velocity_gp_pert), 
+            'velo_u_pert' : to_numpy(velo_u_pert), 
+            'velo_pert' : to_numpy(velo_pert),
+            'alpha_pert' : to_numpy(alpha_pert), 
+            'beta_pert' : to_numpy(beta_pert), 
+            'gamma_pert' : to_numpy(gamma_pert), 
+            'recon' : to_numpy(x_dec_pert), 
+        }
+
+        velo_diff = to_numpy(velocity_pert - velocity_unpert)
+        velo_gp_diff = to_numpy(velocity_gp_pert - velocity_gp_unpert)
+        alpha_diff = to_numpy(alpha_pert - alpha_unpert)
+        beta_diff = to_numpy(beta_pert - beta_unpert)
+        gamma_diff = to_numpy(gamma_pert - gamma_unpert)
+        x_dec_diff = to_numpy(x_dec_pert - x_dec_unpert)
+
+        if velo_diff.shape[0] > 1:
+            velo_diff = velo_diff.mean(0)
+            velo_gp_diff = velo_gp_diff.mean(0)
+            alpha_diff = alpha_diff.mean(0)
+            beta_diff = beta_diff.mean(0)
+            gamma_diff = gamma_diff.mean(0)
+            x_dec_diff = x_dec_diff.mean(0)
+
+        velo_diff_u, velo_diff_s = np.split(velo_diff, 2)
+
+        genes_df = pd.DataFrame({
+            'genes' : adata.var_names,
+            'velo_diff_u' : velo_diff_u,
+            'abs_velo_diff_u' : np.absolute(velo_diff_u),
+            'velo_diff_s' : velo_diff_s,
+            'abs_velo_diff_s' : np.absolute(velo_diff_s),
+            'x_dec_diff' : x_dec_diff,
+            'x_dec_diff_abs' : np.absolute(x_dec_diff),
+            'alpha_diff' : alpha_diff,
+            'alpha_diff_abs' : np.absolute(alpha_diff),
+            'beta_diff' : beta_diff,
+            'beta_diff_abs' : np.absolute(beta_diff),
+            'gamma_diff' : gamma_diff,
+            'gamma_diff_abs' : np.absolute(gamma_diff),
+        })
+
+        gps_df = pd.DataFrame({
+                'gene_programs' : adata.uns['terms'],
+                'velo_gp' : velo_gp_diff,
+                'abs_velo_gp' : velo_gp_diff,
+            })
+        
+        return genes_df, gps_df, perturbed_outputs
 
 
 
