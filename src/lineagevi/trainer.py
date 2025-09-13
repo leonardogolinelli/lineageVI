@@ -13,19 +13,31 @@ from .model import LineageVIModel  # refactored impl below
 
 # -------------------- Trainer engine --------------------
 
-class LineageVITrainer:
+class _Trainer:
     def __init__(
         self,
         model: LineageVIModel,
         adata: sc.AnnData,
         device: Optional[torch.device] = None,
         verbose: int = 1,
-    ):
+        unspliced_key: str = "Mu",
+        spliced_key: str = "Ms",
+        latent_key: str = "z",
+        nn_key: str = "indices",
+
+        ):
+
         self.model = model
         self.adata = adata
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.verbose = int(verbose)
         self.model = self.model.to(self.device)
+    
+        self.unspliced_key = unspliced_key
+        self.spliced_key = spliced_key
+        self.latent_key = latent_key
+        self.nn_key = nn_key
+
 
 
     # High-level procedure
@@ -54,6 +66,11 @@ class LineageVITrainer:
             batch_size=batch_size,
             shuffle=shuffle_regime1,
             seed=seeds[1],
+            unspliced_key=self.unspliced_key,
+            spliced_key=self.spliced_key,
+            latent_key=self.latent_key,
+            nn_key=self.nn_key,
+
         )
         r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1)
         history["regime1_loss"] = r1_losses
@@ -70,6 +87,10 @@ class LineageVITrainer:
             batch_size=batch_size,
             shuffle=shuffle_regime2,
             seed=seeds[2],
+            unspliced_key=self.unspliced_key,
+            spliced_key=self.spliced_key,
+            latent_key=self.latent_key,
+            nn_key=self.nn_key
         )
 
         r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2)
@@ -197,6 +218,10 @@ class LineageVITrainer:
             return_mean=True,
             return_negative_velo=True,
             save_to_adata=True,
+            unspliced_key=self.unspliced_key,
+            spliced_key=self.spliced_key,
+            latent_key=self.latent_key,
+            nn_key=self.nn_key,
         )
 
 
@@ -213,104 +238,3 @@ class LineageVITrainer:
             torch.use_deterministic_algorithms(True)
         except Exception:
             pass
-
-# -------------------- User-facing model wrapper --------------------
-
-class LineageVI(LineageVIModel):
-    """
-    Initialize once with data + config; call .fit(...) to train.
-    Users specify unspliced_key/spliced_key ONLY here.
-    """
-
-    def __init__(
-        self,
-        adata: sc.AnnData,
-        n_hidden: int = 128,
-        mask_key: str = "I",
-        device: Optional[torch.device] = None,
-        *,
-        unspliced_key: str = "unspliced",
-        spliced_key: str = "spliced",
-    ):
-        super().__init__(adata, n_hidden=n_hidden, mask_key=mask_key, seed=None)
-        self._adata_ref = adata
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.unspliced_key = unspliced_key
-        self.spliced_key = spliced_key
-        self.to(self.device)
-
-    def fit(
-        self,
-        K: int = 10,
-        batch_size: int = 1024,
-        lr: float = 1e-3,
-        epochs1: int = 50,
-        epochs2: int = 50,
-        shuffle_regime1: bool = True,
-        shuffle_regime2: bool = False,
-        seeds: Tuple[int, int, int] = (0, 1, 2),
-        output_dir: str = "output_model",
-        verbose: int = 1,
-    ) -> Dict[str, List[float]]:
-        """
-        Two-regime training + annotation + saving. Returns dict of epoch losses.
-        """
-        engine = LineageVITrainer(self, self._adata_ref, device=self.device, verbose=verbose)
-        history = engine.fit(
-            K=K,
-            batch_size=batch_size,
-            lr=lr,
-            epochs1=epochs1,
-            epochs2=epochs2,
-            shuffle_regime1=shuffle_regime1,
-            shuffle_regime2=shuffle_regime2,
-            seeds=seeds,
-            output_dir=output_dir,
-        )
-        self._adata_ref = engine.adata
-        return history
-
-    # Convenience accessors
-    def get_latent(self) -> np.ndarray:
-        if "z" not in self._adata_ref.obsm:
-            raise RuntimeError("Latent not computed yet. Call model.fit(...) first.")
-        return self._adata_ref.obsm["z"]
-
-    def get_adata(self) -> sc.AnnData:
-        return self._adata_ref
-
-if __name__ == "__main__":
-    import datetime
-    import lineagevi as linvi
-    processed_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/inputs/anndata/processed'
-    output_base_path = '/Users/lgolinelli/git/lineageVI/notebooks/data/outputs'
-    dataset_name = 'pancreas'
-    time = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
-    output_dir_name =f'{dataset_name}_{time}'
-    output_dir_path = os.path.join(output_base_path, output_dir_name)
-    input_adata_path = os.path.join(processed_path, dataset_name+ '.h5ad')
-    adata = sc.read_h5ad(input_adata_path)
-
-    model = linvi.trainer.LineageVI(
-        adata,
-        n_hidden=128,
-        mask_key="I",
-        unspliced_key="unspliced",
-        spliced_key="spliced",
-    )
-
-    history = model.fit(
-        K=10,
-        batch_size=1024,
-        lr=1e-3,
-        epochs1=50,
-        epochs2=50,
-        shuffle_regime1=True,
-        shuffle_regime2=False,
-        seeds=(0, 1, 2),
-        output_dir=output_dir_path,
-        verbose=1,
-    )
-
-    z = model.get_latent()
-    adata_out = model.get_adata()

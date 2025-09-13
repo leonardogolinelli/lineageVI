@@ -1,5 +1,8 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from typing import Optional, Tuple
+from anndata import AnnData
 from scipy import sparse
 
 def top_gps_table(
@@ -101,13 +104,6 @@ def top_gps_table(
     # Nice index 1..N
     df.index = np.arange(1, len(df) + 1)
     return df
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import Optional, Tuple
-from anndata import AnnData
-
 
 def plot_phase_plane(
     adata: AnnData,
@@ -400,7 +396,7 @@ def plot_gp_phase_planes(
     """
 
     # --- Basic checks
-    required_layers = ["spliced", "velocity"]
+    required_layers = ["z", "velocity_gp"]
     for layer in required_layers:
         if layer not in adata_gp.layers:
             raise KeyError(f"Required layer '{layer}' missing from adata_gp.layers.")
@@ -421,8 +417,8 @@ def plot_gp_phase_planes(
     # Indices for fast slicing
     idx_map = {gp: adata_gp.var_names.get_loc(gp) for gp in set([g for p in pairs for g in p])}
 
-    S = np.asarray(adata_gp.layers["spliced"])   # (cells × programs)
-    V = np.asarray(adata_gp.layers["velocity"])  # (cells × programs)
+    S = np.asarray(adata_gp.layers["z"])   # (cells × programs)
+    V = np.asarray(adata_gp.layers["velocity_gp"])  # (cells × programs)
 
     n_pairs = len(pairs)
     ncols = max(1, int(ncols))

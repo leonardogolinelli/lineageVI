@@ -355,6 +355,11 @@ class LineageVIModel(nn.Module):
         return_negative_velo: bool = True,
         base_seed: int | None = None,
         save_to_adata: bool = False,
+        unspliced_key: str = "Mu",
+        spliced_key: str = "Ms",
+        latent_key: str = "z",
+        nn_key: str = "indices",
+        batch_size: int = 256,
     ):
         """
         Samples the model over the dataset.
@@ -386,11 +391,11 @@ class LineageVIModel(nn.Module):
             adata,
             first_regime=True,     # encoder uses Mu/Ms; we decode per-batch
             K=10,
-            unspliced_key="Mu",
-            spliced_key="Ms",
-            latent_key="z",
-            nn_key="indices",
-            batch_size=256,
+            unspliced_key=unspliced_key,
+            spliced_key=spliced_key,
+            latent_key=latent_key,
+            nn_key=nn_key,
+            batch_size=batch_size,
             shuffle=False,
             num_workers=0,
             seed=None,

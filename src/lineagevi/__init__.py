@@ -1,9 +1,6 @@
-from .model import LineageVIModel   # main nn.Module (renamed)
-from .trainer import LineageVI, LineageVITrainer
-from .dataloader import RegimeDataset, make_dataloader
-from . import plotting, utils
-__all__ = [
-    "LineageVIModel", "LineageVI", "LineageVITrainer",
-    "RegimeDataset", "make_dataloader", "plotting", "utils", "__version__"
-]
+from .api import LineageVI
+from .model import LineageVIModel
+from . import plots, utils
+
+__all__ = ["LineageVI", "LineageVIModel", "__version__", "plots", "utils"]
 __version__ = "0.1.0"
