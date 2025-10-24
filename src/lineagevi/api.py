@@ -234,3 +234,35 @@ class LineageVI:
             ctypes_to_perturb,
             perturb_value,
         )
+
+    def map_velocities(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        *,
+        direction: str = "gp_to_gene",
+        n_samples: int = 100,
+        scale: float = 10.0,
+        base_seed: Optional[int] = None,
+        save_to_adata: bool = True,
+        velocity_key: str = "mapped_velocity",
+        unspliced_key: str = "Mu",
+        spliced_key: str = "Ms",
+        latent_key: str = "z",
+        nn_key: str = "indices",
+        batch_size: int = 256,
+    ):
+        """See `LineageVIModel.map_velocities`."""
+        return self.model.map_velocities(
+            (adata or self.adata),
+            direction=direction,
+            n_samples=n_samples,
+            scale=scale,
+            base_seed=base_seed,
+            save_to_adata=save_to_adata,
+            velocity_key=velocity_key,
+            unspliced_key=unspliced_key,
+            spliced_key=spliced_key,
+            latent_key=latent_key,
+            nn_key=nn_key,
+            batch_size=batch_size,
+        )

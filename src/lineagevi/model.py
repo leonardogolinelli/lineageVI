@@ -960,5 +960,217 @@ class LineageVIModel(nn.Module):
         
         return genes_df, gps_df, perturbed_outputs
 
+    @torch.inference_mode()
+    def map_velocities(
+        self,
+        adata,
+        direction: str = "gp_to_gene",
+        n_samples: int = 100,
+        scale: float = 10.0,
+        base_seed: int | None = None,
+        save_to_adata: bool = True,
+        velocity_key: str = "mapped_velocity",
+        unspliced_key: str = "Mu",
+        spliced_key: str = "Ms",
+        latent_key: str = "z",
+        nn_key: str = "indices",
+        batch_size: int = 256,
+    ):
+        """
+        Map velocities between gene program space and gene expression space.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            The AnnData object containing the data.
+        direction : str, default "gp_to_gene"
+            Direction of mapping: "gp_to_gene" or "gene_to_gp".
+        n_samples : int, default 100
+            Number of samples for uncertainty estimation.
+        scale : float, default 10.0
+            Scaling factor for the mapped velocities.
+        base_seed : int, optional
+            Random seed for reproducibility.
+        save_to_adata : bool, default True
+            Whether to save results to adata.
+        velocity_key : str, default "mapped_velocity"
+            Key to store mapped velocities in adata.layers.
+        unspliced_key : str, default "Mu"
+            Key for unspliced counts in adata.layers.
+        spliced_key : str, default "Ms"
+            Key for spliced counts in adata.layers.
+        latent_key : str, default "z"
+            Key for latent representations in adata.obsm.
+        nn_key : str, default "indices"
+            Key for nearest neighbor indices in adata.uns.
+        batch_size : int, default 256
+            Batch size for processing.
+            
+        Returns
+        -------
+        dict or None
+            If save_to_adata=False, returns dict with mapped velocities.
+            If save_to_adata=True, returns None and saves to adata.
+        """
+        import scvelo as scv
+        import scanpy as sc
+        from contextlib import redirect_stdout
+        import io
+        
+        if direction not in ["gp_to_gene", "gene_to_gp"]:
+            raise ValueError("direction must be 'gp_to_gene' or 'gene_to_gp'")
+        
+        if direction == "gp_to_gene":
+            # Map from GP velocity to gene velocity
+            return self._map_gp_to_gene_velocity(
+                adata, n_samples, scale, base_seed, save_to_adata,
+                velocity_key, unspliced_key, spliced_key, latent_key, 
+                nn_key, batch_size
+            )
+        else:
+            # Map from gene velocity to GP velocity
+            return self._map_gene_to_gp_velocity(
+                adata, n_samples, scale, base_seed, save_to_adata,
+                velocity_key, unspliced_key, spliced_key, latent_key,
+                nn_key, batch_size
+            )
+    
+    def _map_gp_to_gene_velocity(
+        self,
+        adata,
+        n_samples: int,
+        scale: float,
+        base_seed: int | None,
+        save_to_adata: bool,
+        velocity_key: str,
+        unspliced_key: str,
+        spliced_key: str,
+        latent_key: str,
+        nn_key: str,
+        batch_size: int,
+    ):
+        """Map velocities from gene program space to gene expression space."""
+        import scvelo as scv
+        import scanpy as sc
+        from contextlib import redirect_stdout
+        import io
+        
+        # Get model outputs to create GP-space AnnData
+        outs = self._get_model_outputs(
+            adata=adata,
+            n_samples=n_samples,
+            return_mean=True,
+            return_negative_velo=True,
+            base_seed=base_seed,
+            save_to_adata=False,
+            unspliced_key=unspliced_key,
+            spliced_key=spliced_key,
+            latent_key=latent_key,
+            nn_key=nn_key,
+            batch_size=batch_size,
+        )
+        
+        # Create GP-space AnnData
+        mu = outs["mean"]  # (cells, L)
+        v_gp = outs["velocity_gp"]  # (cells, L)
+        
+        # Build GP AnnData
+        adata_gp = sc.AnnData(X=mu.astype(np.float32))
+        adata_gp.obs = adata.obs.copy()
+        
+        if "terms" in adata.uns and len(adata.uns["terms"]) == mu.shape[1]:
+            adata_gp.var_names = adata.uns["terms"]
+        else:
+            adata_gp.var_names = [f"GP_{i}" for i in range(mu.shape[1])]
+        
+        adata_gp.layers["Ms"] = mu.astype(np.float32)
+        adata_gp.layers["velocity"] = v_gp.astype(np.float32)
+        
+        # Copy UMAP if available
+        if "X_umap" in adata.obsm:
+            adata_gp.obsm["X_umap"] = adata.obsm["X_umap"].copy()
+        
+        # Compute transition matrix in GP space
+        with io.StringIO() as buf, redirect_stdout(buf):
+            scv.tl.velocity_graph(adata_gp, vkey='velocity')
+            T = scv.tl.transition_matrix(adata_gp, vkey='velocity').toarray()
+        
+        # Map back to gene expression space
+        initial_state = adata.layers[spliced_key]  # Current gene expression state
+        future_state = np.matmul(T, initial_state)  # Projected future state
+        velo_mapped = (future_state - initial_state) * scale
+        
+        if save_to_adata:
+            adata.layers[velocity_key] = velo_mapped.astype(np.float32)
+            return None
+        else:
+            return {
+                "mapped_velocity": velo_mapped.astype(np.float32),
+                "transition_matrix": T,
+                "gp_adata": adata_gp,
+            }
+    
+    def _map_gene_to_gp_velocity(
+        self,
+        adata,
+        n_samples: int,
+        scale: float,
+        base_seed: int | None,
+        save_to_adata: bool,
+        velocity_key: str,
+        unspliced_key: str,
+        spliced_key: str,
+        latent_key: str,
+        nn_key: str,
+        batch_size: int,
+    ):
+        """Map velocities from gene expression space to gene program space."""
+        import scvelo as scv
+        import scanpy as sc
+        from contextlib import redirect_stdout
+        import io
+        
+        # Get gene-level velocities from model
+        outs = self._get_model_outputs(
+            adata=adata,
+            n_samples=n_samples,
+            return_mean=True,
+            return_negative_velo=True,
+            base_seed=base_seed,
+            save_to_adata=False,
+            unspliced_key=unspliced_key,
+            spliced_key=spliced_key,
+            latent_key=latent_key,
+            nn_key=nn_key,
+            batch_size=batch_size,
+        )
+        
+        # Use gene-level velocity for transition matrix
+        gene_velocity = outs["velocity"]  # (cells, G)
+        
+        # Create temporary AnnData with gene velocities
+        adata_temp = adata.copy()
+        adata_temp.layers["velocity"] = gene_velocity.astype(np.float32)
+        
+        # Compute transition matrix in gene space
+        with io.StringIO() as buf, redirect_stdout(buf):
+            scv.tl.velocity_graph(adata_temp, vkey='velocity')
+            T = scv.tl.transition_matrix(adata_temp, vkey='velocity').toarray()
+        
+        # Map to GP space using latent representations
+        latent_state = adata.obsm[latent_key]  # Current latent state (cells, L)
+        future_latent_state = np.matmul(T, latent_state)  # Projected future latent state
+        gp_velo_mapped = (future_latent_state - latent_state) * scale
+        
+        if save_to_adata:
+            adata.obsm[velocity_key] = gp_velo_mapped.astype(np.float32)
+            return None
+        else:
+            return {
+                "mapped_velocity": gp_velo_mapped.astype(np.float32),
+                "transition_matrix": T,
+                "gene_velocity": gene_velocity,
+            }
+
 
 
