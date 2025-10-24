@@ -110,74 +110,6 @@ class LineageVIModel(nn.Module):
         cos_sim = F.cosine_similarity(diffs, velocity_pred.unsqueeze(1), dim=-1)  # (B, K)
         max_sim, _ = cos_sim.max(dim=1)                               # (B,)
         return (1.0 - max_sim).mean()
-    
-    def build_gp_adata(
-        self,
-        adata,
-        n_samples: int = 1,
-        return_negative_velo: bool = True,
-        base_seed: int | None = None,
-    ) -> sc.AnnData:
-        """
-        Return an AnnData in GP space (features = L).
-
-        - X and layers["Ms"] hold μ (encoder mean).
-        - layers["z"] holds sampled z (averaged over samples if n_samples>1).
-        - layers["logvar"] holds encoder log-variance (averaged if n_samples>1).
-        - obsm["velocity_gp"] holds GP velocity.
-        """
-        outs = self.get_model_outputs(
-            adata=adata,
-            n_samples=n_samples,
-            return_mean=True,              # recon/vel/vel_gp averaged; z/mean/logvar kept per-sample by design
-            return_negative_velo=return_negative_velo,
-            base_seed=base_seed,
-            save_to_adata=False,
-        )
-
-        mu     = np.asarray(outs["mean"])         # (cells, L) or (n_samples, cells, L)
-        v_gp   = np.asarray(outs["velocity_gp"])  # (cells, L) or (n_samples, cells, L)
-        z_arr  = np.asarray(outs["z"])            # (n_samples, cells, L) or (cells, L)
-        lv_arr = np.asarray(outs["logvar"])       # (n_samples, cells, L) or (cells, L)
-
-        # collapse any sample axis defensively to (cells, L)
-        def _to_2d(a: np.ndarray) -> np.ndarray:
-            return a.mean(axis=0) if a.ndim == 3 else a
-
-        mu     = _to_2d(mu)
-        v_gp   = _to_2d(v_gp)
-        z_arr  = _to_2d(z_arr)
-        lv_arr = _to_2d(lv_arr)
-
-        if not (mu.ndim == v_gp.ndim == z_arr.ndim == lv_arr.ndim == 2):
-            raise RuntimeError(
-                f"Expected 2D arrays after collapsing sample axis; got shapes "
-                f"mu={mu.shape}, v_gp={v_gp.shape}, z={z_arr.shape}, logvar={lv_arr.shape}"
-            )
-
-        # Build GP-space AnnData
-        adata_gp = sc.AnnData(X=mu.astype(np.float32))
-        adata_gp.obs = adata.obs.copy()
-
-        if "terms" in adata.uns and len(adata.uns["terms"]) == mu.shape[1]:
-            adata_gp.var_names = adata.uns["terms"]
-        else:
-            adata_gp.var_names = pd.Index([f"GP_{i}" for i in range(mu.shape[1])])
-
-        # Treat μ as "Ms" (state) in this space; stash extras in layers
-        adata_gp.layers["Ms"]      = mu.astype(np.float32)
-        adata_gp.layers["z"]       = z_arr.astype(np.float32)
-        adata_gp.layers["logvar"]  = lv_arr.astype(np.float32)
-
-        # Velocity in GP space goes to obsm (not required by scVelo, just convenient)
-        adata_gp.layers["velocity_gp"] = v_gp.astype(np.float32)
-
-        # Optional visuals
-        if "X_umap" in adata.obsm:
-            adata_gp.obsm["X_umap"] = adata.obsm["X_umap"].copy()
-
-        adata_gp.var_names_make_unique()
-        return adata_gp
 
     def _forward_encoder(self, x, *, generator: torch.Generator | None = None):
         z, mean, logvar = self.encoder(x, generator=generator)
@@ -347,7 +279,7 @@ class LineageVIModel(nn.Module):
             adata.uns[key_added] = scores
 
     @torch.inference_mode()
-    def get_model_outputs(
+    def _get_model_outputs(
         self,
         adata,
         n_samples: int = 1,

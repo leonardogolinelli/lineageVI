@@ -14,8 +14,8 @@ class LineageVI:
 
     - Holds the model and AnnData.
     - Provides .fit(...) to train via the internal Trainer.
-    - Transparently forwards advanced methods to the underlying LineageVIModel
-      using *args/**kwargs so signatures can evolve without breaking the API.
+    - Exposes explicit, typed wrappers for advanced model utilities so that
+      IDEs and help() show the real argument lists.
     """
 
     def __init__(
@@ -29,9 +29,10 @@ class LineageVI:
         latent_key: str = "z",
         nn_key: str = "indices",
         device: Optional[torch.device] = None,
+        seed: Optional[int] = None,
     ):
         self.adata = adata
-        self.model = LineageVIModel(adata, n_hidden=n_hidden, mask_key=mask_key)
+        self.model = LineageVIModel(adata, n_hidden=n_hidden, mask_key=mask_key, seed=seed)
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
@@ -57,6 +58,7 @@ class LineageVI:
         output_dir: Optional[str] = None,
         verbose: int = 1,
     ) -> Dict[str, List[float]]:
+        """Train the model via the internal Trainer; annotates self.adata on completion."""
         engine = _Trainer(
             self.model,
             self.adata,
@@ -78,32 +80,157 @@ class LineageVI:
             seeds=seeds,
             output_dir=(output_dir or "."),
         )
-        # keep any annotations produced during training
         self.adata = engine.adata
-        return history
+        return history    
 
-    # -------------------------
-    # Transparent forwards to the underlying model
-    # (use *args/**kwargs so the model’s signature can evolve)
-    # -------------------------
-
-    def get_model_outputs(self, *args, **kwargs):
-        return self.model.get_model_outputs(*args, **kwargs)
-
-    def build_gp_adata(self, *args, **kwargs):
-        return self.model.build_gp_adata(*args, **kwargs)
-
-    def latent_enrich(self, *args, **kwargs):
-        return self.model.latent_enrich(*args, **kwargs)
     
-    def get_directional_uncertainty(self, *args, **kwargs):
-        return self.model.get_directional_uncertainty(*args, **kwargs)
+    '''def build_gp_adata(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        *,
+        n_samples: int = 1,
+        return_negative_velo: bool = True,
+        base_seed: Optional[int] = None,
+    ) -> sc.AnnData:
+        """See `LineageVIModel.build_gp_adata`."""
+        return self.model.build_gp_adata(
+            (adata or self.adata),
+            n_samples=n_samples,
+            return_negative_velo=return_negative_velo,
+            base_seed=base_seed,
+        )'''
+    
+    def get_model_outputs(
+        self,
+        adata,
+        n_samples: int = 1,
+        return_mean: bool = True,
+        return_negative_velo: bool = True,
+        base_seed: int | None = None,
+        save_to_adata: bool = False,
+        unspliced_key: str = "Mu",
+        spliced_key: str = "Ms",
+        latent_key: str = "z",
+        nn_key: str = "indices",
+        batch_size: int = 256,
+    ):
+        return self.model._get_model_outputs(
+            adata,
+            n_samples,
+            return_mean,
+            return_negative_velo,
+            base_seed,
+            save_to_adata,
+            unspliced_key,
+            spliced_key
+        )
 
-    def compute_extrinsic_uncertainty(self, *args, **kwargs):
-        return self.model.compute_extrinsic_uncertainty(*args, **kwargs)
+    def latent_enrich(
+        self,
+        adata: Optional[sc.AnnData],
+        groups,
+        *,
+        comparison: str | list[str] = "rest",
+        n_sample: int = 5000,
+        use_directions: bool = False,
+        directions_key: str = "directions",
+        select_terms=None,
+        exact: bool = True,
+        key_added: str = "bf_scores",
+    ):
+        """See `LineageVIModel.latent_enrich`."""
+        return self.model.latent_enrich(
+            (adata or self.adata),
+            groups,
+            comparison=comparison,
+            n_sample=n_sample,
+            use_directions=use_directions,
+            directions_key=directions_key,
+            select_terms=select_terms,
+            exact=exact,
+            key_added=key_added,
+        )
 
-    def perturb_genes(self, *args, **kwargs):
-        return self.model.perturb_genes(*args, **kwargs)
+    def get_directional_uncertainty(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        *,
+        use_gp_velo: bool = False,
+        n_samples: int = 50,
+        n_jobs: int = -1,
+        show_plot: bool = True,
+        base_seed: Optional[int] = None,
+    ):
+        """See `LineageVIModel.get_directional_uncertainty`."""
+        return self.model.get_directional_uncertainty(
+            (adata or self.adata),
+            use_gp_velo=use_gp_velo,
+            n_samples=n_samples,
+            n_jobs=n_jobs,
+            show_plot=show_plot,
+            base_seed=base_seed,
+        )
 
-    def perturb_gps(self, *args, **kwargs):
-        return self.model.perturb_gps(*args, **kwargs)
+    def compute_extrinsic_uncertainty(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        *,
+        use_gp_velo: bool = False,
+        n_samples: int = 25,
+        n_jobs: int = -1,
+        show_plot: bool = True,
+        base_seed: Optional[int] = None,
+    ):
+        """See `LineageVIModel.compute_extrinsic_uncertainty`."""
+        return self.model.compute_extrinsic_uncertainty(
+            (adata or self.adata),
+            use_gp_velo=use_gp_velo,
+            n_samples=n_samples,
+            n_jobs=n_jobs,
+            show_plot=show_plot,
+            base_seed=base_seed,
+        )
+
+    def perturb_genes(
+        self,
+        adata: Optional[sc.AnnData],
+        *,
+        cell_type_key: str,
+        cell_type_to_perturb: str,
+        genes_to_perturb,
+        perturb_value: float,
+        perturb_spliced: bool = True,
+        perturb_unspliced: bool = False,
+        perturb_both: bool = False,
+    ):
+        """See `LineageVIModel.perturb_genes`."""
+        return self.model.perturb_genes(
+            (adata or self.adata),
+            cell_type_key=cell_type_key,
+            cell_type_to_perturb=cell_type_to_perturb,
+            genes_to_perturb=genes_to_perturb,
+            perturb_value=perturb_value,
+            perturb_spliced=perturb_spliced,
+            perturb_unspliced=perturb_unspliced,
+            perturb_both=perturb_both,
+        )
+
+    def perturb_gps(
+        self,
+        adata: Optional[sc.AnnData],
+        *,
+        gp_uns_key: str,
+        gps_to_perturb,
+        cell_type_key: str,
+        ctypes_to_perturb: str,
+        perturb_value: float,
+    ):
+        """See `LineageVIModel.perturb_gps`."""
+        return self.model.perturb_gps(
+            (adata or self.adata),
+            gp_uns_key,
+            gps_to_perturb,
+            cell_type_key,
+            ctypes_to_perturb,
+            perturb_value,
+        )
