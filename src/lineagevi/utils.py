@@ -121,7 +121,7 @@ def build_gp_adata(
         - layers["logvar"] holds encoder log-variance (averaged if n_samples>1).
         - obsm["velocity_gp"] holds GP velocity.
         """
-        outs = model.get_model_outputs(
+        outs = model._get_model_outputs(
             adata=adata,
             n_samples=n_samples,
             return_mean=True,              # recon/vel/vel_gp averaged; z/mean/logvar kept per-sample by design

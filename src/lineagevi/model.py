@@ -351,7 +351,10 @@ class LineageVIModel(nn.Module):
             z_s, mean_s, logvar_s = [], [], []
             alpha_s, beta_s, gamma_s = [], [], []
 
-            for _ in range(n_samples):
+            # Store mean and logvar only from first sample (they are deterministic)
+            mean_first, logvar_first = None, None
+            
+            for i in range(n_samples):
                 z, mean, logvar = self._forward_encoder(x, generator=gen)
                 recon = self._forward_gene_decoder(z)  # (B, G)
                 velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)  # (B, 2G), (B, L), (B, G)x3
@@ -361,19 +364,20 @@ class LineageVIModel(nn.Module):
                 vel_s.append(velocity.cpu())
                 velgp_s.append(velocity_gp.cpu())
                 z_s.append(z.cpu())
-                mean_s.append(mean.cpu())
-                logvar_s.append(logvar.cpu())
                 alpha_s.append(alpha.cpu())
                 beta_s.append(beta.cpu())
                 gamma_s.append(gamma.cpu())
+                
+                # Store mean and logvar only from first sample
+                if i == 0:
+                    mean_first = mean.cpu()
+                    logvar_first = logvar.cpu()
 
             # stack along sample axis
             recon_s   = torch.stack(recon_s,   dim=0)  # (n_samples, B, G)
             vel_s     = torch.stack(vel_s,     dim=0)  # (n_samples, B, 2G)
             velgp_s   = torch.stack(velgp_s,   dim=0)  # (n_samples, B, L)
             z_s       = torch.stack(z_s,       dim=0)  # (n_samples, B, L)
-            mean_s    = torch.stack(mean_s,    dim=0)  # (n_samples, B, L)
-            logvar_s  = torch.stack(logvar_s,  dim=0)  # (n_samples, B, L)
             alpha_s   = torch.stack(alpha_s,   dim=0)  # (n_samples, B, G)
             beta_s    = torch.stack(beta_s,    dim=0)  # (n_samples, B, G)
             gamma_s   = torch.stack(gamma_s,   dim=0)  # (n_samples, B, G)
@@ -383,8 +387,10 @@ class LineageVIModel(nn.Module):
             vel_b    = vel_s.mean(0)    if return_mean else vel_s
             velgp_b  = velgp_s.mean(0)  if return_mean else velgp_s
 
-            # keep per-sample tensors for z/mean/logvar/α/β/γ (downstream may want dispersion)
-            z_b, mean_b, logvar_b = z_s, mean_s, logvar_s
+            # mean and logvar are deterministic, so use single values
+            mean_b, logvar_b = mean_first, logvar_first
+            # keep per-sample tensors for z/α/β/γ (downstream may want dispersion)
+            z_b = z_s
             alpha_b, beta_b, gamma_b = alpha_s, beta_s, gamma_s
 
             if return_negative_velo:
@@ -410,11 +416,13 @@ class LineageVIModel(nn.Module):
         vel_all    = _stitch(vel_batches)      # (n_samples?, cells, 2G) or (cells, 2G)
         velgp_all  = _stitch(velgp_batches)    # (n_samples?, cells, L)  or (cells, L)
         z_all      = _stitch(z_batches)        # (n_samples, cells, L)
-        mean_all   = _stitch(mean_batches)     # (n_samples, cells, L)
-        logvar_all = _stitch(logvar_batches)   # (n_samples, cells, L)
         alpha_all  = _stitch(alpha_batches)    # (n_samples, cells, G)
         beta_all   = _stitch(beta_batches)     # (n_samples, cells, G)
         gamma_all  = _stitch(gamma_batches)    # (n_samples, cells, G)
+        
+        # mean and logvar are deterministic, so just concatenate along batch dimension
+        mean_all   = torch.cat(mean_batches, dim=0)     # (cells, L)
+        logvar_all = torch.cat(logvar_batches, dim=0)   # (cells, L)
 
         # squeeze leading n_samples dim if it's a singleton AND return_mean=False
         def _maybe_squeeze(t: torch.Tensor | None) -> torch.Tensor | None:
@@ -426,8 +434,7 @@ class LineageVIModel(nn.Module):
         vel_all    = _maybe_squeeze(vel_all)
         velgp_all  = _maybe_squeeze(velgp_all)
         z_all      = _maybe_squeeze(z_all)
-        mean_all   = _maybe_squeeze(mean_all)
-        logvar_all = _maybe_squeeze(logvar_all)
+        # mean and logvar are always 2D (cells, L), no need to squeeze
         alpha_all  = _maybe_squeeze(alpha_all)
         beta_all   = _maybe_squeeze(beta_all)
         gamma_all  = _maybe_squeeze(gamma_all)
@@ -497,8 +504,9 @@ class LineageVIModel(nn.Module):
         # write velocity_gp, z, mean, logvar to .obsm
         Vgp = _maybe_mean_first_axis(velgp_all)
         Z   = _maybe_mean_first_axis(z_all)
-        MU  = _maybe_mean_first_axis(mean_all)
-        LV  = _maybe_mean_first_axis(logvar_all)
+        # mean and logvar are always 2D (cells, L), no need for _maybe_mean_first_axis
+        MU  = mean_all.numpy().astype(np.float32)
+        LV  = logvar_all.numpy().astype(np.float32)
 
         if Vgp is not None:
             adata.obsm["velocity_gp"] = Vgp
@@ -968,8 +976,9 @@ class LineageVIModel(nn.Module):
         n_samples: int = 100,
         scale: float = 10.0,
         base_seed: int | None = None,
-        save_to_adata: bool = True,
         velocity_key: str = "mapped_velocity",
+        return_gp_adata: bool = False,
+        return_negative_velo: bool = True,
         unspliced_key: str = "Mu",
         spliced_key: str = "Ms",
         latent_key: str = "z",
@@ -991,10 +1000,12 @@ class LineageVIModel(nn.Module):
             Scaling factor for the mapped velocities.
         base_seed : int, optional
             Random seed for reproducibility.
-        save_to_adata : bool, default True
-            Whether to save results to adata.
         velocity_key : str, default "mapped_velocity"
-            Key to store mapped velocities in adata.layers.
+            Key to store mapped velocities in adata.layers (gp_to_gene) or adata.obsm (gene_to_gp).
+        return_gp_adata : bool, default False
+            Whether to return the gene program AnnData object for downstream analysis.
+        return_negative_velo : bool, default True
+            Whether to negate the velocities (multiply by -1).
         unspliced_key : str, default "Mu"
             Key for unspliced counts in adata.layers.
         spliced_key : str, default "Ms"
@@ -1008,9 +1019,9 @@ class LineageVIModel(nn.Module):
             
         Returns
         -------
-        dict or None
-            If save_to_adata=False, returns dict with mapped velocities.
-            If save_to_adata=True, returns None and saves to adata.
+        AnnData or None
+            If return_gp_adata=True, returns the gene program AnnData object.
+            Otherwise returns None. Mapped velocities are always saved to adata.
         """
         import scvelo as scv
         import scanpy as sc
@@ -1023,15 +1034,15 @@ class LineageVIModel(nn.Module):
         if direction == "gp_to_gene":
             # Map from GP velocity to gene velocity
             return self._map_gp_to_gene_velocity(
-                adata, n_samples, scale, base_seed, save_to_adata,
-                velocity_key, unspliced_key, spliced_key, latent_key, 
+                adata, n_samples, scale, base_seed,
+                velocity_key, return_gp_adata, return_negative_velo, unspliced_key, spliced_key, latent_key, 
                 nn_key, batch_size
             )
         else:
             # Map from gene velocity to GP velocity
             return self._map_gene_to_gp_velocity(
-                adata, n_samples, scale, base_seed, save_to_adata,
-                velocity_key, unspliced_key, spliced_key, latent_key,
+                adata, n_samples, scale, base_seed,
+                velocity_key, return_gp_adata, return_negative_velo, unspliced_key, spliced_key, latent_key,
                 nn_key, batch_size
             )
     
@@ -1041,8 +1052,9 @@ class LineageVIModel(nn.Module):
         n_samples: int,
         scale: float,
         base_seed: int | None,
-        save_to_adata: bool,
         velocity_key: str,
+        return_gp_adata: bool,
+        return_negative_velo: bool,
         unspliced_key: str,
         spliced_key: str,
         latent_key: str,
@@ -1051,16 +1063,15 @@ class LineageVIModel(nn.Module):
     ):
         """Map velocities from gene program space to gene expression space."""
         import scvelo as scv
-        import scanpy as sc
         from contextlib import redirect_stdout
         import io
         
-        # Get model outputs to create GP-space AnnData
+        # Get model outputs
         outs = self._get_model_outputs(
             adata=adata,
             n_samples=n_samples,
             return_mean=True,
-            return_negative_velo=True,
+            return_negative_velo=return_negative_velo,
             base_seed=base_seed,
             save_to_adata=False,
             unspliced_key=unspliced_key,
@@ -1070,7 +1081,7 @@ class LineageVIModel(nn.Module):
             batch_size=batch_size,
         )
         
-        # Create GP-space AnnData
+        # Create GP-space AnnData directly
         mu = outs["mean"]  # (cells, L)
         v_gp = outs["velocity_gp"]  # (cells, L)
         
@@ -1100,15 +1111,13 @@ class LineageVIModel(nn.Module):
         future_state = np.matmul(T, initial_state)  # Projected future state
         velo_mapped = (future_state - initial_state) * scale
         
-        if save_to_adata:
-            adata.layers[velocity_key] = velo_mapped.astype(np.float32)
-            return None
-        else:
-            return {
-                "mapped_velocity": velo_mapped.astype(np.float32),
-                "transition_matrix": T,
-                "gp_adata": adata_gp,
-            }
+        # Always write mapped velocity to AnnData
+        adata.layers[velocity_key] = velo_mapped.astype(np.float32)
+        
+        # Optionally return GP AnnData
+        if return_gp_adata:
+            return adata_gp
+        return None
     
     def _map_gene_to_gp_velocity(
         self,
@@ -1116,8 +1125,9 @@ class LineageVIModel(nn.Module):
         n_samples: int,
         scale: float,
         base_seed: int | None,
-        save_to_adata: bool,
         velocity_key: str,
+        return_gp_adata: bool,
+        return_negative_velo: bool,
         unspliced_key: str,
         spliced_key: str,
         latent_key: str,
@@ -1135,7 +1145,7 @@ class LineageVIModel(nn.Module):
             adata=adata,
             n_samples=n_samples,
             return_mean=True,
-            return_negative_velo=True,
+            return_negative_velo=return_negative_velo,
             base_seed=base_seed,
             save_to_adata=False,
             unspliced_key=unspliced_key,
@@ -1157,20 +1167,41 @@ class LineageVIModel(nn.Module):
             scv.tl.velocity_graph(adata_temp, vkey='velocity')
             T = scv.tl.transition_matrix(adata_temp, vkey='velocity').toarray()
         
-        # Map to GP space using latent representations
-        latent_state = adata.obsm[latent_key]  # Current latent state (cells, L)
+        # Map to GP space using latent representations from model outputs
+        latent_state = outs["mean"]  # Current latent state from model (cells, L)
         future_latent_state = np.matmul(T, latent_state)  # Projected future latent state
         gp_velo_mapped = (future_latent_state - latent_state) * scale
         
-        if save_to_adata:
-            adata.obsm[velocity_key] = gp_velo_mapped.astype(np.float32)
-            return None
-        else:
-            return {
-                "mapped_velocity": gp_velo_mapped.astype(np.float32),
-                "transition_matrix": T,
-                "gene_velocity": gene_velocity,
-            }
+        # Create GP AnnData if requested
+        adata_gp = None
+        if return_gp_adata:
+            # Create GP-space AnnData directly using model outputs
+            mu = outs["mean"]  # (cells, L)
+            v_gp = outs["velocity_gp"]  # (cells, L)
+            
+            # Build GP AnnData
+            adata_gp = sc.AnnData(X=mu.astype(np.float32))
+            adata_gp.obs = adata.obs.copy()
+            
+            if "terms" in adata.uns and len(adata.uns["terms"]) == mu.shape[1]:
+                adata_gp.var_names = adata.uns["terms"]
+            else:
+                adata_gp.var_names = [f"GP_{i}" for i in range(mu.shape[1])]
+            
+            adata_gp.layers["Ms"] = mu.astype(np.float32)
+            adata_gp.layers[velocity_key] = v_gp.astype(np.float32)
+            
+            # Copy UMAP if available
+            if "X_umap" in adata.obsm:
+                adata_gp.obsm["X_umap"] = adata.obsm["X_umap"].copy()
+        
+        # Always write mapped velocity to AnnData
+        adata.obsm[velocity_key] = gp_velo_mapped.astype(np.float32)
+        
+        # Optionally return GP AnnData
+        if return_gp_adata:
+            return adata_gp
+        return None
 
 
 
