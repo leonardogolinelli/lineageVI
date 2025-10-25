@@ -542,7 +542,7 @@ class LineageVIModel(nn.Module):
         base_seed: int | None = None,
     ):
         # draw n_samples velocity fields in one call (no averaging)
-        outs = self.get_model_outputs(
+        outs = self._get_model_outputs(
             adata=adata,
             n_samples=n_samples,
             return_mean=False,               # keep each sample
@@ -656,16 +656,17 @@ class LineageVIModel(nn.Module):
         import io
         import numpy as np
         import pandas as pd
+        from .utils import build_gp_adata
 
         # choose the working AnnData and state space
         if use_gp_velo:
             # work in GP space (cells × L)
-            working_adata = self.build_gp_adata(adata, base_seed=base_seed)
+            working_adata = build_gp_adata(adata, self, base_seed=base_seed)
             # state used for extrapolation in this space
             state_matrix = working_adata.layers["Ms"]               # (cells, L) == μ
             # function to fetch the matching velocity each iteration
             def _fetch_velocity(i_seed):
-                outs = self.get_model_outputs(
+                outs = self._get_model_outputs(
                     adata=adata,
                     n_samples=1,
                     return_mean=True,
@@ -679,7 +680,7 @@ class LineageVIModel(nn.Module):
             working_adata = adata
             state_matrix = adata.layers["Ms"]                       # (cells, G)
             def _fetch_velocity(i_seed):
-                outs = self.get_model_outputs(
+                outs = self._get_model_outputs(
                     adata=adata,
                     n_samples=1,
                     return_mean=True,

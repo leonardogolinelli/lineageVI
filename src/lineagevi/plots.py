@@ -127,6 +127,11 @@ def plot_phase_plane(
     legend_fontsize: int = 12,
     tick_fontsize: int = 11,
     ax: Optional[plt.Axes] = None,
+    # Configurable layer keys
+    unspliced_key: str = "Mu",
+    spliced_key: str = "Ms", 
+    velocity_u_key: str = "velocity_u",
+    velocity_s_key: str = "velocity",
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
     Plot a phase plane (spliced vs. unspliced) with RNA velocity vectors for one gene.
@@ -172,6 +177,14 @@ def plot_phase_plane(
         Font sizes for title, axes, legend, and ticks.
     ax : Optional[plt.Axes]
         If provided, plot into this axes; otherwise create a new figure/axes.
+    unspliced_key : str, default "Mu"
+        Key for unspliced expression in adata.layers.
+    spliced_key : str, default "Ms"
+        Key for spliced expression in adata.layers.
+    velocity_u_key : str, default "velocity_u"
+        Key for unspliced velocity in adata.layers.
+    velocity_s_key : str, default "velocity"
+        Key for spliced velocity in adata.layers.
 
     Returns
     -------
@@ -185,18 +198,18 @@ def plot_phase_plane(
 
     gidx = adata.var_names.get_loc(gene_name)
 
-    expr_u_layer = "Mu" if smooth_expr else "unspliced"
-    expr_s_layer = "Ms" if smooth_expr else "spliced"
+    expr_u_layer = unspliced_key if smooth_expr else "unspliced"
+    expr_s_layer = spliced_key if smooth_expr else "spliced"
 
-    for layer in (expr_u_layer, expr_s_layer, "velocity_u", "velocity"):
+    for layer in (expr_u_layer, expr_s_layer, velocity_u_key, velocity_s_key):
         if layer not in adata.layers:
             raise KeyError(f"Required layer '{layer}' is missing from adata.layers")
 
     # --- Fetch raw vectors
     u_expr = np.asarray(adata.layers[expr_u_layer][:, gidx]).ravel()
     s_expr = np.asarray(adata.layers[expr_s_layer][:, gidx]).ravel()
-    u_vel  = np.asarray(adata.layers["velocity_u"][:, gidx]).ravel()
-    s_vel  = np.asarray(adata.layers["velocity"][:, gidx]).ravel()
+    u_vel  = np.asarray(adata.layers[velocity_u_key][:, gidx]).ravel()
+    s_vel  = np.asarray(adata.layers[velocity_s_key][:, gidx]).ravel()
 
     # --- Optional filtering (before normalization)
     if filter_cells:
@@ -386,17 +399,33 @@ def plot_gp_phase_planes(
     show: bool = True,
     save: bool = False,
     save_path: Optional[str] = None,
+    # Configurable layer keys
+    latent_key: str = "z",
+    velocity_key: str = "velocity_gp",
 ):
     """
     Plot 2D phase planes for GP pairs with velocity overlays.
     Each subplot uses x = spliced[gp_x], y = spliced[gp_y], arrows = velocity components (dx, dy).
 
-    Expects in `adata_gp.layers`: "spliced", "velocity"
+    Parameters
+    ----------
+    adata_gp : AnnData
+        Gene program AnnData object with configurable layer keys.
+    program_pairs : Union[Pair, Sequence[Pair]]
+        Gene program pairs to plot.
+    cell_type_key : str, default "clusters"
+        Key for cell type coloring.
+    latent_key : str, default "z"
+        Key for latent representations in adata_gp.layers.
+    velocity_key : str, default "velocity_gp"
+        Key for velocities in adata_gp.layers.
+    Other parameters control plotting appearance and behavior.
+    
     Colors by `adata_gp.obs[cell_type_key]`, using `adata_gp.uns[f"{cell_type_key}_colors"]` if available.
     """
 
     # --- Basic checks
-    required_layers = ["z", "velocity_gp"]
+    required_layers = [latent_key, velocity_key]
     for layer in required_layers:
         if layer not in adata_gp.layers:
             raise KeyError(f"Required layer '{layer}' missing from adata_gp.layers.")
@@ -417,8 +446,8 @@ def plot_gp_phase_planes(
     # Indices for fast slicing
     idx_map = {gp: adata_gp.var_names.get_loc(gp) for gp in set([g for p in pairs for g in p])}
 
-    S = np.asarray(adata_gp.layers["z"])   # (cells × programs)
-    V = np.asarray(adata_gp.layers["velocity_gp"])  # (cells × programs)
+    S = np.asarray(adata_gp.layers[latent_key])   # (cells × programs)
+    V = np.asarray(adata_gp.layers[velocity_key])  # (cells × programs)
 
     n_pairs = len(pairs)
     ncols = max(1, int(ncols))

@@ -52,8 +52,6 @@ class LineageVI:
         lr: float = 1e-3,
         epochs1: int = 50,
         epochs2: int = 50,
-        shuffle_regime1: bool = True,
-        shuffle_regime2: bool = False,
         seeds: Tuple[int, int, int] = (0, 1, 2),
         output_dir: Optional[str] = None,
         verbose: int = 1,
@@ -75,8 +73,6 @@ class LineageVI:
             lr=lr,
             epochs1=epochs1,
             epochs2=epochs2,
-            shuffle_regime1=shuffle_regime1,
-            shuffle_regime2=shuffle_regime2,
             seeds=seeds,
             output_dir=(output_dir or "."),
         )
@@ -251,6 +247,8 @@ class LineageVI:
         latent_key: str = "z",
         nn_key: str = "indices",
         batch_size: int = 256,
+        gp_latent_key: str = "z",
+        gp_velocity_key: str = "velocity",
     ):
         """See `LineageVIModel.map_velocities`."""
         return self.model.map_velocities(

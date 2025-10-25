@@ -48,8 +48,6 @@ class _Trainer:
         lr: float,
         epochs1: int,
         epochs2: int,
-        shuffle_regime1: bool,
-        shuffle_regime2: bool,
         seeds: Tuple[int, int, int],
         output_dir: str,
     ) -> Dict[str, List[float]]:
@@ -64,7 +62,7 @@ class _Trainer:
             first_regime=True,
             K=K,
             batch_size=batch_size,
-            shuffle=shuffle_regime1,
+            shuffle=True,  # Always shuffle for better training
             seed=seeds[1],
             unspliced_key=self.unspliced_key,
             spliced_key=self.spliced_key,
@@ -85,7 +83,7 @@ class _Trainer:
             first_regime=False,
             K=K,
             batch_size=batch_size,
-            shuffle=shuffle_regime2,
+            shuffle=True,  # Always shuffle for better training
             seed=seeds[2],
             unspliced_key=self.unspliced_key,
             spliced_key=self.spliced_key,
@@ -96,13 +94,11 @@ class _Trainer:
         r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2)
         history["regime2_velocity_loss"] = r2_losses
 
-        # Annotate & save
-        self._annotate_adata(loader2)
-        self.adata.write(f"{output_dir}/adata_with_velocity.h5ad")
+        # Save model weights only (no automatic annotation)
         torch.save(self.model.state_dict(), f"{output_dir}/vae_velocity_model.pt")
         if self.verbose:
-            print(f"Saved AnnData → {output_dir}/adata_with_velocity.h5ad")
             print(f"Saved model  → {output_dir}/vae_velocity_model.pt")
+            print("Note: Call model.get_model_outputs() to annotate adata with velocities")
 
         return history
 
@@ -208,21 +204,6 @@ class _Trainer:
         return losses
 
 
-    def _annotate_adata(self, loader) -> None:
-        """Write recon, velocity_u (u), velocity (s), velocity_gp, z, mean, logvar, alpha/beta/gamma into AnnData."""
-        self.model.eval()
-        # Force mean if multiple samples; write directly into adata
-        self.model.get_model_outputs(
-            adata=self.adata,
-            n_samples=1,            # or >1 if you want sample-averaged annotations
-            return_mean=True,
-            return_negative_velo=True,
-            save_to_adata=True,
-            unspliced_key=self.unspliced_key,
-            spliced_key=self.spliced_key,
-            latent_key=self.latent_key,
-            nn_key=self.nn_key,
-        )
 
 
     @staticmethod

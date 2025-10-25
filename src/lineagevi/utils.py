@@ -113,6 +113,7 @@ def build_gp_adata(
         return_negative_velo: bool = True,
         base_seed: int | None = None,
     ) -> sc.AnnData:
+        import pandas as pd
         """
         Return an AnnData in GP space (features = L).
 
