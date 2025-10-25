@@ -113,15 +113,50 @@ def build_gp_adata(
         return_negative_velo: bool = True,
         base_seed: int | None = None,
     ) -> sc.AnnData:
+        """
+        Build an AnnData object in gene program (GP) space.
+        
+        This function creates a new AnnData object where features are gene programs
+        instead of genes, containing latent representations and velocities.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Original single-cell data in gene expression space.
+        model : LineageVI
+            Trained LineageVI model.
+        n_samples : int, default 1
+            Number of samples for uncertainty estimation.
+        return_negative_velo : bool, default True
+            Whether to negate velocities (multiply by -1).
+        base_seed : int, optional
+            Random seed for reproducibility.
+        
+        Returns
+        -------
+        AnnData
+            Gene program AnnData object with:
+            - X and layers["Ms"]: Encoder mean μ (cells, L)
+            - layers["z"]: Sampled latent representations (cells, L)
+            - layers["logvar"]: Encoder log-variance (cells, L)
+            - layers["velocity"]: Gene program velocities (cells, L)
+            - obs: Copied from original adata
+            - var_names: Gene program names from adata.uns["terms"]
+        
+        Examples
+        --------
+        >>> # Build GP AnnData with basic settings
+        >>> gp_adata = build_gp_adata(adata, model)
+        >>> 
+        >>> # Build with uncertainty estimation
+        >>> gp_adata = build_gp_adata(adata, model, n_samples=100)
+        >>> 
+        >>> # Use for downstream analysis
+        >>> sc.pp.neighbors(gp_adata)
+        >>> sc.tl.umap(gp_adata)
+        >>> sc.pl.umap(gp_adata, color="velocity")
+        """
         import pandas as pd
-        """
-        Return an AnnData in GP space (features = L).
-
-        - X and layers["Ms"] hold μ (encoder mean).
-        - layers["z"] holds sampled z (averaged over samples if n_samples>1).
-        - layers["logvar"] holds encoder log-variance (averaged if n_samples>1).
-        - obsm["velocity_gp"] holds GP velocity.
-        """
         outs = model._get_model_outputs(
             adata=adata,
             n_samples=n_samples,

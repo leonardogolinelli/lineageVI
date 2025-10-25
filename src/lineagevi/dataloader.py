@@ -6,6 +6,45 @@ import scanpy as sc
 import random
 
 class RegimeDataset(Dataset):
+    """
+    PyTorch Dataset for LineageVI two-regime training.
+    
+    This dataset handles both training regimes:
+    - **Regime 1**: Expression reconstruction using unspliced+spliced counts
+    - **Regime 2**: Velocity prediction using latent representations
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Single-cell data with required layers and nearest neighbor indices.
+    K : int
+        Number of nearest neighbors for velocity computation.
+    unspliced_key : str, default 'unspliced'
+        Key for unspliced counts in adata.layers.
+    spliced_key : str, default 'spliced'
+        Key for spliced counts in adata.layers.
+    latent_key : str, default 'z'
+        Key for latent representations in adata.obsm.
+    nn_key : str, default 'indices'
+        Key for nearest neighbor indices in adata.uns.
+    
+    Attributes
+    ----------
+    x : torch.Tensor
+        Concatenated unspliced+spliced counts (cells, 2*genes).
+    nn_indices : torch.Tensor
+        Nearest neighbor indices (cells, K).
+    latent_data : torch.Tensor or None
+        Latent representations for regime 2 (cells, L).
+    first_regime : bool
+        Whether currently in regime 1 (expression) or regime 2 (latent).
+    
+    Notes
+    -----
+    The dataset automatically switches between regimes using set_regime().
+    Latent data is loaded lazily when switching to regime 2.
+    """
+    
     def __init__(
         self,
         adata: sc.AnnData,
@@ -40,7 +79,20 @@ class RegimeDataset(Dataset):
         self.first_regime = True
 
     def set_regime(self, first: bool):
-        """Switch between expression‐based regime (first) and latent‐based (second)."""
+        """
+        Switch between expression-based regime (first) and latent-based (second).
+        
+        Parameters
+        ----------
+        first : bool
+            If True, switch to regime 1 (expression reconstruction).
+            If False, switch to regime 2 (velocity prediction).
+        
+        Notes
+        -----
+        When switching to regime 2, latent data is loaded from adata.obsm[latent_key]
+        if not already loaded.
+        """
         self.first_regime = first
         if not first and self.latent_data is None:
             z = self.adata.obsm[self.latent_key]
@@ -76,6 +128,59 @@ def make_dataloader(
     num_workers: int = 0,
     seed: int | None = None,
 ) -> DataLoader:
+    """
+    Create a PyTorch DataLoader for LineageVI training.
+    
+    This function creates a DataLoader that can handle both training regimes
+    of LineageVI with appropriate data preprocessing and batching.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Single-cell data with required layers and nearest neighbor indices.
+    first_regime : bool, default True
+        Whether to create dataset for regime 1 (expression) or regime 2 (latent).
+    K : int, default 10
+        Number of nearest neighbors for velocity computation.
+    unspliced_key : str, default 'unspliced'
+        Key for unspliced counts in adata.layers.
+    spliced_key : str, default 'spliced'
+        Key for spliced counts in adata.layers.
+    latent_key : str, default 'z'
+        Key for latent representations in adata.obsm.
+    nn_key : str, default 'indices'
+        Key for nearest neighbor indices in adata.uns.
+    batch_size : int, default 64
+        Batch size for the DataLoader.
+    shuffle : bool, default True
+        Whether to shuffle the data during training.
+    num_workers : int, default 0
+        Number of worker processes for data loading.
+    seed : int, optional
+        Random seed for reproducible shuffling.
+    
+    Returns
+    -------
+    DataLoader
+        PyTorch DataLoader configured for LineageVI training.
+    
+    Examples
+    --------
+    >>> # Create dataloader for regime 1 (expression reconstruction)
+    >>> loader1 = make_dataloader(adata, first_regime=True, batch_size=256)
+    >>> 
+    >>> # Create dataloader for regime 2 (velocity prediction)
+    >>> loader2 = make_dataloader(adata, first_regime=False, batch_size=128)
+    >>> 
+    >>> # Custom parameters
+    >>> loader = make_dataloader(
+    ...     adata, 
+    ...     first_regime=True,
+    ...     batch_size=512,
+    ...     shuffle=True,
+    ...     num_workers=4
+    ... )
+    """
     # --- DO NOT reseed global RNGs here ---
 
     ds = RegimeDataset(

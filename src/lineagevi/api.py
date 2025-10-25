@@ -10,12 +10,62 @@ from .trainer import _Trainer  # internal; do NOT export
 
 class LineageVI:
     """
-    User-facing estimator.
-
-    - Holds the model and AnnData.
-    - Provides .fit(...) to train via the internal Trainer.
-    - Exposes explicit, typed wrappers for advanced model utilities so that
-      IDEs and help() show the real argument lists.
+    LineageVI: Deep learning-based RNA velocity model with gene program inference.
+    
+    LineageVI is a variational autoencoder that learns gene programs (GPs) and 
+    predicts RNA velocity in both gene expression and gene program spaces. It 
+    uses a two-regime training approach: first reconstructing expression, then 
+    predicting velocity.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Single-cell RNA-seq data with layers for unspliced and spliced counts.
+    n_hidden : int, default 128
+        Number of hidden units in the neural network.
+    mask_key : str, default "I"
+        Key for gene program mask in adata.uns.
+    unspliced_key : str, default "unspliced"
+        Key for unspliced counts in adata.layers.
+    spliced_key : str, default "spliced"
+        Key for spliced counts in adata.layers.
+    latent_key : str, default "z"
+        Key for latent representations in adata.obsm.
+    nn_key : str, default "indices"
+        Key for nearest neighbor indices in adata.uns.
+    device : torch.device, optional
+        Device to run computations on. Defaults to CUDA if available, else CPU.
+    seed : int, optional
+        Random seed for reproducibility.
+    
+    Attributes
+    ----------
+    adata : AnnData
+        The input single-cell data.
+    model : LineageVIModel
+        The underlying neural network model.
+    device : torch.device
+        Device used for computations.
+    
+    Examples
+    --------
+    >>> import scanpy as sc
+    >>> import lineagevi as lvi
+    >>> 
+    >>> # Load data
+    >>> adata = sc.read("data.h5ad")
+    >>> 
+    >>> # Initialize model
+    >>> linvi = lvi.LineageVI(adata)
+    >>> 
+    >>> # Train model
+    >>> history = linvi.fit(epochs1=50, epochs2=50)
+    >>> 
+    >>> # Get model outputs
+    >>> linvi.get_model_outputs()
+    >>> 
+    >>> # Analyze gene programs
+    >>> linvi.latent_enrich(adata, groups="cell_type")
     """
 
     def __init__(
@@ -56,7 +106,58 @@ class LineageVI:
         output_dir: Optional[str] = None,
         verbose: int = 1,
     ) -> Dict[str, List[float]]:
-        """Train the model via the internal Trainer; annotates self.adata on completion."""
+        """
+        Train the LineageVI model using two-regime training.
+        
+        The training process consists of two regimes:
+        1. **Regime 1**: Expression reconstruction - trains encoder and gene decoder
+        2. **Regime 2**: Velocity prediction - trains velocity decoder
+        
+        Parameters
+        ----------
+        K : int, default 10
+            Number of nearest neighbors for velocity computation.
+        batch_size : int, default 1024
+            Batch size for training.
+        lr : float, default 1e-3
+            Learning rate for optimization.
+        epochs1 : int, default 50
+            Number of epochs for regime 1 (expression reconstruction).
+        epochs2 : int, default 50
+            Number of epochs for regime 2 (velocity prediction).
+        seeds : Tuple[int, int, int], default (0, 1, 2)
+            Random seeds for (model initialization, regime 1, regime 2).
+        output_dir : str, optional
+            Directory to save model weights. Defaults to current directory.
+        verbose : int, default 1
+            Verbosity level (0=silent, 1=progress, 2=detailed).
+        
+        Returns
+        -------
+        Dict[str, List[float]]
+            Training history with keys:
+            - 'regime1_loss': List of reconstruction losses for regime 1
+            - 'regime2_velocity_loss': List of velocity losses for regime 2
+        
+        Notes
+        -----
+        After training, call `get_model_outputs()` to annotate the AnnData object
+        with velocities and latent representations.
+        
+        Examples
+        --------
+        >>> # Basic training
+        >>> history = linvi.fit()
+        >>> 
+        >>> # Custom training parameters
+        >>> history = linvi.fit(
+        ...     epochs1=100, epochs2=100, 
+        ...     lr=5e-4, batch_size=512
+        ... )
+        >>> 
+        >>> # Get model outputs after training
+        >>> linvi.get_model_outputs()
+        """
         engine = _Trainer(
             self.model,
             self.adata,
@@ -110,6 +211,61 @@ class LineageVI:
         nn_key: str = "indices",
         batch_size: int = 256,
     ):
+        """
+        Get model predictions including velocities and latent representations.
+        
+        This method runs the trained model to generate predictions including
+        gene expression reconstruction, latent representations, and RNA velocities
+        in both gene expression and gene program spaces.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to process.
+        n_samples : int, default 1
+            Number of samples for uncertainty estimation.
+        return_mean : bool, default True
+            Whether to return mean predictions (averaged over samples).
+        return_negative_velo : bool, default True
+            Whether to negate velocities (multiply by -1).
+        base_seed : int, optional
+            Random seed for reproducibility.
+        save_to_adata : bool, default False
+            Whether to save outputs to the AnnData object.
+        unspliced_key : str, default "Mu"
+            Key for unspliced counts in adata.layers.
+        spliced_key : str, default "Ms"
+            Key for spliced counts in adata.layers.
+        latent_key : str, default "z"
+            Key for latent representations in adata.obsm.
+        nn_key : str, default "indices"
+            Key for nearest neighbor indices in adata.uns.
+        batch_size : int, default 256
+            Batch size for processing.
+        
+        Returns
+        -------
+        Dict[str, np.ndarray]
+            Dictionary containing model outputs:
+            - 'recon': Reconstructed gene expression
+            - 'z': Latent representations
+            - 'mean': Encoder mean
+            - 'logvar': Encoder log-variance
+            - 'velocity': Gene-level velocities
+            - 'velocity_gp': Gene program velocities
+            - 'alpha', 'beta', 'gamma': Kinetic parameters
+        
+        Examples
+        --------
+        >>> # Get basic model outputs
+        >>> outputs = linvi.get_model_outputs(adata)
+        >>> 
+        >>> # Get outputs with uncertainty estimation
+        >>> outputs = linvi.get_model_outputs(adata, n_samples=100)
+        >>> 
+        >>> # Save outputs to AnnData
+        >>> linvi.get_model_outputs(adata, save_to_adata=True)
+        """
         return self.model._get_model_outputs(
             adata,
             n_samples,
@@ -250,7 +406,72 @@ class LineageVI:
         gp_latent_key: str = "z",
         gp_velocity_key: str = "velocity",
     ):
-        """See `LineageVIModel.map_velocities`."""
+        """
+        Map velocities between gene program space and gene expression space.
+        
+        This method enables bidirectional mapping of RNA velocities:
+        - **gp_to_gene**: Maps velocities from gene program space to gene expression space
+        - **gene_to_gp**: Maps velocities from gene expression space to gene program space
+        
+        Parameters
+        ----------
+        adata : AnnData, optional
+            Single-cell data. If None, uses self.adata.
+        direction : str, default "gp_to_gene"
+            Direction of mapping: "gp_to_gene" or "gene_to_gp".
+        n_samples : int, default 100
+            Number of samples for uncertainty estimation.
+        scale : float, default 10.0
+            Scaling factor for mapped velocities.
+        base_seed : int, optional
+            Random seed for reproducibility.
+        velocity_key : str, default "mapped_velocity"
+            Key to store mapped velocities in adata.layers (gp_to_gene) or adata.obsm (gene_to_gp).
+        return_gp_adata : bool, default False
+            Whether to return the gene program AnnData object.
+        return_negative_velo : bool, default True
+            Whether to negate velocities (multiply by -1).
+        unspliced_key : str, default "Mu"
+            Key for unspliced counts in adata.layers.
+        spliced_key : str, default "Ms"
+            Key for spliced counts in adata.layers.
+        latent_key : str, default "z"
+            Key for latent representations in adata.obsm.
+        nn_key : str, default "indices"
+            Key for nearest neighbor indices in adata.uns.
+        batch_size : int, default 256
+            Batch size for processing.
+        gp_latent_key : str, default "z"
+            Key for latent representations in GP AnnData.obsm.
+        gp_velocity_key : str, default "velocity"
+            Key for velocities in GP AnnData.layers.
+        
+        Returns
+        -------
+        AnnData or None
+            If return_gp_adata=True, returns the gene program AnnData object.
+            Otherwise returns None. Mapped velocities are always saved to adata.
+        
+        Examples
+        --------
+        >>> # Map from GP to gene space
+        >>> linvi.map_velocities(adata, direction="gp_to_gene")
+        >>> 
+        >>> # Map from gene to GP space with custom parameters
+        >>> gp_adata = linvi.map_velocities(
+        ...     adata, 
+        ...     direction="gene_to_gp",
+        ...     return_gp_adata=True,
+        ...     n_samples=200
+        ... )
+        >>> 
+        >>> # Custom velocity key
+        >>> linvi.map_velocities(
+        ...     adata, 
+        ...     direction="gp_to_gene",
+        ...     velocity_key="custom_velocity"
+        ... )
+        """
         return self.model.map_velocities(
             (adata or self.adata),
             direction=direction,

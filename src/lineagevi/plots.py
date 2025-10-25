@@ -228,6 +228,19 @@ def plot_phase_plane(
 
     # --- Min-max normalize expressions safely to [0, 1]
     def safe_minmax(x: np.ndarray) -> np.ndarray:
+        """
+        Safely normalize array to [0, 1] range.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Input array to normalize.
+        
+        Returns
+        -------
+        np.ndarray
+            Normalized array in [0, 1] range, or zeros if constant.
+        """
         xmin, xmax = np.min(x), np.max(x)
         if xmax == xmin:
             # constant vector -> all zeros
@@ -239,6 +252,19 @@ def plot_phase_plane(
 
     # --- Normalize velocity components (independently) by max abs value if requested
     def safe_maxabs_norm(x: np.ndarray) -> np.ndarray:
+        """
+        Safely normalize array by maximum absolute value.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Input array to normalize.
+        
+        Returns
+        -------
+        np.ndarray
+            Array normalized by max absolute value, or unchanged if all zeros.
+        """
         m = np.max(np.abs(x))
         return x / m if m > 0 else x
 
@@ -251,6 +277,19 @@ def plot_phase_plane(
         # log1p keeps sign if we transform magnitude and reapply sign
         # (log1p on negatives is invalid). Use signed log transform.
         def signed_log1p(v: np.ndarray) -> np.ndarray:
+            """
+            Apply signed log1p transformation to preserve sign.
+            
+            Parameters
+            ----------
+            v : np.ndarray
+                Input array to transform.
+            
+            Returns
+            -------
+            np.ndarray
+                Array with signed log1p transformation applied.
+            """
             return np.sign(v) * np.log1p(np.abs(v))
         u_vel = signed_log1p(u_vel)
         s_vel = signed_log1p(s_vel)
@@ -487,10 +526,36 @@ def plot_gp_phase_planes(
 
     # --- Helpers
     def safe_minmax(x: np.ndarray) -> np.ndarray:
+        """
+        Safely normalize array to [0, 1] range.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Input array to normalize.
+        
+        Returns
+        -------
+        np.ndarray
+            Normalized array in [0, 1] range, or zeros if constant.
+        """
         xmin, xmax = np.min(x), np.max(x)
         return np.zeros_like(x) if xmax == xmin else (x - xmin) / (xmax - xmin)
 
     def signed_log1p(x: np.ndarray) -> np.ndarray:
+        """
+        Apply signed log1p transformation to preserve sign.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Input array to transform.
+        
+        Returns
+        -------
+        np.ndarray
+            Array with signed log1p transformation applied.
+        """
         return np.sign(x) * np.log1p(np.abs(x))
 
     # Precompute per-GP normalization constants for velocity if norm_velocity

@@ -29,6 +29,61 @@ def seed_everything(seed: int):
         pass
 
 class LineageVIModel(nn.Module):
+    """
+    LineageVI Neural Network Model for RNA Velocity and Gene Program Inference.
+    
+    This is the core neural network implementation of LineageVI, consisting of:
+    - **Encoder**: Maps gene expression to latent space (z, mean, logvar)
+    - **Masked Linear Decoder**: Reconstructs gene expression from latent space
+    - **Velocity Decoder**: Predicts RNA velocity in gene and latent spaces
+    
+    The model uses a two-regime training approach:
+    1. **Regime 1**: Expression reconstruction (encoder + gene decoder)
+    2. **Regime 2**: Velocity prediction (velocity decoder)
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Single-cell RNA-seq data with gene program mask in adata.varm[mask_key].
+    n_hidden : int, default 128
+        Number of hidden units in the neural network layers.
+    mask_key : str, default "I"
+        Key for gene program mask in adata.varm.
+    seed : int, optional
+        Random seed for reproducible initialization.
+    
+    Attributes
+    ----------
+    encoder : Encoder
+        Neural network encoder that maps gene expression to latent space.
+    gene_decoder : MaskedLinearDecoder
+        Decoder that reconstructs gene expression from latent space.
+    velocity_decoder : VelocityDecoder
+        Decoder that predicts RNA velocity in gene and latent spaces.
+    mask : torch.Tensor
+        Binary mask for gene programs (G, L).
+    n_genes : int
+        Number of genes in the dataset.
+    n_latent : int
+        Number of gene programs (latent dimensions).
+    n_hidden : int
+        Number of hidden units.
+    
+    Examples
+    --------
+    >>> import scanpy as sc
+    >>> import lineagevi as lvi
+    >>> 
+    >>> # Load data with gene program mask
+    >>> adata = sc.read("data.h5ad")
+    >>> 
+    >>> # Initialize model
+    >>> model = lvi.LineageVIModel(adata, n_hidden=256)
+    >>> 
+    >>> # Get model outputs
+    >>> outputs = model._get_model_outputs(adata)
+    """
+    
     def __init__(
         self,
         adata: sc.AnnData,
@@ -65,6 +120,27 @@ class LineageVIModel(nn.Module):
         self.first_regime: bool = True
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass through the LineageVI model.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, 2*n_genes) containing
+            concatenated unspliced and spliced gene expression.
+        
+        Returns
+        -------
+        Dict[str, torch.Tensor]
+            Dictionary containing model outputs:
+            - 'z': Latent representations
+            - 'mean': Encoder mean
+            - 'logvar': Encoder log-variance
+            - 'recon': Reconstructed gene expression
+            - 'velocity': Gene-level velocities (if not first regime)
+            - 'velocity_gp': Gene program velocities (if not first regime)
+            - 'alpha', 'beta', 'gamma': Kinetic parameters (if not first regime)
+        """
         z, mean, logvar = self.encoder(x)
         recon = self.gene_decoder(z)
 
@@ -84,12 +160,43 @@ class LineageVIModel(nn.Module):
         }
 
     def reconstruction_loss(self, recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute reconstruction loss for gene expression.
+        
+        Parameters
+        ----------
+        recon : torch.Tensor
+            Reconstructed gene expression of shape (batch_size, n_genes).
+        x : torch.Tensor
+            Input gene expression of shape (batch_size, 2*n_genes) containing
+            concatenated unspliced and spliced counts.
+        
+        Returns
+        -------
+        torch.Tensor
+            Mean squared error loss between reconstruction and target (u + s).
+        """
         # recon targets u+s
         u, s = torch.split(x, x.shape[1] // 2, dim=1)
         target = u + s
         return F.mse_loss(recon, target, reduction="mean")
 
     def kl_divergence(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """
+        Compute KL divergence between latent distribution and standard Gaussian.
+        
+        Parameters
+        ----------
+        mean : torch.Tensor
+            Latent mean of shape (batch_size, n_latent).
+        logvar : torch.Tensor
+            Latent log-variance of shape (batch_size, n_latent).
+        
+        Returns
+        -------
+        torch.Tensor
+            Mean KL divergence across the batch.
+        """
         # standard Gaussian prior KL
         kld_element = 1 + logvar - mean.pow(2) - logvar.exp()
         kld = -0.5 * torch.sum(kld_element, dim=1)
@@ -112,14 +219,69 @@ class LineageVIModel(nn.Module):
         return (1.0 - max_sim).mean()
 
     def _forward_encoder(self, x, *, generator: torch.Generator | None = None):
+        """
+        Forward pass through the encoder only.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input gene expression of shape (batch_size, 2*n_genes).
+        generator : torch.Generator, optional
+            Random number generator for reproducible sampling.
+        
+        Returns
+        -------
+        z : torch.Tensor
+            Sampled latent representations.
+        mean : torch.Tensor
+            Encoder mean.
+        logvar : torch.Tensor
+            Encoder log-variance.
+        """
         z, mean, logvar = self.encoder(x, generator=generator)
         return z, mean, logvar
 
     def _forward_gene_decoder(self, z):
+        """
+        Forward pass through the gene decoder only.
+        
+        Parameters
+        ----------
+        z : torch.Tensor
+            Latent representations of shape (batch_size, n_latent).
+        
+        Returns
+        -------
+        torch.Tensor
+            Reconstructed gene expression of shape (batch_size, n_genes).
+        """
         x_rec = self.gene_decoder(z)
         return x_rec
 
     def _forward_velocity_decoder(self, z, x):
+        """
+        Forward pass through the velocity decoder only.
+        
+        Parameters
+        ----------
+        z : torch.Tensor
+            Latent representations of shape (batch_size, n_latent).
+        x : torch.Tensor
+            Input gene expression of shape (batch_size, 2*n_genes).
+        
+        Returns
+        -------
+        velocity : torch.Tensor
+            Gene-level velocities of shape (batch_size, 2*n_genes).
+        velocity_gp : torch.Tensor
+            Gene program velocities of shape (batch_size, n_latent).
+        alpha : torch.Tensor
+            Transcription rate parameters of shape (batch_size, n_genes).
+        beta : torch.Tensor
+            Splicing rate parameters of shape (batch_size, n_genes).
+        gamma : torch.Tensor
+            Degradation rate parameters of shape (batch_size, n_genes).
+        """
         velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         return velocity, velocity_gp, alpha, beta, gamma
     
@@ -541,6 +703,46 @@ class LineageVIModel(nn.Module):
         show_plot: bool = True,
         base_seed: int | None = None,
     ):
+        """
+        Compute directional uncertainty in velocity predictions.
+        
+        This method quantifies the uncertainty in velocity direction by sampling
+        multiple velocity fields and computing directional statistics including
+        variance in velocity directions and cosine similarities.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to analyze.
+        use_gp_velo : bool, default False
+            Whether to use gene program velocities (True) or gene-level velocities (False).
+        n_samples : int, default 50
+            Number of velocity samples for uncertainty estimation.
+        n_jobs : int, default -1
+            Number of parallel jobs for computation (-1 uses all cores).
+        show_plot : bool, default True
+            Whether to display uncertainty plot.
+        base_seed : int, optional
+            Random seed for reproducible sampling.
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with uncertainty metrics for each cell:
+            - 'directional_variance': Variance in velocity direction
+            - 'directional_difference': Mean absolute difference in velocity direction
+            - 'directional_cosine_sim_variance': Variance in cosine similarity
+        np.ndarray
+            Cosine similarity matrix between velocity samples.
+        
+        Notes
+        -----
+        The method computes uncertainty by:
+        1. Sampling n_samples velocity fields
+        2. Computing directional statistics for each cell
+        3. Quantifying variance in velocity directions
+        4. Adding results to adata.obs with log10 transformation
+        """
         # draw n_samples velocity fields in one call (no averaging)
         outs = self._get_model_outputs(
             adata=adata,
@@ -578,6 +780,28 @@ class LineageVIModel(nn.Module):
     def _compute_directional_statistics_tensor(
         self, tensor: np.ndarray, n_jobs: int, n_cells: int
     ) -> pd.DataFrame:
+        """
+        Compute directional statistics for velocity tensor using parallel processing.
+        
+        Parameters
+        ----------
+        tensor : np.ndarray
+            Velocity tensor of shape (n_samples, n_cells, n_features).
+        n_jobs : int
+            Number of parallel jobs for computation.
+        n_cells : int
+            Number of cells to process.
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with directional statistics for each cell:
+            - 'directional_variance': Variance in velocity direction
+            - 'directional_difference': Mean absolute difference in velocity direction
+            - 'directional_cosine_sim_variance': Variance in cosine similarity
+            - 'directional_cosine_sim_difference': Mean absolute difference in cosine similarity
+            - 'directional_cosine_sim_mean': Mean cosine similarity
+        """
         df = pd.DataFrame(index=np.arange(n_cells))
         df["directional_variance"] = np.nan
         df["directional_difference"] = np.nan
@@ -630,12 +854,38 @@ class LineageVIModel(nn.Module):
         )
     
     def _centered_unit_vector(self, vector: np.ndarray) -> np.ndarray:
-        """Returns the centered unit vector of the vector."""
+        """
+        Compute centered unit vector.
+        
+        Parameters
+        ----------
+        vector : np.ndarray
+            Input vector to normalize.
+        
+        Returns
+        -------
+        np.ndarray
+            Centered unit vector (vector - mean) / ||vector - mean||.
+        """
         vector = vector - np.mean(vector)
         return vector / np.linalg.norm(vector)
 
     def _cosine_sim(self, v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
-        """Returns cosine similarity of the vectors."""
+        """
+        Compute cosine similarity between two vectors.
+        
+        Parameters
+        ----------
+        v1 : np.ndarray
+            First vector.
+        v2 : np.ndarray
+            Second vector.
+        
+        Returns
+        -------
+        np.ndarray
+            Cosine similarity between the centered unit vectors, clipped to [-1, 1].
+        """
         v1_u = self._centered_unit_vector(v1)
         v2_u = self._centered_unit_vector(v2)
         return np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)
@@ -650,6 +900,44 @@ class LineageVIModel(nn.Module):
         show_plot: bool = True,
         base_seed: int | None = None,   # ensures distinct ε across iterations (while reproducible)
     ) -> pd.DataFrame:
+        """
+        Compute extrinsic uncertainty in velocity predictions.
+        
+        This method quantifies uncertainty by measuring how much velocity predictions
+        change when the model is retrained with different random seeds, providing
+        an estimate of model stability and reliability.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to analyze.
+        use_gp_velo : bool, default False
+            Whether to use gene program velocities (True) or gene-level velocities (False).
+        n_samples : int, default 25
+            Number of model retraining samples for uncertainty estimation.
+        n_jobs : int, default -1
+            Number of parallel jobs for computation (-1 uses all cores).
+        show_plot : bool, default True
+            Whether to display uncertainty plot.
+        base_seed : int, optional
+            Base random seed for reproducible sampling.
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with extrinsic uncertainty metrics for each cell:
+            - 'extrinsic_variance': Variance across retrained models
+            - 'extrinsic_difference': Mean absolute difference across models
+            - 'extrinsic_cosine_sim_variance': Variance in cosine similarity
+            - 'extrinsic_cosine_sim_difference': Mean absolute difference in cosine similarity
+            - 'extrinsic_cosine_sim_mean': Mean cosine similarity
+        
+        Notes
+        -----
+        This method retrains the model n_samples times with different seeds and
+        compares the resulting velocity predictions to quantify model stability.
+        Results are added to adata.obs with log10 transformation.
+        """
         import scvelo as scv
         import scanpy as sc
         from contextlib import redirect_stdout
@@ -737,6 +1025,21 @@ class LineageVIModel(nn.Module):
         return 
     
     def _get_cell_type_idxs(self, adata, cell_type_key):
+        """
+        Get cell indices grouped by cell type.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data with cell type annotations.
+        cell_type_key : str
+            Key in adata.obs containing cell type information.
+        
+        Returns
+        -------
+        dict
+            Dictionary mapping cell type names to arrays of cell indices.
+        """
         ctype_indices = {}
         adata.obs['numerical_idx_linvi'] = np.arange(len(adata))
         for cluster, df in adata.obs.groupby(cell_type_key, observed=True):
@@ -746,9 +1049,41 @@ class LineageVIModel(nn.Module):
         
     
     def _get_gene_idxs(self, adata, genes):
+        """
+        Get gene indices for specified gene names.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data with gene names in adata.var_names.
+        genes : list or array-like
+            Gene names to find indices for.
+        
+        Returns
+        -------
+        np.ndarray
+            Array of gene indices where the specified genes are found.
+        """
         return np.where(adata.var_names.isin(genes))[0]
     
     def _get_gp_idxs(self, adata, gp_key, gps):
+        """
+        Get gene program indices for specified gene program names.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data with gene program information in adata.uns.
+        gp_key : str
+            Key in adata.uns containing gene program names.
+        gps : list or array-like
+            Gene program names to find indices for.
+        
+        Returns
+        -------
+        np.ndarray
+            Array of gene program indices where the specified programs are found.
+        """
         return np.where(pd.Series(adata.uns[gp_key]).isin(gps))[0]
     
     @torch.inference_mode()
@@ -762,6 +1097,45 @@ class LineageVIModel(nn.Module):
             perturb_spliced = True,
             perturb_unspliced = False,
             perturb_both = False):
+        """
+        Perturb gene expression in specific cell types and analyze velocity changes.
+        
+        This method artificially modifies gene expression levels in specified cell types
+        and genes, then analyzes how these perturbations affect velocity predictions.
+        Useful for studying the sensitivity of velocity predictions to expression changes.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to perturb.
+        cell_type_key : str
+            Key in adata.obs containing cell type information.
+        cell_type_to_perturb : str
+            Name of cell type to perturb.
+        genes_to_perturb : list
+            List of gene names to perturb.
+        perturb_value : float
+            Value to add to gene expression (can be negative for downregulation).
+        perturb_spliced : bool, default True
+            Whether to perturb spliced counts.
+        perturb_unspliced : bool, default False
+            Whether to perturb unspliced counts.
+        perturb_both : bool, default False
+            Whether to perturb both spliced and unspliced counts.
+        
+        Returns
+        -------
+        None
+            Results are stored in adata.obs and adata.obsm with 'perturbed_' prefix.
+        
+        Notes
+        -----
+        The method:
+        1. Identifies cells of the specified cell type
+        2. Perturbs expression of specified genes
+        3. Computes velocity predictions on perturbed data
+        4. Stores results for comparison with original predictions
+        """
         
         perturbed_genes_idxs = self._get_gene_idxs(adata, genes_to_perturb)
         cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
@@ -895,6 +1269,41 @@ class LineageVIModel(nn.Module):
 
     @torch.inference_mode()
     def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, cell_type_key, ctypes_to_perturb, perturb_value):
+        """
+        Perturb gene program expression in specific cell types and analyze velocity changes.
+        
+        This method artificially modifies gene program expression levels in specified cell types
+        and gene programs, then analyzes how these perturbations affect velocity predictions.
+        Useful for studying the sensitivity of velocity predictions to gene program changes.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to perturb.
+        gp_uns_key : str
+            Key in adata.uns containing gene program names.
+        gps_to_perturb : list
+            List of gene program names to perturb.
+        cell_type_key : str
+            Key in adata.obs containing cell type information.
+        ctypes_to_perturb : str
+            Name of cell type to perturb.
+        perturb_value : float
+            Value to add to gene program expression (can be negative for downregulation).
+        
+        Returns
+        -------
+        None
+            Results are stored in adata.obs and adata.obsm with 'perturbed_' prefix.
+        
+        Notes
+        -----
+        The method:
+        1. Identifies cells of the specified cell type
+        2. Perturbs expression of specified gene programs
+        3. Computes velocity predictions on perturbed data
+        4. Stores results for comparison with original predictions
+        """
         cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
         cell_idx = cell_type_idxs[ctypes_to_perturb]
 

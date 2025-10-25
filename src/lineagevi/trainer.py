@@ -14,6 +14,52 @@ from .model import LineageVIModel  # refactored impl below
 # -------------------- Trainer engine --------------------
 
 class _Trainer:
+    """
+    Internal trainer for LineageVI model using two-regime training.
+    
+    This class handles the two-regime training process:
+    1. **Regime 1**: Expression reconstruction - trains encoder and gene decoder
+    2. **Regime 2**: Velocity prediction - trains velocity decoder
+    
+    The trainer uses different data loaders and loss functions for each regime
+    to optimize the model components in the correct order.
+    
+    Parameters
+    ----------
+    model : LineageVIModel
+        The LineageVI neural network model to train.
+    adata : AnnData
+        Single-cell data for training.
+    device : torch.device, optional
+        Device to run training on. Defaults to CUDA if available.
+    verbose : int, default 1
+        Verbosity level for training progress.
+    unspliced_key : str, default "Mu"
+        Key for unspliced counts in adata.layers.
+    spliced_key : str, default "Ms"
+        Key for spliced counts in adata.layers.
+    latent_key : str, default "z"
+        Key for latent representations in adata.obsm.
+    nn_key : str, default "indices"
+        Key for nearest neighbor indices in adata.uns.
+    
+    Attributes
+    ----------
+    model : LineageVIModel
+        The neural network model being trained.
+    adata : AnnData
+        Training data.
+    device : torch.device
+        Device used for computations.
+    verbose : int
+        Verbosity level.
+    
+    Notes
+    -----
+    This is an internal class used by the LineageVI API. Users should not
+    instantiate this class directly.
+    """
+    
     def __init__(
         self,
         model: LineageVIModel,
@@ -51,6 +97,42 @@ class _Trainer:
         seeds: Tuple[int, int, int],
         output_dir: str,
     ) -> Dict[str, List[float]]:
+        """
+        Train the LineageVI model using two-regime training.
+        
+        This method implements the two-regime training strategy:
+        1. **Regime 1**: Expression reconstruction - trains encoder and gene decoder
+        2. **Regime 2**: Velocity prediction - trains velocity decoder
+        
+        Parameters
+        ----------
+        K : int
+            Number of nearest neighbors for velocity computation.
+        batch_size : int
+            Batch size for training.
+        lr : float
+            Learning rate for optimization.
+        epochs1 : int
+            Number of epochs for regime 1 (expression reconstruction).
+        epochs2 : int
+            Number of epochs for regime 2 (velocity prediction).
+        seeds : Tuple[int, int, int]
+            Random seeds for (model initialization, regime 1, regime 2).
+        output_dir : str
+            Directory to save model weights.
+        
+        Returns
+        -------
+        Dict[str, List[float]]
+            Training history with keys:
+            - 'regime1_loss': List of reconstruction losses for regime 1
+            - 'regime2_velocity_loss': List of velocity losses for regime 2
+        
+        Notes
+        -----
+        The model weights are saved to {output_dir}/vae_velocity_model.pt.
+        After training, call model.get_model_outputs() to annotate adata with velocities.
+        """
         os.makedirs(output_dir, exist_ok=True)
         self._set_seeds(seeds[0])
 
