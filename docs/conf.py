@@ -37,7 +37,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.autosummary',
     'sphinx_autodoc_typehints',
-    'jupyter_sphinx',  # Support for Jupyter notebooks with execution
+    'nbsphinx',  # Support for Jupyter notebooks with execution
 ]
 
 # Add any paths that contain templates here, relative to this directory.

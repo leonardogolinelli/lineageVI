@@ -8,11 +8,13 @@ This section contains detailed tutorials for using LineageVI.
 
    preprocessing
    basic_usage
-   gene_programs
-   velocity_analysis
-   uncertainty_analysis
-   perturbation_studies
-   visualization
+   notebooks/1-preprocessing_notebook_v2
+   notebooks/2-training_notebook
+   notebooks/3-velocity_umaps_notebook
+   notebooks/4-uncertainty_notebook
+   notebooks/5-plotting_notebook
+   notebooks/6-perturbation_notebook
+   notebooks/7-map_velocity_notebook
 
 Basic Tutorials
 ---------------
@@ -23,23 +25,29 @@ Basic Tutorials
 :doc:`basic_usage`
    Learn the fundamentals of LineageVI with a simple example.
 
-:doc:`gene_programs`
-   Understand how LineageVI learns and interprets gene programs.
+:doc:`../../notebooks/1-preprocessing_notebook_v2`
+   Complete preprocessing workflow with executed outputs.
+
+:doc:`../../notebooks/2-training_notebook`
+   Model training and optimization techniques.
 
 Advanced Topics
 ---------------
 
-:doc:`velocity_analysis`
-   Deep dive into velocity prediction and analysis.
+:doc:`../../notebooks/3-velocity_umaps_notebook`
+   Velocity analysis and UMAP visualization.
 
-:doc:`uncertainty_analysis`
-   Learn about uncertainty quantification in velocity predictions.
+:doc:`../../notebooks/4-uncertainty_notebook`
+   Uncertainty quantification in velocity predictions.
 
-:doc:`perturbation_studies`
+:doc:`../../notebooks/5-plotting_notebook`
+   Create publication-ready plots and visualizations.
+
+:doc:`../../notebooks/6-perturbation_notebook`
    Study the sensitivity of velocity predictions to expression changes.
 
-:doc:`visualization`
-   Create publication-ready plots and visualizations.
+:doc:`../../notebooks/7-map_velocity_notebook`
+   Map velocities between gene and gene program spaces.
 
 Prerequisites
 -------------
