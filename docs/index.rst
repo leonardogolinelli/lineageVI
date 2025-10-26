@@ -8,7 +8,7 @@ LineageVI is a deep learning-based RNA velocity model that learns gene programs 
    :caption: Contents:
 
    installation
-   tutorials/index
+   notebooks/Tutorial
    api/index
 
 Features

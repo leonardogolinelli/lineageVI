@@ -115,7 +115,7 @@ Next Steps
 
 Now that you have the basics, explore:
 
-* :doc:`tutorials/index` - Detailed tutorials
+* :doc:`notebooks/Tutorial` - Comprehensive tutorial
 * :doc:`api/index` - Complete API reference
 * :doc:`examples/index` - More examples
 
