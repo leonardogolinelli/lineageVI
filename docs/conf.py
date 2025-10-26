@@ -59,6 +59,15 @@ html_theme = 'sphinx_rtd_theme'
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
 
+# Syntax highlighting style (similar to VS Code)
+pygments_style = 'default'
+pygments_dark_style = 'monokai'
+
+# Custom CSS
+html_css_files = [
+    'custom.css',
+]
+
 # -- Extension configuration -------------------------------------------------
 
 # Napoleon settings
@@ -155,9 +164,3 @@ texinfo_documents = [
      'Miscellaneous'),
 ]
 
-# -- nbsphinx Configuration ------------------------------------------------
-
-# nbsphinx configuration for executing notebooks and showing outputs
-nbsphinx_execute = 'auto'  # Execute notebooks automatically
-nbsphinx_allow_errors = True  # Don't fail on execution errors
-nbsphinx_timeout = 60  # Timeout in seconds
