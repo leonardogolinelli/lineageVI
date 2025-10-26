@@ -7,8 +7,7 @@ myst-parser>=0.15.0
 nbsphinx>=0.8.0
 sphinx-gallery>=0.8.0
 
-# For building PDFs
-sphinx-latex>=0.0.1
+# For building PDFs (using built-in LaTeX support)
 
 # For better code highlighting
 pygments>=2.8.0
