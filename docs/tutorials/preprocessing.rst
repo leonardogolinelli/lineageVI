@@ -6,8 +6,7 @@ This tutorial demonstrates how to preprocess single-cell RNA sequencing data for
 .. note::
    This tutorial uses the preprocessing notebook v2, which contains the most up-to-date preprocessing workflow.
 
-.. literalinclude:: ../../notebooks/1-preprocessing_notebook_v2.ipynb
-   :language: json
+.. include:: ../../notebooks/1-preprocessing_notebook_v2.ipynb
 
 Additional Resources
 --------------------
