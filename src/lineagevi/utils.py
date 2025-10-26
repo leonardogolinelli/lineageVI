@@ -108,29 +108,19 @@ def load_model(
 
 def build_gp_adata(
         adata,
-        model: LineageVI,
-        n_samples: int = 1,
-        return_negative_velo: bool = True,
-        base_seed: int | None = None,
     ) -> sc.AnnData:
         """
-        Build an AnnData object in gene program (GP) space.
+        Build an AnnData object in gene program (GP) space using pre-computed results.
         
         This function creates a new AnnData object where features are gene programs
-        instead of genes, containing latent representations and velocities.
+        instead of genes, containing latent representations and velocities from
+        pre-computed model outputs stored in the AnnData object.
         
         Parameters
         ----------
         adata : AnnData
-            Original single-cell data in gene expression space.
-        model : LineageVI
-            Trained LineageVI model.
-        n_samples : int, default 1
-            Number of samples for uncertainty estimation.
-        return_negative_velo : bool, default True
-            Whether to negate velocities (multiply by -1).
-        base_seed : int, optional
-            Random seed for reproducibility.
+            Single-cell data with pre-computed model outputs stored in adata.obsm.
+            Requires that get_model_outputs() has been called with save_to_adata=True.
         
         Returns
         -------
@@ -145,11 +135,11 @@ def build_gp_adata(
         
         Examples
         --------
-        >>> # Build GP AnnData with basic settings
-        >>> gp_adata = build_gp_adata(adata, model)
+        >>> # First, get model outputs and save to AnnData
+        >>> model.get_model_outputs(adata, save_to_adata=True)
         >>> 
-        >>> # Build with uncertainty estimation
-        >>> gp_adata = build_gp_adata(adata, model, n_samples=100)
+        >>> # Build GP AnnData from pre-computed results
+        >>> gp_adata = build_gp_adata(adata)
         >>> 
         >>> # Use for downstream analysis
         >>> sc.pp.neighbors(gp_adata)
@@ -157,34 +147,21 @@ def build_gp_adata(
         >>> sc.pl.umap(gp_adata, color="velocity")
         """
         import pandas as pd
-        outs = model.get_model_outputs(
-            adata=adata,
-            n_samples=n_samples,
-            return_mean=True,              # recon/vel/vel_gp averaged; z/mean/logvar kept per-sample by design
-            return_negative_velo=return_negative_velo,
-            base_seed=base_seed,
-            save_to_adata=False,
-        )
-
-        mu     = np.asarray(outs["mean"])         # (cells, L) or (n_samples, cells, L)
-        v_gp   = np.asarray(outs["velocity_gp"])  # (cells, L) or (n_samples, cells, L)
-        z_arr  = np.asarray(outs["z"])            # (n_samples, cells, L) or (cells, L)
-        lv_arr = np.asarray(outs["logvar"])       # (n_samples, cells, L) or (cells, L)
-
-        # collapse any sample axis defensively to (cells, L)
-        def _to_2d(a: np.ndarray) -> np.ndarray:
-            return a.mean(axis=0) if a.ndim == 3 else a
-
-        mu     = _to_2d(mu)
-        v_gp   = _to_2d(v_gp)
-        z_arr  = _to_2d(z_arr)
-        lv_arr = _to_2d(lv_arr)
-
-        if not (mu.ndim == v_gp.ndim == z_arr.ndim == lv_arr.ndim == 2):
-            raise RuntimeError(
-                f"Expected 2D arrays after collapsing sample axis; got shapes "
-                f"mu={mu.shape}, v_gp={v_gp.shape}, z={z_arr.shape}, logvar={lv_arr.shape}"
+        
+        # Check for required pre-computed results
+        required_keys = ["mean", "velocity_gp", "z", "logvar"]
+        missing_keys = [key for key in required_keys if key not in adata.obsm]
+        if missing_keys:
+            raise ValueError(
+                f"Missing required keys in adata.obsm: {missing_keys}. "
+                f"Please run get_model_outputs(adata, save_to_adata=True) first."
             )
+        
+        # Get pre-computed results from AnnData
+        mu     = np.asarray(adata.obsm["mean"])         # (cells, L)
+        v_gp   = np.asarray(adata.obsm["velocity_gp"])  # (cells, L)
+        z_arr  = np.asarray(adata.obsm["z"])            # (cells, L)
+        lv_arr = np.asarray(adata.obsm["logvar"])       # (cells, L)
 
         # Build GP-space AnnData
         adata_gp = sc.AnnData(X=mu.astype(np.float32))

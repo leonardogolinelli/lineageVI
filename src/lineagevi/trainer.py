@@ -96,6 +96,8 @@ class _Trainer:
         epochs2: int,
         seeds: Tuple[int, int, int],
         output_dir: str,
+        monitor_genes: Optional[List[str]] = None,
+        monitor_negative_velo: bool = True,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -120,6 +122,10 @@ class _Trainer:
             Random seeds for (model initialization, regime 1, regime 2).
         output_dir : str
             Directory to save model weights.
+        monitor_genes : List[str], optional
+            List of gene names to monitor during training. Phase plane plots will be
+            generated for these genes at each epoch during regime 2 and saved to
+            output_dir/training_plots/ with filenames like {gene_name}_epoch_{epoch:03d}.png.
         
         Returns
         -------
@@ -173,7 +179,7 @@ class _Trainer:
             nn_key=self.nn_key
         )
 
-        r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2)
+        r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo)
         history["regime2_velocity_loss"] = r2_losses
 
         # Save model weights only (no automatic annotation)
@@ -244,7 +250,7 @@ class _Trainer:
         z_all[idx_all] = z_concat
         return z_all.numpy()
 
-    def _train_regime2(self, loader, lr: float, epochs: int) -> List[float]:
+    def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True) -> List[float]:
         # Freeze encoder & gene_decoder; unfreeze velocity_decoder
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
@@ -283,7 +289,93 @@ class _Trainer:
             losses.append(float(epoch_loss))
             if self.verbose:
                 print(f"[Regime2] Epoch {epoch}/{epochs} - Velocity Loss: {epoch_loss:.4f}")
+            
+            # Generate monitoring plots if requested (only during regime 2)
+            if monitor_genes is not None and len(monitor_genes) > 0:
+                self._generate_monitoring_plots(epoch, monitor_genes, output_dir, monitor_negative_velo)
         return losses
+
+    def _generate_monitoring_plots(self, epoch: int, monitor_genes: List[str], output_dir: str, monitor_negative_velo: bool = True):
+        """
+        Generate phase plane plots for monitoring genes during regime 2 training.
+        
+        Parameters
+        ----------
+        epoch : int
+            Current regime 2 epoch number.
+        monitor_genes : List[str]
+            List of gene names to plot.
+        output_dir : str
+            Output directory for saving plots.
+        monitor_negative_velo : bool, default True
+            Whether to use negative velocities in monitoring plots. If True, shows negative
+            velocities (matches scVelo convention). If False, shows positive velocities.
+        """
+        import os
+        import matplotlib.pyplot as plt
+        from .plots import plot_phase_plane
+        
+        # Create training plots directory
+        plots_dir = os.path.join(output_dir, "training_plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Get current model outputs for plotting
+        with torch.no_grad():
+            # Create a temporary adata with current velocities
+            temp_adata = self.adata.copy()
+            
+            # Get model outputs for all cells
+            outputs = self.model._get_model_outputs(
+                temp_adata,
+                n_samples=1,
+                return_mean=True,
+                return_negative_velo=monitor_negative_velo,
+                save_to_adata=False,
+                unspliced_key=self.unspliced_key,
+                spliced_key=self.spliced_key,
+                latent_key=self.latent_key,
+                nn_key=self.nn_key,
+                batch_size=256,
+            )
+            
+            # Add velocities to temporary adata
+            temp_adata.layers["velocity_u"] = outputs["velocity_u"]
+            temp_adata.layers["velocity"] = outputs["velocity"]
+        
+        # Generate plots for each monitoring gene
+        for gene_name in monitor_genes:
+            if gene_name not in temp_adata.var_names:
+                if self.verbose:
+                    print(f"Warning: Gene '{gene_name}' not found in adata.var_names, skipping...")
+                continue
+            
+            try:
+                # Generate phase plane plot
+                fig, ax = plot_phase_plane(
+                    temp_adata,
+                    gene_name,
+                    u_scale=0.1,
+                    s_scale=0.1,
+                    alpha=1,
+                    head_width=0.02,
+                    head_length=0.03,
+                    length_includes_head=False,
+                    show_plot=False,  # Don't display, just save
+                    save_plot=True,
+                    save_path=os.path.join(plots_dir, f"{gene_name}_epoch_{epoch:03d}.png"),
+                    unspliced_key=self.unspliced_key,
+                    spliced_key=self.spliced_key,
+                    velocity_u_key="velocity_u",
+                    velocity_s_key="velocity",
+                )
+                plt.close(fig)  # Close to free memory
+                
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Failed to generate plot for gene '{gene_name}' at epoch {epoch}: {e}")
+        
+        if self.verbose and epoch % 10 == 0:  # Print every 10 epochs to avoid spam
+            print(f"Generated monitoring plots for epoch {epoch} → {plots_dir}")
 
 
 

@@ -7,7 +7,7 @@ from scipy import sparse
 
 def top_features_table(
     adata,
-    celltype_key: str,
+    groupby_key: str,
     categories="all",
     layer: str | None = None,
     n: int | None = 10,
@@ -21,11 +21,11 @@ def top_features_table(
     adata : AnnData
         AnnData where rows (obs) are cells and columns (var) are features (genes or gene programs).
         Feature activations/expressions are in .X or in a specified .layers[layer].
-    celltype_key : str
-        Key in adata.obs with the categorical variable to filter on (e.g., 'cell_type').
+    groupby_key : str
+        Key in adata.obs with the categorical variable to group by (e.g., 'cell_type', 'cluster', 'condition').
     categories : list[str] | str, default "all"
-        Which categories (levels of `celltype_key`) to include in the per-category stats.
-        If "all", include all categories present in adata.obs[celltype_key].
+        Which categories (levels of `groupby_key`) to include in the per-category stats.
+        If "all", include all categories present in adata.obs[groupby_key].
         If a single string (not "all"), it's treated as a single category.
     layer : str | None, default None
         Use adata.layers[layer] instead of adata.X if provided.
@@ -43,11 +43,11 @@ def top_features_table(
         - 'n_cells' : number of cells used in the overall mean/statistic
     """
     # Validate obs key
-    if celltype_key not in adata.obs:
-        raise KeyError(f"'{celltype_key}' not found in adata.obs")
+    if groupby_key not in adata.obs:
+        raise KeyError(f"'{groupby_key}' not found in adata.obs")
 
     # Resolve which categories to include in per-category stats
-    obs_vals_all = adata.obs[celltype_key]
+    obs_vals_all = adata.obs[groupby_key]
     if isinstance(categories, str) and categories != "all":
         categories = [categories]
 
@@ -60,7 +60,7 @@ def top_features_table(
 
     if not np.any(overall_mask):
         raise ValueError(
-            f"No cells match {celltype_key} in {include_cats!r}."
+            f"No cells match {groupby_key} in {include_cats!r}."
         )
 
     # Get data matrix

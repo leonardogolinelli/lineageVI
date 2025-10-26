@@ -1,6 +1,3 @@
-LineageVI Model
-===============
-
 .. automodule:: lineagevi.model
    :members:
    :undoc-members:

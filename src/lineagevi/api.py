@@ -105,6 +105,8 @@ class LineageVI:
         seeds: Tuple[int, int, int] = (0, 1, 2),
         output_dir: Optional[str] = None,
         verbose: int = 1,
+        monitor_genes: Optional[List[str]] = None,
+        monitor_negative_velo: bool = True,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -131,6 +133,13 @@ class LineageVI:
             Directory to save model weights. Defaults to current directory.
         verbose : int, default 1
             Verbosity level (0=silent, 1=progress, 2=detailed).
+        monitor_genes : List[str], optional
+            List of gene names to monitor during training. Phase plane plots will be
+            generated for these genes at each epoch during regime 2 (velocity prediction)
+            and saved to output_dir/training_plots/ with filenames like {gene_name}_epoch_{epoch:03d}.png.
+        monitor_negative_velo : bool, default True
+            Whether to use negative velocities in monitoring plots. If True, shows negative
+            velocities (matches scVelo convention). If False, shows positive velocities.
         
         Returns
         -------
@@ -155,6 +164,13 @@ class LineageVI:
         ...     lr=5e-4, batch_size=512
         ... )
         >>> 
+        >>> # Training with monitoring
+        >>> history = linvi.fit(
+        ...     epochs1=50, epochs2=50,
+        ...     monitor_genes=['Gnas', 'Ins1', 'Pdx1'],
+        ...     output_dir='./results'
+        ... )
+        >>> 
         >>> # Get model outputs after training
         >>> linvi.get_model_outputs()
         """
@@ -176,6 +192,8 @@ class LineageVI:
             epochs2=epochs2,
             seeds=seeds,
             output_dir=(output_dir or "."),
+            monitor_genes=monitor_genes,
+            monitor_negative_velo=monitor_negative_velo,
         )
         self.adata = engine.adata
         return history    
@@ -347,8 +365,8 @@ class LineageVI:
         self,
         adata: Optional[sc.AnnData],
         *,
-        cell_type_key: str,
-        cell_type_to_perturb: str,
+        groupby_key: str,
+        group_to_perturb: str,
         genes_to_perturb,
         perturb_value: float,
         perturb_spliced: bool = True,
@@ -358,8 +376,8 @@ class LineageVI:
         """See `LineageVIModel.perturb_genes`."""
         return self.model.perturb_genes(
             (adata or self.adata),
-            cell_type_key=cell_type_key,
-            cell_type_to_perturb=cell_type_to_perturb,
+            groupby_key=groupby_key,
+            group_to_perturb=group_to_perturb,
             genes_to_perturb=genes_to_perturb,
             perturb_value=perturb_value,
             perturb_spliced=perturb_spliced,
@@ -373,8 +391,8 @@ class LineageVI:
         *,
         gp_uns_key: str,
         gps_to_perturb,
-        cell_type_key: str,
-        ctypes_to_perturb: str,
+        groupby_key: str,
+        group_to_perturb: str,
         perturb_value: float,
     ):
         """See `LineageVIModel.perturb_gps`."""
@@ -382,8 +400,8 @@ class LineageVI:
             (adata or self.adata),
             gp_uns_key,
             gps_to_perturb,
-            cell_type_key,
-            ctypes_to_perturb,
+            groupby_key,
+            group_to_perturb,
             perturb_value,
         )
 

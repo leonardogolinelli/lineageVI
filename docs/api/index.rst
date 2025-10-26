@@ -1,5 +1,5 @@
-API Reference
-=============
+API
+===
 
 This section contains the complete API reference for LineageVI.
 

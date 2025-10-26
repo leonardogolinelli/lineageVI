@@ -990,7 +990,18 @@ class LineageVIModel(nn.Module):
         # choose the working AnnData and state space
         if use_gp_velo:
             # work in GP space (cells × L)
-            working_adata = build_gp_adata(adata, self, base_seed=base_seed)
+            # First ensure we have model outputs in adata
+            if "mean" not in adata.obsm or "velocity_gp" not in adata.obsm:
+                # Get model outputs and save to adata
+                self._get_model_outputs(
+                    adata=adata,
+                    n_samples=1,
+                    return_mean=True,
+                    return_negative_velo=True,
+                    base_seed=base_seed,
+                    save_to_adata=True,
+                )
+            working_adata = build_gp_adata(adata)
             # state used for extrapolation in this space
             state_matrix = working_adata.layers["Ms"]               # (cells, L) == μ
             # function to fetch the matching velocity each iteration
@@ -1065,28 +1076,28 @@ class LineageVIModel(nn.Module):
 
         return 
     
-    def _get_cell_type_idxs(self, adata, cell_type_key):
+    def _get_group_idxs(self, adata, groupby_key):
         """
-        Get cell indices grouped by cell type.
+        Get cell indices grouped by any categorical variable.
         
         Parameters
         ----------
         adata : AnnData
-            Single-cell data with cell type annotations.
-        cell_type_key : str
-            Key in adata.obs containing cell type information.
+            Single-cell data with group annotations.
+        groupby_key : str
+            Key in adata.obs containing group information (e.g., 'cell_type', 'cluster', 'condition').
         
         Returns
         -------
         dict
-            Dictionary mapping cell type names to arrays of cell indices.
+            Dictionary mapping group names to arrays of cell indices.
         """
-        ctype_indices = {}
+        group_indices = {}
         adata.obs['numerical_idx_linvi'] = np.arange(len(adata))
-        for cluster, df in adata.obs.groupby(cell_type_key, observed=True):
-            ctype_indices[cluster] = df['numerical_idx_linvi'].to_numpy()
+        for group, df in adata.obs.groupby(groupby_key, observed=True):
+            group_indices[group] = df['numerical_idx_linvi'].to_numpy()
 
-        return ctype_indices
+        return group_indices
         
     
     def _get_gene_idxs(self, adata, genes):
@@ -1131,17 +1142,17 @@ class LineageVIModel(nn.Module):
     def perturb_genes(
             self, 
             adata, 
-            cell_type_key, 
-            cell_type_to_perturb, 
+            groupby_key, 
+            group_to_perturb, 
             genes_to_perturb, 
             perturb_value,
             perturb_spliced = True,
             perturb_unspliced = False,
             perturb_both = False):
         """
-        Perturb gene expression in specific cell types and analyze velocity changes.
+        Perturb gene expression in specific groups and analyze velocity changes.
         
-        This method artificially modifies gene expression levels in specified cell types
+        This method artificially modifies gene expression levels in specified groups
         and genes, then analyzes how these perturbations affect velocity predictions.
         Useful for studying the sensitivity of velocity predictions to expression changes.
         
@@ -1149,10 +1160,10 @@ class LineageVIModel(nn.Module):
         ----------
         adata : AnnData
             Single-cell data to perturb.
-        cell_type_key : str
-            Key in adata.obs containing cell type information.
-        cell_type_to_perturb : str
-            Name of cell type to perturb.
+        groupby_key : str
+            Key in adata.obs containing group information (e.g., 'cell_type', 'cluster', 'condition').
+        group_to_perturb : str
+            Name of group to perturb.
         genes_to_perturb : list
             List of gene names to perturb.
         perturb_value : float
@@ -1172,15 +1183,15 @@ class LineageVIModel(nn.Module):
         Notes
         -----
         The method:
-        1. Identifies cells of the specified cell type
+        1. Identifies cells of the specified group
         2. Perturbs expression of specified genes
         3. Computes velocity predictions on perturbed data
         4. Stores results for comparison with original predictions
         """
         
         perturbed_genes_idxs = self._get_gene_idxs(adata, genes_to_perturb)
-        cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
-        cells_to_perturb_idxs = cell_type_idxs[cell_type_to_perturb]
+        group_idxs = self._get_group_idxs(adata, groupby_key=groupby_key)
+        cells_to_perturb_idxs = group_idxs[group_to_perturb]
 
         # allow both int and list
         cell_idx = cells_to_perturb_idxs   # could also be 0
@@ -1282,38 +1293,38 @@ class LineageVIModel(nn.Module):
 
         df_gp = pd.DataFrame({
             'terms' : adata.uns['terms'],
-            'mean' : mean_diff,
-            'abs_mean' : abs(mean_diff),
-            'logvar' : logvar_diff,
-            'abs_logvar' : abs(logvar_diff),
-            'gp_velocity' : gp_velo_diff,
-            'abs_gp_velocity' : abs(gp_velo_diff),
+            'mean_diff' : mean_diff,
+            'abs_mean_diff' : abs(mean_diff),
+            'logvar_diff' : logvar_diff,
+            'abs_logvar_diff' : abs(logvar_diff),
+            'gp_velocity_diff' : gp_velo_diff,
+            'abs_gp_velocity_diff' : abs(gp_velo_diff),
         })
 
         df_genes = pd.DataFrame({
             'genes' : adata.var_names,
-            'recon' : recon_diff,
-            'abs_recon' : abs(recon_diff),
-            'unspliced_velocity' : velo_u_diff,
-            'abs_unspliced_velocity' : abs(velo_u_diff),
-            'velocity' : velo_diff,
-            'abs_velocity' : abs(velo_diff),
-            'alpha' : alpha_diff,
-            'abs_alpha' : abs(alpha_diff),
-            'beta' : beta_diff,
-            'abs_beta' : abs(beta_diff),
-            'gamma' : gamma_diff,
-            'abs_gamma' : abs(gamma_diff),
+            'recon_diff' : recon_diff,
+            'abs_recon_diff' : abs(recon_diff),
+            'unspliced_velocity_diff' : velo_u_diff,
+            'abs_unspliced_velocity_diff' : abs(velo_u_diff),
+            'velocity_diff' : velo_diff,
+            'abs_velocity_diff' : abs(velo_diff),
+            'alpha_diff' : alpha_diff,
+            'abs_alpha_diff' : abs(alpha_diff),
+            'beta_diff' : beta_diff,
+            'abs_beta_diff' : abs(beta_diff),
+            'gamma_diff' : gamma_diff,
+            'abs_gamma_diff' : abs(gamma_diff),
         })
 
         return df_genes, df_gp, perturbed_outputs
 
     @torch.inference_mode()
-    def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, cell_type_key, ctypes_to_perturb, perturb_value):
+    def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, groupby_key, group_to_perturb, perturb_value):
         """
-        Perturb gene program expression in specific cell types and analyze velocity changes.
+        Perturb gene program expression in specific groups and analyze velocity changes.
         
-        This method artificially modifies gene program expression levels in specified cell types
+        This method artificially modifies gene program expression levels in specified groups
         and gene programs, then analyzes how these perturbations affect velocity predictions.
         Useful for studying the sensitivity of velocity predictions to gene program changes.
         
@@ -1325,10 +1336,10 @@ class LineageVIModel(nn.Module):
             Key in adata.uns containing gene program names.
         gps_to_perturb : list
             List of gene program names to perturb.
-        cell_type_key : str
-            Key in adata.obs containing cell type information.
-        ctypes_to_perturb : str
-            Name of cell type to perturb.
+        groupby_key : str
+            Key in adata.obs containing group information (e.g., 'cell_type', 'cluster', 'condition').
+        group_to_perturb : str
+            Name of group to perturb.
         perturb_value : float
             Value to add to gene program expression (can be negative for downregulation).
         
@@ -1340,13 +1351,13 @@ class LineageVIModel(nn.Module):
         Notes
         -----
         The method:
-        1. Identifies cells of the specified cell type
+        1. Identifies cells of the specified group
         2. Perturbs expression of specified gene programs
         3. Computes velocity predictions on perturbed data
         4. Stores results for comparison with original predictions
         """
-        cell_type_idxs = self._get_cell_type_idxs(adata, cell_type_key=cell_type_key)
-        cell_idx = cell_type_idxs[ctypes_to_perturb]
+        group_idxs = self._get_group_idxs(adata, groupby_key=groupby_key)
+        cell_idx = group_idxs[group_to_perturb]
 
         gp_idx = self._get_gp_idxs(adata, gp_uns_key, gps_to_perturb)
 

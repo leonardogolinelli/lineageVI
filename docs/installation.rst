@@ -9,9 +9,6 @@ Install LineageVI from source:
    cd lineageVI
    pip install -e .
 
-Dependencies
-------------
-
 LineageVI requires Python 3.8+ and the following packages:
 - PyTorch
 - NumPy

@@ -1,6 +1,3 @@
-LineageVI Main API
-==================
-
 .. automodule:: lineagevi
    :members:
    :undoc-members:
