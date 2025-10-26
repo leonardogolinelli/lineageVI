@@ -6,6 +6,7 @@ This section contains detailed tutorials for using LineageVI.
 .. toctree::
    :maxdepth: 2
 
+   preprocessing
    basic_usage
    gene_programs
    velocity_analysis
@@ -15,6 +16,9 @@ This section contains detailed tutorials for using LineageVI.
 
 Basic Tutorials
 ---------------
+
+:doc:`preprocessing`
+   Data preprocessing and quality control for LineageVI analysis.
 
 :doc:`basic_usage`
    Learn the fundamentals of LineageVI with a simple example.

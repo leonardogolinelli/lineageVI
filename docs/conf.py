@@ -37,6 +37,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.autosummary',
     'sphinx_autodoc_typehints',
+    'nbsphinx',  # Support for Jupyter notebooks
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -100,6 +101,11 @@ intersphinx_mapping = {
 
 # MathJax configuration
 mathjax_path = 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-AMS-MML_HTMLorMML'
+
+# nbsphinx configuration
+nbsphinx_execute = 'never'  # Don't execute notebooks during build
+nbsphinx_allow_errors = True  # Allow errors in notebooks
+nbsphinx_timeout = 60  # Timeout for notebook execution
 
 # -- Options for LaTeX output ------------------------------------------------
 
