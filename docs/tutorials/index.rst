@@ -1,53 +1,48 @@
 Tutorials
 =========
 
-This section contains detailed tutorials for using LineageVI.
+This section contains comprehensive tutorials for using LineageVI, from basic usage to advanced analysis techniques.
 
 .. toctree::
    :maxdepth: 2
 
-   preprocessing
-   basic_usage
    notebooks/1-preprocessing_notebook_v2
    notebooks/2-training_notebook
    notebooks/3-velocity_umaps_notebook
-   notebooks/4-uncertainty_notebook
+   notebooks/4-map_velocity_notebook
    notebooks/5-plotting_notebook
    notebooks/6-perturbation_notebook
-   notebooks/7-map_velocity_notebook
+   notebooks/7-uncertainty_notebook
 
-Basic Tutorials
+Getting Started
 ---------------
 
-:doc:`preprocessing`
-   Data preprocessing and quality control for LineageVI analysis.
+:doc:`notebooks/1-preprocessing_notebook_v2`
+   Complete data preprocessing workflow with quality control steps.
 
-:doc:`basic_usage`
-   Learn the fundamentals of LineageVI with a simple example.
-
-:doc:`../../notebooks/1-preprocessing_notebook_v2`
-   Complete preprocessing workflow with executed outputs.
-
-:doc:`../../notebooks/2-training_notebook`
+:doc:`notebooks/2-training_notebook`
    Model training and optimization techniques.
 
-Advanced Topics
----------------
+Analysis and Visualization
+--------------------------
 
-:doc:`../../notebooks/3-velocity_umaps_notebook`
-   Velocity analysis and UMAP visualization.
+:doc:`notebooks/3-velocity_umaps_notebook`
+   Velocity analysis and UMAP visualization techniques.
 
-:doc:`../../notebooks/4-uncertainty_notebook`
-   Uncertainty quantification in velocity predictions.
+:doc:`notebooks/4-map_velocity_notebook`
+   Map velocities between gene and gene program spaces.
 
-:doc:`../../notebooks/5-plotting_notebook`
+:doc:`notebooks/5-plotting_notebook`
    Create publication-ready plots and visualizations.
 
-:doc:`../../notebooks/6-perturbation_notebook`
+Advanced Topics
+----------------
+
+:doc:`notebooks/6-perturbation_notebook`
    Study the sensitivity of velocity predictions to expression changes.
 
-:doc:`../../notebooks/7-map_velocity_notebook`
-   Map velocities between gene and gene program spaces.
+:doc:`notebooks/7-uncertainty_notebook`
+   Uncertainty quantification in velocity predictions.
 
 Prerequisites
 -------------
