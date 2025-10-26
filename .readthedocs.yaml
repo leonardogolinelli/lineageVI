@@ -14,10 +14,10 @@ build:
 sphinx:
   configuration: docs/conf.py
 
-# Build PDF and ePub
-formats:
-  - pdf
-  - epub
+# Build HTML only (PDF and ePub can be added later if needed)
+# formats:
+#   - pdf
+#   - epub
 
 # Install the package
 python:
