@@ -6,6 +6,7 @@ sphinx-autobuild>=2021.3.14
 myst-parser>=0.15.0
 nbsphinx>=0.8.0
 sphinx-gallery>=0.19.0
+jupyter-sphinx>=0.5.3
 
 # For building PDFs (using built-in LaTeX support)
 
