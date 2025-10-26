@@ -189,6 +189,15 @@ div.nboutput.container div.output_area div.highlight .ow { color: #000000 !impor
 div.nbinput.container div.input_area div.highlight .p,
 div.nboutput.container div.output_area div.highlight .p { color: #000000 !important; }
 
+/* Additional nbsphinx-specific token classes */
+/* Whitespace (w = whitespace) */
+div.nbinput.container div.input_area div.highlight .w,
+div.nboutput.container div.output_area div.highlight .w { color: #000000 !important; }
+
+/* Generic name (n = name) - for variables and functions */
+div.nbinput.container div.input_area div.highlight .n,
+div.nboutput.container div.output_area div.highlight .n { color: #2563eb !important; }
+
 /* Dark mode support */
 @media (prefers-color-scheme: dark) {
     .highlight {
