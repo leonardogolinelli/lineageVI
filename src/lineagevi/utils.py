@@ -157,7 +157,7 @@ def build_gp_adata(
         >>> sc.pl.umap(gp_adata, color="velocity")
         """
         import pandas as pd
-        outs = model._get_model_outputs(
+        outs = model.get_model_outputs(
             adata=adata,
             n_samples=n_samples,
             return_mean=True,              # recon/vel/vel_gp averaged; z/mean/logvar kept per-sample by design
