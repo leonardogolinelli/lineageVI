@@ -54,3 +54,21 @@ data/outputs/**
 # logs/
 # figures/
 NOTES_FOR_NEXT_TIME.txt
+
+
+# Sphinx documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+docs/generated/
+docs/api/generated/
+
+# Sphinx cache
+docs/.doctrees/
+
+# Documentation build artifacts
+docs/_build/html/
+docs/_build/latex/
+docs/_build/epub/
+docs/_build/linkcheck/
+docs/_build/doctest/

@@ -1,0 +1,14 @@
+# Documentation requirements
+sphinx>=4.0.0
+sphinx-rtd-theme>=1.0.0
+sphinx-autodoc-typehints>=1.10.0
+sphinx-autobuild>=2021.3.14
+myst-parser>=0.15.0
+nbsphinx>=0.8.0
+sphinx-gallery>=0.8.0
+
+# For building PDFs
+sphinx-latex>=0.0.1
+
+# For better code highlighting
+pygments>=2.8.0
