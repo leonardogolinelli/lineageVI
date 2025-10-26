@@ -37,7 +37,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.autosummary',
     'sphinx_autodoc_typehints',
-    'nbsphinx',  # Support for Jupyter notebooks
+    'jupyter_sphinx',  # Support for Jupyter notebooks with execution
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -154,3 +154,10 @@ texinfo_documents = [
      author, 'LineageVI', 'Deep learning-based RNA velocity model with gene program inference.',
      'Miscellaneous'),
 ]
+
+# -- nbsphinx Configuration ------------------------------------------------
+
+# nbsphinx configuration for executing notebooks and showing outputs
+nbsphinx_execute = 'auto'  # Execute notebooks automatically
+nbsphinx_allow_errors = True  # Don't fail on execution errors
+nbsphinx_timeout = 60  # Timeout in seconds
