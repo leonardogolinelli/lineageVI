@@ -6,9 +6,6 @@ LineageVI Main API
    :undoc-members:
    :show-inheritance:
 
-LineageVI Class
----------------
-
 .. autoclass:: lineagevi.LineageVI
    :members:
    :undoc-members:

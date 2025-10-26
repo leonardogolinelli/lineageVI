@@ -6,10 +6,7 @@ LineageVI Model
    :undoc-members:
    :show-inheritance:
 
-LineageVIModel Class
---------------------
-
-.. autoclass:: lineagevi.LineageVIModel
+.. autoclass:: lineagevi.model.LineageVIModel
    :members:
    :undoc-members:
    :show-inheritance:
@@ -27,28 +24,22 @@ LineageVIModel Class
    .. automethod:: perturb_genes
    .. automethod:: perturb_gps
 
-Neural Network Modules
-----------------------
-
-.. autoclass:: lineagevi.Encoder
+.. autoclass:: lineagevi.modules.Encoder
    :members:
    :undoc-members:
    :show-inheritance:
    :special-members: __init__
 
-.. autoclass:: lineagevi.MaskedLinearDecoder
+.. autoclass:: lineagevi.modules.MaskedLinearDecoder
    :members:
    :undoc-members:
    :show-inheritance:
    :special-members: __init__
 
-.. autoclass:: lineagevi.VelocityDecoder
+.. autoclass:: lineagevi.modules.VelocityDecoder
    :members:
    :undoc-members:
    :show-inheritance:
    :special-members: __init__
 
-Utility Functions
------------------
-
-.. autofunction:: lineagevi.seed_everything
+.. autofunction:: lineagevi.utils.seed_everything

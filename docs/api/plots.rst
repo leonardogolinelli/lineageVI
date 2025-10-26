@@ -6,15 +6,9 @@ Plotting Functions
    :undoc-members:
    :show-inheritance:
 
-Phase Plane Plots
------------------
-
 .. autofunction:: lineagevi.plots.plot_phase_plane
 
 .. autofunction:: lineagevi.plots.plot_gp_phase_planes
-
-Gene Program Analysis
---------------------
 
 .. autofunction:: lineagevi.plots.top_features_table
 
