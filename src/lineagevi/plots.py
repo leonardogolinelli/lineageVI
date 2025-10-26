@@ -5,54 +5,54 @@ from typing import Optional, Tuple
 from anndata import AnnData
 from scipy import sparse
 
-def top_gps_table(
-    gp_adata,
+def top_features_table(
+    adata,
     celltype_key: str,
     categories="all",
     layer: str | None = None,
     n: int | None = 10,
 ):
     """
-    Return a pandas DataFrame of gene programs ranked by absolute mean activation,
+    Return a pandas DataFrame of features (genes or gene programs) ranked by absolute mean activation,
     with per-category mean activation columns (signed).
 
     Parameters
     ----------
-    gp_adata : AnnData
-        AnnData where rows (obs) are cells and columns (var) are gene programs.
-        GP activations are in .X or in a specified .layers[layer].
+    adata : AnnData
+        AnnData where rows (obs) are cells and columns (var) are features (genes or gene programs).
+        Feature activations/expressions are in .X or in a specified .layers[layer].
     celltype_key : str
-        Key in gp_adata.obs with the categorical variable to filter on (e.g., 'cell_type').
+        Key in adata.obs with the categorical variable to filter on (e.g., 'cell_type').
     categories : list[str] | str, default "all"
         Which categories (levels of `celltype_key`) to include in the per-category stats.
-        If "all", include all categories present in gp_adata.obs[celltype_key].
+        If "all", include all categories present in adata.obs[celltype_key].
         If a single string (not "all"), it's treated as a single category.
     layer : str | None, default None
-        Use gp_adata.layers[layer] instead of gp_adata.X if provided.
+        Use adata.layers[layer] instead of adata.X if provided.
     n : int | None, default 10
-        Number of top programs to return. If None, return all.
+        Number of top features to return. If None, return all.
 
     Returns
     -------
     pandas.DataFrame
         Columns:
-        - 'gp' : gene program name (from var_names)
-        - 'mean_activation' : mean activation across the *selected cells* (all if categories="all")
+        - 'feature' : feature name (from var_names)
+        - 'mean_activation' : mean activation/expression across the *selected cells* (all if categories="all")
         - 'abs_mean_activation' : absolute value of mean_activation
-        - Per-category columns with mean activation (signed) for each category
+        - Per-category columns with mean activation/expression (signed) for each category
         - 'n_cells' : number of cells used in the overall mean/statistic
     """
     # Validate obs key
-    if celltype_key not in gp_adata.obs:
-        raise KeyError(f"'{celltype_key}' not found in gp_adata.obs")
+    if celltype_key not in adata.obs:
+        raise KeyError(f"'{celltype_key}' not found in adata.obs")
 
     # Resolve which categories to include in per-category stats
-    obs_vals_all = gp_adata.obs[celltype_key]
+    obs_vals_all = adata.obs[celltype_key]
     if isinstance(categories, str) and categories != "all":
         categories = [categories]
 
     if categories == "all":
-        overall_mask = np.ones(gp_adata.n_obs, dtype=bool)
+        overall_mask = np.ones(adata.n_obs, dtype=bool)
         include_cats = pd.Index(obs_vals_all.dropna().unique()).tolist()
     else:
         include_cats = list(categories)
@@ -64,7 +64,7 @@ def top_gps_table(
         )
 
     # Get data matrix
-    X_full = gp_adata.layers[layer] if layer is not None else gp_adata.X
+    X_full = adata.layers[layer] if layer is not None else adata.X
     X_overall = X_full[overall_mask]
 
     # Compute overall mean across selected cells
@@ -82,7 +82,7 @@ def top_gps_table(
 
     # Base dataframe (overall stats)
     df = pd.DataFrame({
-        "gp": np.array(gp_adata.var_names)[order],
+        "feature": np.array(adata.var_names)[order],
         "mean_activation": mean_act[order],
     })
 
@@ -481,6 +481,11 @@ def plot_gp_phase_planes(
             raise KeyError(f"Program '{gp_x}' not in adata_gp.var_names.")
         if gp_y not in adata_gp.var_names:
             raise KeyError(f"Program '{gp_y}' not in adata_gp.var_names.")
+
+    # Check for required layers
+    for layer in (latent_key, velocity_key):
+        if layer not in adata_gp.layers:
+            raise KeyError(f"Required layer '{layer}' is missing from adata_gp.layers")
 
     # Indices for fast slicing
     idx_map = {gp: adata_gp.var_names.get_loc(gp) for gp in set([g for p in pairs for g in p])}

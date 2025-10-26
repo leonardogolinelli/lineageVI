@@ -390,100 +390,66 @@ class LineageVI:
     def map_velocities(
         self,
         adata: Optional[sc.AnnData] = None,
+        adata_gp: Optional[sc.AnnData] = None,
         *,
         direction: str = "gp_to_gene",
-        n_samples: int = 100,
         scale: float = 10.0,
-        base_seed: Optional[int] = None,
         velocity_key: str = "mapped_velocity",
-        return_gp_adata: bool = False,
-        return_negative_velo: bool = True,
         unspliced_key: str = "Mu",
         spliced_key: str = "Ms",
-        latent_key: str = "z",
-        nn_key: str = "indices",
-        batch_size: int = 256,
-        gp_latent_key: str = "z",
-        gp_velocity_key: str = "velocity",
     ):
         """
         Map velocities between gene program space and gene expression space.
         
-        This method enables bidirectional mapping of RNA velocities:
+        This method enables bidirectional mapping of RNA velocities using pre-computed results:
         - **gp_to_gene**: Maps velocities from gene program space to gene expression space
         - **gene_to_gp**: Maps velocities from gene expression space to gene program space
+        
+        Note: This method requires that get_model_outputs() has been called first to generate
+        the necessary velocity and latent representations.
         
         Parameters
         ----------
         adata : AnnData, optional
-            Single-cell data. If None, uses self.adata.
+            Single-cell data with pre-computed velocities and latent representations.
+            If None, uses self.adata.
+        adata_gp : AnnData, optional
+            Gene program AnnData object. Required for direction="gene_to_gp".
+            Will be modified in place with mapped velocities.
         direction : str, default "gp_to_gene"
             Direction of mapping: "gp_to_gene" or "gene_to_gp".
-        n_samples : int, default 100
-            Number of samples for uncertainty estimation.
         scale : float, default 10.0
             Scaling factor for mapped velocities.
-        base_seed : int, optional
-            Random seed for reproducibility.
         velocity_key : str, default "mapped_velocity"
             Key to store mapped velocities in adata.layers (gp_to_gene) or adata.obsm (gene_to_gp).
-        return_gp_adata : bool, default False
-            Whether to return the gene program AnnData object.
-        return_negative_velo : bool, default True
-            Whether to negate velocities (multiply by -1).
         unspliced_key : str, default "Mu"
             Key for unspliced counts in adata.layers.
         spliced_key : str, default "Ms"
             Key for spliced counts in adata.layers.
-        latent_key : str, default "z"
-            Key for latent representations in adata.obsm.
-        nn_key : str, default "indices"
-            Key for nearest neighbor indices in adata.uns.
-        batch_size : int, default 256
-            Batch size for processing.
-        gp_latent_key : str, default "z"
-            Key for latent representations in GP AnnData.obsm.
-        gp_velocity_key : str, default "velocity"
-            Key for velocities in GP AnnData.layers.
         
         Returns
         -------
-        AnnData or None
-            If return_gp_adata=True, returns the gene program AnnData object.
-            Otherwise returns None. Mapped velocities are always saved to adata.
+        None
+            Mapped velocities are saved to adata and adata_gp (if provided).
         
         Examples
         --------
+        >>> # First, get model outputs
+        >>> linvi.get_model_outputs(adata, save_to_adata=True)
+        >>> 
         >>> # Map from GP to gene space
         >>> linvi.map_velocities(adata, direction="gp_to_gene")
         >>> 
-        >>> # Map from gene to GP space with custom parameters
-        >>> gp_adata = linvi.map_velocities(
-        ...     adata, 
-        ...     direction="gene_to_gp",
-        ...     return_gp_adata=True,
-        ...     n_samples=200
-        ... )
-        >>> 
-        >>> # Custom velocity key
-        >>> linvi.map_velocities(
-        ...     adata, 
-        ...     direction="gp_to_gene",
-        ...     velocity_key="custom_velocity"
-        ... )
+        >>> # Map from gene to GP space with pre-computed GP data
+        >>> linvi.map_velocities(adata, adata_gp=gp_adata, direction="gene_to_gp")
+        >>> # gp_adata is now modified with mapped velocities
         """
         return self.model.map_velocities(
             (adata or self.adata),
+            adata_gp=adata_gp,
             direction=direction,
-            n_samples=n_samples,
             scale=scale,
-            base_seed=base_seed,
             velocity_key=velocity_key,
-            return_gp_adata=return_gp_adata,
-            return_negative_velo=return_negative_velo,
             unspliced_key=unspliced_key,
             spliced_key=spliced_key,
-            latent_key=latent_key,
-            nn_key=nn_key,
-            batch_size=batch_size,
         )

@@ -16,7 +16,7 @@ Phase Plane Plots
 Gene Program Analysis
 --------------------
 
-.. autofunction:: lineagevi.plots.top_gps_table
+.. autofunction:: lineagevi.plots.top_features_table
 
 .. autofunction:: lineagevi.plots.plot_abs_bfs
 

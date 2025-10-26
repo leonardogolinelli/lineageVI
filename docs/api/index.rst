@@ -44,7 +44,7 @@ Plotting Functions
 
    lineagevi.plots.plot_phase_plane
    lineagevi.plots.plot_gp_phase_planes
-   lineagevi.plots.top_gps_table
+   lineagevi.plots.top_features_table
    lineagevi.plots.plot_abs_bfs
 
 Utility Functions
