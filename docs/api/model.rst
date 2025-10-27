@@ -1,8 +1,3 @@
-.. automodule:: lineagevi.model
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 .. autoclass:: lineagevi.model.LineageVIModel
    :members:
    :undoc-members:

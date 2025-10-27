@@ -37,7 +37,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.autosummary',
     'sphinx_autodoc_typehints',
-    'nbsphinx',  # Support for Jupyter notebooks with execution
+    'myst_nb',  # Support for Jupyter notebooks without pandoc dependency
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -97,6 +97,11 @@ autodoc_default_options = {
 
 # Autosummary settings
 autosummary_generate = True
+
+# myst-nb settings
+myst_enable_extensions = ["colon_fence"]
+nb_execution_mode = "off"  # Don't execute notebooks
+nb_render_priority = ["html", "latex"]  # Render priority
 
 # Intersphinx mapping
 intersphinx_mapping = {

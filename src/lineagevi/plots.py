@@ -141,10 +141,10 @@ def plot_phase_plane(
     adata : AnnData
         AnnData object containing layers and velocities.
         Expected layers:
-            - If smooth_expr=True: "Mu" (unspliced smoothed), "Ms" (spliced smoothed)
-            - Else: "unspliced", "spliced"
+        - If smooth_expr=True: "Mu" (unspliced smoothed), "Ms" (spliced smoothed)
+        - Else: "unspliced", "spliced"
         Expected velocity layers:
-            - "velocity_u" (unspliced velocity), "velocity" (spliced velocity)
+        - "velocity_u" (unspliced velocity), "velocity" (spliced velocity)
     gene_name : str
         Gene to plot (must be in `adata.var_names`).
     u_scale, s_scale : float
