@@ -1178,7 +1178,7 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         None
-            Results are stored in adata.obs and adata.obsm with 'perturbed_' prefix.
+            Results are stored in adata.obs and adata.obsm with ``perturbed_`` prefix.
         
         Notes
         -----
@@ -1346,7 +1346,7 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         None
-            Results are stored in adata.obs and adata.obsm with 'perturbed_' prefix.
+            Results are stored in adata.obs and adata.obsm with ``perturbed_`` prefix.
         
         Notes
         -----

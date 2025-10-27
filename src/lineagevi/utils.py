@@ -30,7 +30,7 @@ def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns
     uns_key
         Sore gene sets' names in `adata.uns[uns_key]`.
     clean
-        If 'True', removes the word before the first underscore for each term name (like 'REACTOME_')
+        If 'True', removes the word before the first underscore for each term name (like ``REACTOME_``)
         and cuts the name to the first thirty symbols.
     genes_use_upper
         if 'True', converts genes' names from files and adata to uppercase for comparison.
