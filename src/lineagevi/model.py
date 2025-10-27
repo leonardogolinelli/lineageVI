@@ -130,7 +130,7 @@ class LineageVIModel(nn.Module):
         adata: sc.AnnData,
         n_hidden: int = 128,
         mask_key: str = "I",
-        seed: int | None = None,
+        seed: Optional[int] = None,
     ):
         # If a seed is provided, lock all RNGs *before* instantiating any layers
         if seed is not None:
@@ -488,7 +488,7 @@ class LineageVIModel(nn.Module):
         n_samples: int = 1,
         return_mean: bool = True,
         return_negative_velo: bool = True,
-        base_seed: int | None = None,
+        base_seed: Optional[int] = None,
         save_to_adata: bool = False,
         unspliced_key: str = "Mu",
         spliced_key: str = "Ms",
@@ -628,7 +628,7 @@ class LineageVIModel(nn.Module):
         logvar_all = torch.cat(logvar_batches, dim=0)   # (cells, L)
 
         # squeeze leading n_samples dim if it's a singleton AND return_mean=False
-        def _maybe_squeeze(t: torch.Tensor | None) -> torch.Tensor | None:
+        def _maybe_squeeze(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
             if t is None:
                 return None
             return t.squeeze(0) if (not return_mean and n_samples == 1 and t.ndim == 3) else t
@@ -669,7 +669,7 @@ class LineageVIModel(nn.Module):
         # If multiple samples, FORCE averaging before writing (overrules return_mean)
         force_mean = (n_samples > 1)
 
-        def _maybe_mean_first_axis(t: torch.Tensor | None) -> np.ndarray | None:
+        def _maybe_mean_first_axis(t: Optional[torch.Tensor]) -> Optional[np.ndarray]:
             if t is None:
                 return None
             # t can be (n_samples, cells, F) OR (cells, F)
@@ -691,7 +691,7 @@ class LineageVIModel(nn.Module):
         adata.layers["recon"] = _maybe_mean_first_axis(recon_all)
 
         # write velocities: we already split in NumPy; apply forced mean if needed
-        def _maybe_mean_np_first_axis(arr: np.ndarray | None) -> np.ndarray | None:
+        def _maybe_mean_np_first_axis(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
             if arr is None:
                 return None
             # arr can be (n_samples, cells, F) or (cells, F)
@@ -742,7 +742,7 @@ class LineageVIModel(nn.Module):
         n_samples: int = 50,
         n_jobs: int = -1,
         show_plot: bool = True,
-        base_seed: int | None = None,
+        base_seed: Optional[int] = None,
     ):
         """
         Compute directional uncertainty in velocity predictions.
@@ -939,7 +939,7 @@ class LineageVIModel(nn.Module):
         n_samples: int = 25,
         n_jobs: int = -1,
         show_plot: bool = True,
-        base_seed: int | None = None,   # ensures distinct ε across iterations (while reproducible)
+        base_seed: Optional[int] = None,   # ensures distinct ε across iterations (while reproducible)
     ) -> pd.DataFrame:
         """
         Compute extrinsic uncertainty in velocity predictions.

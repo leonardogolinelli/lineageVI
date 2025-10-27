@@ -9,8 +9,8 @@ def top_features_table(
     adata,
     groupby_key: str,
     categories="all",
-    layer: str | None = None,
-    n: int | None = 10,
+    layer: Optional[str] = None,
+    n: Optional[int] = 10,
 ):
     """
     Return a pandas DataFrame of features (genes or gene programs) ranked by absolute mean activation,
@@ -27,9 +27,9 @@ def top_features_table(
         Which categories (levels of `groupby_key`) to include in the per-category stats.
         If "all", include all categories present in adata.obs[groupby_key].
         If a single string (not "all"), it's treated as a single category.
-    layer : str | None, default None
+    layer : Optional[str], default None
         Use adata.layers[layer] instead of adata.X if provided.
-    n : int | None, default 10
+    n : Optional[int], default 10
         Number of top features to return. If None, return all.
 
     Returns

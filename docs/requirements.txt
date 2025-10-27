@@ -11,6 +11,3 @@ sphinx-gallery>=0.19.0
 
 # For better code highlighting
 pygments>=2.8.0
-
-# For nbsphinx notebook processing
-pandoc>=2.0

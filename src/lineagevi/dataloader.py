@@ -4,6 +4,7 @@ import numpy as np
 import scipy.sparse as sp
 import scanpy as sc
 import random
+from typing import Optional
 
 class RegimeDataset(Dataset):
     """
@@ -126,7 +127,7 @@ def make_dataloader(
     batch_size: int = 64,
     shuffle: bool = True,
     num_workers: int = 0,
-    seed: int | None = None,
+    seed: Optional[int] = None,
 ) -> DataLoader:
     """
     Create a PyTorch DataLoader for LineageVI training.

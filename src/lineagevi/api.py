@@ -221,7 +221,7 @@ class LineageVI:
         n_samples: int = 1,
         return_mean: bool = True,
         return_negative_velo: bool = True,
-        base_seed: int | None = None,
+        base_seed: Optional[int] = None,
         save_to_adata: bool = False,
         unspliced_key: str = "Mu",
         spliced_key: str = "Ms",
