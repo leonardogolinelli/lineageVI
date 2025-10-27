@@ -9,14 +9,4 @@ Install LineageVI from source:
    cd lineageVI
    pip install -e .
 
-LineageVI requires Python 3.8+ and the following packages:
-- PyTorch
-- NumPy
-- Pandas
-- Scanpy
-- AnnData
-- scVelo
-- Matplotlib
-- scikit-learn
-
-These will be installed automatically when you install LineageVI.
+LineageVI requires Python 3.9+ and the following packages: PyTorch, NumPy, Pandas, Scanpy, AnnData, scVelo, Matplotlib, and scikit-learn. These will be installed automatically when you install LineageVI.

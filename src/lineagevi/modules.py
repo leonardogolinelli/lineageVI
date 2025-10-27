@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Union, Optional
 
 
 class Encoder(nn.Module):
@@ -54,7 +55,7 @@ class Encoder(nn.Module):
         self.mean_layer = nn.Linear(n_hidden, n_latent)
         self.logvar_layer = nn.Linear(n_hidden, n_latent)
 
-    def forward(self, x: torch.Tensor, *, generator: torch.Generator | None = None):
+    def forward(self, x: torch.Tensor, *, generator: Optional[torch.Generator] = None):
         """
         Forward pass through the encoder.
         

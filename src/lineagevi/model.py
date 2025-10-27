@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import scanpy as sc
 import pandas as pd
 from joblib import Parallel, delayed
-from typing import Tuple
+from typing import Tuple, Optional
 
 from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder
 
@@ -259,7 +259,7 @@ class LineageVIModel(nn.Module):
         max_sim, _ = cos_sim.max(dim=1)                               # (B,)
         return (1.0 - max_sim).mean()
 
-    def _forward_encoder(self, x, *, generator: torch.Generator | None = None):
+    def _forward_encoder(self, x, *, generator: Optional[torch.Generator] = None):
         """
         Forward pass through the encoder only.
         
