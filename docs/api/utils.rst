@@ -1,5 +1,5 @@
-Utility Functions
-=================
+Utils
+======
 
 .. automodule:: lineagevi.utils
    :members:

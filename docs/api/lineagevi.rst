@@ -1,5 +1,5 @@
-LineageVI Main API
-==================
+LineageVI
+=========
 
 .. autoclass:: lineagevi.LineageVI
    :members:

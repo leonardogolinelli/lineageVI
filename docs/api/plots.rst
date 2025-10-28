@@ -1,5 +1,5 @@
-Plotting Functions
-==================
+Plots
+======
 
 .. automodule:: lineagevi.plots
    :members:

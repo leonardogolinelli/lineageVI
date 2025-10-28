@@ -4,7 +4,7 @@ API
 This section contains the complete API reference for LineageVI.
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: API Reference
 
    lineagevi

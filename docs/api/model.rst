@@ -1,5 +1,5 @@
-Model Classes
-=============
+Model
+======
 
 .. autoclass:: lineagevi.model.LineageVIModel
    :members:
