@@ -102,6 +102,7 @@ autosummary_generate = True
 myst_enable_extensions = ["colon_fence"]
 nb_execution_mode = "off"  # Don't execute notebooks
 nb_render_priority = ["html", "latex"]  # Render priority
+myst_title_to_header = True  # Use first header as page title
 
 # Intersphinx mapping
 intersphinx_mapping = {
