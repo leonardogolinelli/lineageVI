@@ -26,11 +26,11 @@ div.cell_output pre {
 
 .highlight .nb { color: #059669; } /* Built-in names (green) */
 .highlight .nn { color: #2563eb; } /* Name namespace (light blue) */
-.highlight .n { color: #2563eb; } /* Generic name (light blue) */
 .highlight .nf { color: #2563eb; } /* Name function (light blue) */
 .highlight .nc { color: #2563eb; font-weight: bold; } /* Name class (light blue) */
 .highlight .nt { color: #2563eb; font-weight: bold; } /* Name tag (light blue) */
 .highlight .nv { color: #2563eb; } /* Name variable (light blue) */
+.highlight .n { color: #000000; } /* Generic name (black - normal characters) */
 
 .highlight .mi { color: #d97706; } /* Number integer (brownish) */
 .highlight .mf { color: #d97706; } /* Number float (brownish) */
@@ -80,11 +80,11 @@ div.cell_output pre {
     
     .highlight .nb { color: #10b981; }
     .highlight .nn { color: #3b82f6; }
-    .highlight .n { color: #3b82f6; }
     .highlight .nf { color: #3b82f6; }
     .highlight .nc { color: #3b82f6; font-weight: bold; }
     .highlight .nt { color: #3b82f6; font-weight: bold; }
     .highlight .nv { color: #3b82f6; }
+    .highlight .n { color: #d4d4d4; } /* Generic name (light gray - normal characters) */
     
     .highlight .mi { color: #f59e0b; }
     .highlight .mf { color: #f59e0b; }
