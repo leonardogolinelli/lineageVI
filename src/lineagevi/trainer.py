@@ -152,6 +152,8 @@ class _Trainer:
 
         # ------- Regime 1 -------
         cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
+        process_to_idx = self.model.process_to_idx  # Always present
+        bio_processes_key = self.model.bio_processes_key if self.model.bio_processes_key is not None else 'bio_process'
         loader1 = make_dataloader(
             self.adata,
             first_regime=True,
@@ -165,6 +167,8 @@ class _Trainer:
             nn_key=self.nn_key,
             cluster_key=self.model.cluster_key,
             cluster_to_idx=cluster_to_idx,
+            bio_processes_key=bio_processes_key,
+            process_to_idx=process_to_idx,
         )
         r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
         history["regime1_loss"] = r1_losses
@@ -187,6 +191,8 @@ class _Trainer:
             nn_key=self.nn_key,
             cluster_key=self.model.cluster_key,
             cluster_to_idx=cluster_to_idx,
+            bio_processes_key=bio_processes_key,
+            process_to_idx=process_to_idx,
         )
 
         r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
@@ -203,12 +209,15 @@ class _Trainer:
     # ------- Pieces -------
 
     def _train_regime1(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True, monitor_every_epochs: int = 1) -> List[float]:
-        # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
+        # Freeze velocity_decoder, cluster_embedding, and CLS embedding; unfreeze encoder & gene_decoder
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
         if self.model.cluster_embedding is not None:
             for p in self.model.cluster_embedding.parameters():
                 p.requires_grad = False
+        # Freeze CLS embedding (learned only in regime 2)
+        for p in self.model.cls_embedding.parameters():
+            p.requires_grad = False
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = True
@@ -221,17 +230,21 @@ class _Trainer:
         for epoch in range(1, epochs + 1):
             running = 0.0
             for batch in loader:
-                if len(batch) == 4:  # Has cluster indices
-                    x, idx, x_neigh, cluster_idx = batch
+                if len(batch) == 5:  # Has cluster indices and process indices
+                    x, idx, x_neigh, cluster_idx, process_idx = batch
                     cluster_idx = cluster_idx.to(self.device)
-                else:
-                    x, idx, x_neigh = batch
+                    process_idx = process_idx.to(self.device)
+                elif len(batch) == 4:  # Has process indices but no cluster indices
+                    x, idx, x_neigh, process_idx = batch
                     cluster_idx = None
+                    process_idx = process_idx.to(self.device)
+                else:
+                    raise ValueError(f"Unexpected batch size: {len(batch)}")
                 
                 x = x.to(self.device)
                 x_neigh = x_neigh.to(self.device)
 
-                out = self.model(x, cluster_indices=cluster_idx)  # <-- dict
+                out = self.model(x, cluster_indices=cluster_idx, process_indices=process_idx)  # <-- dict
                 recon  = out["recon"]
                 mean   = out["mean"]
                 logvar = out["logvar"]
@@ -259,10 +272,12 @@ class _Trainer:
 
         with torch.no_grad():
             for batch in loader:
-                if len(batch) == 4:  # Has cluster indices
-                    x, idx, x_neigh, cluster_idx = batch
+                if len(batch) == 5:  # Has cluster indices and process indices
+                    x, idx, x_neigh, cluster_idx, process_idx = batch
+                elif len(batch) == 4:  # Has process indices but no cluster indices
+                    x, idx, x_neigh, process_idx = batch
                 else:
-                    x, idx, x_neigh = batch
+                    raise ValueError(f"Unexpected batch size: {len(batch)}")
                 
                 x = x.to(self.device)
                 _, mu, _ = self.model.encoder(x)
@@ -276,7 +291,7 @@ class _Trainer:
         return z_all.numpy()
 
     def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True, monitor_every_epochs: int = 1) -> List[float]:
-        # Freeze encoder & gene_decoder; unfreeze velocity_decoder and cluster_embedding
+        # Freeze encoder & gene_decoder; unfreeze velocity_decoder, cluster_embedding, and CLS embedding
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = False
@@ -285,6 +300,9 @@ class _Trainer:
         if self.model.cluster_embedding is not None:
             for p in self.model.cluster_embedding.parameters():
                 p.requires_grad = True
+        # Unfreeze CLS embedding (learned only in regime 2)
+        for p in self.model.cls_embedding.parameters():
+            p.requires_grad = True
 
         self.model.first_regime = False
         self.model.train()
@@ -298,16 +316,20 @@ class _Trainer:
         for epoch in range(1, epochs + 1):
             running = 0.0
             for batch in loader:
-                if len(batch) == 6:  # Has cluster indices
-                    x, idx, x_neigh, z, z_neigh, cluster_idx = batch
+                if len(batch) == 7:  # Has cluster indices and process indices
+                    x, idx, x_neigh, z, z_neigh, cluster_idx, process_idx = batch
                     cluster_idx = cluster_idx.to(self.device)
-                else:
-                    x, idx, x_neigh, z, z_neigh = batch
+                    process_idx = process_idx.to(self.device)
+                elif len(batch) == 6:  # Has process indices but no cluster indices
+                    x, idx, x_neigh, z, z_neigh, process_idx = batch
                     cluster_idx = None
+                    process_idx = process_idx.to(self.device)
+                else:
+                    raise ValueError(f"Unexpected batch size: {len(batch)}")
                 
                 x, x_neigh, z, z_neigh = [t.to(self.device) for t in (x, x_neigh, z, z_neigh)]
 
-                out = self.model(x, cluster_indices=cluster_idx)  # <-- dict
+                out = self.model(x, cluster_indices=cluster_idx, process_indices=process_idx)  # <-- dict
                 v_pred = out["velocity"]                 # (B, G) spliced velocities
                 v_gp   = out["velocity_gp"]              # (B, L)
 

@@ -8,7 +8,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 from typing import Tuple, Optional, List
 
-from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder, ClusterEmbedding
+from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder, ClusterEmbedding, CLSEmbedding
 
 
 def seed_everything(seed: int):
@@ -92,6 +92,16 @@ class LineageVIModel(nn.Module):
         Key for gene program mask in adata.varm.
     seed : int, optional
         Random seed for reproducible initialization.
+    cluster_key : str, optional
+        Key in adata.obs for cell clusters/lineages. If provided, cluster embeddings
+        will be learned and used in velocity prediction.
+    cluster_embedding_dim : int, default 32
+        Dimension of cluster embeddings. Used when cluster_key is provided.
+    cls_embedding_dim : int, default 32
+        Dimension of CLS (classification) embedding. The CLS embedding learns
+        global dynamics shared across all cells and is concatenated with z and
+        cluster embeddings (if provided) as input to the velocity decoder.
+        It is learned only in regime 2 (velocity prediction) and frozen in regime 1.
     
     Attributes
     ----------
@@ -133,6 +143,8 @@ class LineageVIModel(nn.Module):
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
+        bio_processes_key: Optional[str] = None,
+        cls_embedding_dim: int = 32,
     ):
         # If a seed is provided, lock all RNGs *before* instantiating any layers
         if seed is not None:
@@ -167,10 +179,39 @@ class LineageVIModel(nn.Module):
             
             # Create cluster embedding module
             self.cluster_embedding = ClusterEmbedding(n_clusters, cluster_embedding_dim)
-            velocity_input_dim = n_latent + cluster_embedding_dim
         else:
             self.cluster_embedding = None
-            velocity_input_dim = n_latent
+        
+        # CLS embeddings - process-specific (learns process-specific global dynamics)
+        self.bio_processes_key = bio_processes_key
+        self.cls_embedding_dim = cls_embedding_dim
+        
+        # Handle biological process key - create 'bio_process' column if needed
+        if bio_processes_key is None or bio_processes_key not in adata.obs.columns:
+            # Create bio_process column with 'Unspecified' for all cells
+            if 'bio_process' not in adata.obs.columns:
+                adata.obs['bio_process'] = 'Unspecified'
+            process_labels = adata.obs['bio_process']
+        else:
+            process_labels = adata.obs[bio_processes_key]
+        
+        # Get unique processes and create mapping
+        unique_processes = process_labels.unique().tolist()
+        n_processes = len(unique_processes)
+        
+        # Create process to index mapping (convert to strings for consistency)
+        process_to_idx = {str(process): idx for idx, process in enumerate(unique_processes)}
+        self.process_to_idx = process_to_idx
+        self.process_names = unique_processes
+        
+        # Create CLS embedding module (one embedding per biological process)
+        self.cls_embedding = CLSEmbedding(n_processes, cls_embedding_dim)
+        
+        # Velocity decoder input dimension: z + cluster_emb (if exists) + cls_emb
+        # Order: [z, cluster_emb, cls_emb]
+        velocity_input_dim = n_latent + self.cls_embedding_dim
+        if cluster_key is not None:
+            velocity_input_dim += cluster_embedding_dim
 
         # submodules
         self.encoder = Encoder(n_input, n_hidden, n_latent)
@@ -183,7 +224,7 @@ class LineageVIModel(nn.Module):
         # regime toggle used by Trainer
         self.first_regime: bool = True
 
-    def forward(self, x: torch.Tensor, cluster_indices: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, cluster_indices: Optional[torch.Tensor] = None, process_indices: Optional[torch.Tensor] = None):
         """
         Forward pass through the LineageVI model.
         
@@ -195,6 +236,9 @@ class LineageVIModel(nn.Module):
         cluster_indices : torch.Tensor, optional
             Cluster indices of shape (batch_size,) with integer cluster indices.
             Required when cluster_key is set and not in first_regime.
+        process_indices : torch.Tensor, optional
+            Process indices of shape (batch_size,) with integer process indices.
+            Required when not in first_regime.
         
         Returns
         -------
@@ -212,7 +256,25 @@ class LineageVIModel(nn.Module):
         recon = self.gene_decoder(z)
 
         if not self.first_regime:
-            # In regime 2, concatenate cluster embeddings to z if available
+            # In regime 2, concatenate CLS embedding and cluster embeddings to z
+            batch_size = z.shape[0]
+            
+            # Get CLS embedding based on process indices
+            if process_indices is None:
+                raise ValueError(
+                    "process_indices is required. "
+                    "Please provide process indices for each cell in the batch."
+                )
+            # Ensure process_indices is a 1D tensor of shape (batch_size,)
+            if process_indices.dim() == 0:
+                process_indices = process_indices.unsqueeze(0)
+            elif process_indices.dim() > 1:
+                process_indices = process_indices.squeeze()
+            
+            cls_emb = self.cls_embedding(process_indices)  # (B, cls_dim)
+            
+            # Get cluster embeddings if available
+            cluster_emb = None
             if self.cluster_embedding is not None:
                 if cluster_indices is None:
                     raise ValueError(
@@ -227,11 +289,15 @@ class LineageVIModel(nn.Module):
                 
                 # Get cluster embeddings for this batch
                 cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-                # Concatenate z and cluster embeddings
-                z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
-            else:
-                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
+            
+            # Concatenate: z + cluster_emb (if exists) + cls_emb
+            velocity_decoder_input = [z]  # Start with z
+            if cluster_emb is not None:
+                velocity_decoder_input.append(cluster_emb)  # Add cluster embeddings
+            velocity_decoder_input.append(cls_emb)  # Always add CLS embedding last
+            
+            z_with_embeddings = torch.cat(velocity_decoder_input, dim=1)  # (B, L+E+cls_dim) or (B, L+cls_dim)
+            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_embeddings, x)
         else:
             velocity = velocity_gp = alpha = beta = gamma = None
 
@@ -344,7 +410,7 @@ class LineageVIModel(nn.Module):
         x_rec = self.gene_decoder(z)
         return x_rec
 
-    def _forward_velocity_decoder(self, z, x, cluster_indices: Optional[torch.Tensor] = None):
+    def _forward_velocity_decoder(self, z, x, cluster_indices: Optional[torch.Tensor] = None, process_indices: Optional[torch.Tensor] = None):
         """
         Forward pass through the velocity decoder only.
         
@@ -357,6 +423,9 @@ class LineageVIModel(nn.Module):
         cluster_indices : torch.Tensor, optional
             Cluster indices of shape (batch_size,) with integer cluster indices.
             Required when cluster_key is set.
+        process_indices : torch.Tensor, optional
+            Process indices of shape (batch_size,) with integer process indices.
+            Required.
         
         Returns
         -------
@@ -371,6 +440,24 @@ class LineageVIModel(nn.Module):
         gamma : torch.Tensor
             Degradation rate parameters of shape (batch_size, n_genes).
         """
+        batch_size = z.shape[0]
+        
+        # Get CLS embedding based on process indices
+        if process_indices is None:
+            raise ValueError(
+                "process_indices is required. "
+                "Please provide process indices for each cell in the batch."
+            )
+        # Ensure process_indices is a 1D tensor of shape (batch_size,)
+        if process_indices.dim() == 0:
+            process_indices = process_indices.unsqueeze(0)
+        elif process_indices.dim() > 1:
+            process_indices = process_indices.squeeze()
+        
+        cls_emb = self.cls_embedding(process_indices)  # (B, cls_dim)
+        
+        # Get cluster embeddings if available
+        cluster_emb = None
         if self.cluster_embedding is not None:
             if cluster_indices is None:
                 raise ValueError(
@@ -383,11 +470,17 @@ class LineageVIModel(nn.Module):
             elif cluster_indices.dim() > 1:
                 cluster_indices = cluster_indices.squeeze()
             
+            # Get cluster embeddings for this batch
             cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-            z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
-        else:
-            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
+        
+        # Concatenate: z + cluster_emb (if exists) + cls_emb
+        velocity_decoder_input = [z]  # Start with z
+        if cluster_emb is not None:
+            velocity_decoder_input.append(cluster_emb)  # Add cluster embeddings
+        velocity_decoder_input.append(cls_emb)  # Always add CLS embedding last
+        
+        z_with_embeddings = torch.cat(velocity_decoder_input, dim=1)  # (B, L+E+cls_dim) or (B, L+cls_dim)
+        velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_embeddings, x)
         return velocity, velocity_gp, alpha, beta, gamma
     
     def latent_enrich(
@@ -591,6 +684,8 @@ class LineageVIModel(nn.Module):
         self.first_regime = False
         
         cluster_to_idx = self.cluster_to_idx if self.cluster_key is not None else None
+        process_to_idx = self.process_to_idx  # Always present
+        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
         dl = make_dataloader(
             adata,
             first_regime=True,     # encoder uses Mu/Ms; we decode per-batch
@@ -605,6 +700,8 @@ class LineageVIModel(nn.Module):
             seed=None,
             cluster_key=self.cluster_key,
             cluster_to_idx=cluster_to_idx,
+            bio_processes_key=bio_processes_key,
+            process_to_idx=process_to_idx,
         )
 
         device = next(self.parameters()).device
@@ -620,17 +717,20 @@ class LineageVIModel(nn.Module):
         alpha_batches, beta_batches, gamma_batches = [], [], []
 
         for batch in iter(dl):
-            # Handle cluster indices if present
-            # Batch structure: (x, idx, x_neigh) or (x, idx, x_neigh, cluster_idx) when cluster_key is set
-            if len(batch) == 3:
-                x, idx, _ = batch  # _ is x_neigh, which we don't need here
+            # Handle cluster and process indices
+            # Batch structure for regime 1:
+            # - (x, idx, x_neigh, process_idx) when no cluster_key
+            # - (x, idx, x_neigh, cluster_idx, process_idx) when cluster_key is set
+            if len(batch) == 4:
+                x, idx, _, process_indices = batch  # _ is x_neigh
                 cluster_indices = None
-            elif len(batch) == 4:
-                x, idx, _, cluster_indices = batch  # _ is x_neigh, cluster_indices is cluster_idx
+            elif len(batch) == 5:
+                x, idx, _, cluster_indices, process_indices = batch  # _ is x_neigh
             else:
                 raise ValueError(f"Unexpected batch size: {len(batch)}")
             
             x = x.to(device)
+            process_indices = process_indices.to(device)
             if cluster_indices is not None:
                 cluster_indices = cluster_indices.to(device)
             
@@ -645,7 +745,7 @@ class LineageVIModel(nn.Module):
             for i in range(n_samples):
                 z, mean, logvar = self._forward_encoder(x, generator=gen)
                 recon = self._forward_gene_decoder(z)  # (B, G)
-                velocity, velocity_gp, alpha, beta, gamma = self._forward_velocity_decoder(z, x, cluster_indices)  # (B, 2G), (B, L), (B, G)x3
+                velocity, velocity_gp, alpha, beta, gamma = self._forward_velocity_decoder(z, x, cluster_indices, process_indices)  # (B, 2G), (B, L), (B, G)x3
 
                 # collect CPU tensors
                 recon_s.append(recon.cpu())
@@ -745,6 +845,11 @@ class LineageVIModel(nn.Module):
                     cluster_embeddings = self.cluster_embedding.get_all_embeddings().cpu().numpy()
                 cluster_names = self.cluster_names
             
+            # Extract CLS embeddings (always present)
+            with torch.no_grad():
+                cls_embeddings = self.cls_embedding.get_all_embeddings().cpu().numpy()
+            process_names = self.process_names
+            
             # return everything as NumPy arrays
             return {
                 "recon": recon_all.numpy(),
@@ -759,6 +864,8 @@ class LineageVIModel(nn.Module):
                 "gamma": None if gamma_all is None else gamma_all.numpy(),
                 "cluster_embeddings": cluster_embeddings,
                 "cluster_names": cluster_names,
+                "cls_embeddings": cls_embeddings,
+                "process_names": process_names,
             }
 
         # ---------------------------
@@ -835,6 +942,12 @@ class LineageVIModel(nn.Module):
                 cluster_embeddings = self.cluster_embedding.get_all_embeddings().cpu().numpy()
             adata.uns["cluster_embeddings"] = cluster_embeddings
             adata.uns["cluster_names"] = self.cluster_names
+
+        # Save CLS embeddings to adata.uns (always present)
+        with torch.no_grad():
+            cls_embeddings = self.cls_embedding.get_all_embeddings().cpu().numpy()
+        adata.uns["cls_embeddings"] = cls_embeddings
+        adata.uns["process_names"] = self.process_names
 
         # function returns nothing when saving into AnnData
         return None
@@ -1343,14 +1456,25 @@ class LineageVIModel(nn.Module):
             cluster_labels_pert = adata.obs[self.cluster_key].iloc[cell_idx]
             # Map to indices
             cluster_indices_unpert = torch.tensor([
-                self.cluster_to_idx.get(label, 0) for label in cluster_labels_unpert
+                self.cluster_to_idx.get(str(label), 0) for label in cluster_labels_unpert
             ], dtype=torch.long, device=x_unpert.device)
             cluster_indices_pert = torch.tensor([
-                self.cluster_to_idx.get(label, 0) for label in cluster_labels_pert
+                self.cluster_to_idx.get(str(label), 0) for label in cluster_labels_pert
             ], dtype=torch.long, device=x_pert.device)
         
-        out_unpert = self.forward(x_unpert, cluster_indices=cluster_indices_unpert)
-        out_pert = self.forward(x_pert, cluster_indices=cluster_indices_pert)
+        # Get process indices (always present)
+        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
+        process_labels_unpert = adata.obs[bio_processes_key].iloc[cell_idx]
+        process_labels_pert = adata.obs[bio_processes_key].iloc[cell_idx]
+        process_indices_unpert = torch.tensor([
+            self.process_to_idx.get(str(label), 0) for label in process_labels_unpert
+        ], dtype=torch.long, device=x_unpert.device)
+        process_indices_pert = torch.tensor([
+            self.process_to_idx.get(str(label), 0) for label in process_labels_pert
+        ], dtype=torch.long, device=x_pert.device)
+        
+        out_unpert = self.forward(x_unpert, cluster_indices=cluster_indices_unpert, process_indices=process_indices_unpert)
+        out_pert = self.forward(x_pert, cluster_indices=cluster_indices_pert, process_indices=process_indices_pert)
 
         recon_unpert = out_unpert['recon']
         mean_unpert = out_unpert['mean']
@@ -1524,14 +1648,34 @@ class LineageVIModel(nn.Module):
                     cluster_labels = list(cluster_labels)
             # Map to indices
             cluster_indices = torch.tensor([
-                self.cluster_to_idx.get(label, 0) for label in cluster_labels
+                self.cluster_to_idx.get(str(label), 0) for label in cluster_labels
             ], dtype=torch.long, device=device)
+        
+        # Get process indices (always present)
+        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
+        if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
+            # Single cell case
+            if isinstance(cell_idx, (int, np.integer)):
+                idx = cell_idx
+            else:
+                idx = cell_idx[0]
+            process_labels = [adata.obs[bio_processes_key].iloc[idx]]
+        else:
+            # Multiple cells case
+            process_labels = adata.obs[bio_processes_key].iloc[cell_idx]
+            if hasattr(process_labels, 'values'):
+                process_labels = process_labels.values.tolist()
+            else:
+                process_labels = list(process_labels)
+        process_indices = torch.tensor([
+            self.process_to_idx.get(str(label), 0) for label in process_labels
+        ], dtype=torch.long, device=device)
         
         z_unpert, _, _ = self._forward_encoder(mu_ms)
         z_pert = z_unpert.clone()
         z_pert[:, gp_idx] = perturb_value
-        velocity_unpert, velocity_gp_unpert, alpha_unpert, beta_unpert, gamma_unpert = self._forward_velocity_decoder(z_unpert, mu_ms, cluster_indices)
-        velocity_pert, velocity_gp_pert, alpha_pert, beta_pert, gamma_pert = self._forward_velocity_decoder(z_pert, mu_ms, cluster_indices)
+        velocity_unpert, velocity_gp_unpert, alpha_unpert, beta_unpert, gamma_unpert = self._forward_velocity_decoder(z_unpert, mu_ms, cluster_indices, process_indices)
+        velocity_pert, velocity_gp_pert, alpha_pert, beta_pert, gamma_pert = self._forward_velocity_decoder(z_pert, mu_ms, cluster_indices, process_indices)
         x_dec_unpert = self._forward_gene_decoder(z_unpert)
         x_dec_pert = self._forward_gene_decoder(z_pert)
 

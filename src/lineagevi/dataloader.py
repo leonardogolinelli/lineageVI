@@ -56,6 +56,8 @@ class RegimeDataset(Dataset):
         nn_key: str = 'indices',
         cluster_key: Optional[str] = None,
         cluster_to_idx: Optional[dict] = None,
+        bio_processes_key: Optional[str] = None,
+        process_to_idx: Optional[dict] = None,
     ):
         self.adata        = adata
         self.K            = K
@@ -63,6 +65,7 @@ class RegimeDataset(Dataset):
         self.spliced_key  = spliced_key
         self.latent_key   = latent_key
         self.cluster_key  = cluster_key
+        self.bio_processes_key = bio_processes_key
 
         # kNN indices from adata.uns['indices']
         indices = adata.uns.get(nn_key)
@@ -84,10 +87,27 @@ class RegimeDataset(Dataset):
                 raise ValueError("cluster_to_idx is required when cluster_key is provided")
             cluster_labels = adata.obs[cluster_key]
             # Map cluster labels to indices
-            cluster_idx_array = np.array([cluster_to_idx.get(label, 0) for label in cluster_labels])
+            cluster_idx_array = np.array([cluster_to_idx.get(str(label), 0) for label in cluster_labels])
             self.cluster_indices = torch.from_numpy(cluster_idx_array.astype(np.int64))
         else:
             self.cluster_indices = None
+
+        # Process indices (always present - use 'bio_process' if bio_processes_key not provided)
+        if bio_processes_key is None or bio_processes_key not in adata.obs.columns:
+            # Use 'bio_process' column (created during model initialization)
+            if 'bio_process' not in adata.obs.columns:
+                # Fallback: create 'bio_process' with 'Unspecified'
+                adata.obs['bio_process'] = 'Unspecified'
+            process_labels = adata.obs['bio_process']
+        else:
+            process_labels = adata.obs[bio_processes_key]
+        
+        if process_to_idx is None:
+            raise ValueError("process_to_idx is required")
+        
+        # Map process labels to indices
+        process_idx_array = np.array([process_to_idx.get(str(label), 0) for label in process_labels])
+        self.process_indices = torch.from_numpy(process_idx_array.astype(np.int64))
 
         # will load latent z at switch to regime 2
         self.latent_data = None
@@ -120,23 +140,24 @@ class RegimeDataset(Dataset):
         # exclude self (position 0), take next K neighbors
         neigh_idx = self.nn_indices[idx, 1:self.K+1]
         x_neigh   = self.x[neigh_idx]  # (K, G)
+        process_idx = self.process_indices[idx]  # Always present
 
         if self.first_regime:
             x = self.x[idx]
             if self.cluster_indices is not None:
                 cluster_idx = self.cluster_indices[idx]
-                return x, idx, x_neigh, cluster_idx
+                return x, idx, x_neigh, cluster_idx, process_idx
             else:
-                return x, idx, x_neigh      # you only need x and its neighs
+                return x, idx, x_neigh, process_idx      # you only need x and its neighs
         else:
             x       = self.x[idx]
             z       = self.latent_data[idx]
             z_neigh = self.latent_data[neigh_idx]
             if self.cluster_indices is not None:
                 cluster_idx = self.cluster_indices[idx]
-                return x, idx, x_neigh, z, z_neigh, cluster_idx
+                return x, idx, x_neigh, z, z_neigh, cluster_idx, process_idx
             else:
-                return x, idx, x_neigh, z, z_neigh
+                return x, idx, x_neigh, z, z_neigh, process_idx
 
 def make_dataloader(
     adata: sc.AnnData,
@@ -152,6 +173,8 @@ def make_dataloader(
     seed: Optional[int] = None,
     cluster_key: Optional[str] = None,
     cluster_to_idx: Optional[dict] = None,
+    bio_processes_key: Optional[str] = None,
+    process_to_idx: Optional[dict] = None,
 ) -> DataLoader:
     """
     Create a PyTorch DataLoader for LineageVI training.
@@ -216,6 +239,8 @@ def make_dataloader(
         nn_key=nn_key,
         cluster_key=cluster_key,
         cluster_to_idx=cluster_to_idx,
+        bio_processes_key=bio_processes_key,
+        process_to_idx=process_to_idx,
     )
     ds.set_regime(first_regime)
 

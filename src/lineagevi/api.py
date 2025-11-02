@@ -36,6 +36,19 @@ class LineageVI:
         Device to run computations on. Defaults to CUDA if available, else CPU.
     seed : int, optional
         Random seed for reproducibility.
+    cluster_key : str, optional
+        Key in adata.obs for cell clusters/lineages. If provided, cluster embeddings
+        will be learned and used in velocity prediction.
+    cluster_embedding_dim : int, default 32
+        Dimension of cluster embeddings. Used when cluster_key is provided.
+    bio_processes_key : str, optional
+        Key in adata.obs for biological processes. If provided, process-specific CLS
+        embeddings will be learned. If None or non-existent, a 'bio_process' column
+        will be created with all cells assigned to 'Unspecified' (single global CLS embedding).
+    cls_embedding_dim : int, default 32
+        Dimension of CLS (classification) embedding. The CLS embedding learns
+        process-specific global dynamics and is used in velocity prediction.
+        It is learned only in regime 2 (velocity prediction) and frozen in regime 1.
     
     Attributes
     ----------
@@ -80,6 +93,8 @@ class LineageVI:
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
+        bio_processes_key: Optional[str] = None,
+        cls_embedding_dim: int = 32,
     ):
         self.adata = adata
         self.model = LineageVIModel(
@@ -89,6 +104,8 @@ class LineageVI:
             seed=seed,
             cluster_key=cluster_key,
             cluster_embedding_dim=cluster_embedding_dim,
+            bio_processes_key=bio_processes_key,
+            cls_embedding_dim=cls_embedding_dim,
         )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)

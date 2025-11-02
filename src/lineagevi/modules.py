@@ -310,6 +310,77 @@ class VelocityDecoder(nn.Module):
         return velocity, velocity_gp, alpha, beta, gamma
 
 
+class CLSEmbedding(nn.Module):
+    """
+    CLS (classification) embedding module that learns embeddings for biological processes.
+    
+    This module creates a lookup table of embeddings for each unique biological process.
+    All cells in the same process share the same CLS embedding, which encodes process-specific
+    global dynamics (e.g., pancreas development vs liver development).
+    
+    If all cells belong to the same process (or no process key is provided), a single
+    'Unspecified' process embedding is created, making all cells share the same CLS embedding.
+    
+    The CLS embedding is learned only in regime 2 (velocity prediction) and is frozen
+    during regime 1 (expression reconstruction).
+    
+    Parameters
+    ----------
+    n_processes : int
+        Number of unique biological processes.
+    embedding_dim : int, default 32
+        Dimension of the CLS embedding.
+    
+    Attributes
+    ----------
+    embeddings : nn.Embedding
+        Embedding table with shape (n_processes, embedding_dim).
+    
+    Examples
+    --------
+    >>> # Create CLS embeddings for 3 biological processes with 32-dimensional embeddings
+    >>> cls_emb = CLSEmbedding(n_processes=3, embedding_dim=32)
+    >>> 
+    >>> # Forward pass with process indices
+    >>> process_idx = torch.tensor([0, 1, 2, 0, 1])  # 5 cells, 3 processes
+    >>> emb = cls_emb(process_idx)  # shape: (5, 32)
+    """
+    
+    def __init__(self, n_processes: int, embedding_dim: int = 32):
+        super().__init__()
+        self.embeddings = nn.Embedding(n_processes, embedding_dim)
+        
+        # Initialize with small random values
+        nn.init.normal_(self.embeddings.weight, mean=0.0, std=0.01)
+    
+    def forward(self, process_indices: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass to get CLS embeddings for cells in batch.
+        
+        Parameters
+        ----------
+        process_indices : torch.Tensor
+            Process indices of shape (batch_size,) with integer values in [0, n_processes).
+        
+        Returns
+        -------
+        torch.Tensor
+            CLS embeddings of shape (batch_size, embedding_dim).
+        """
+        return self.embeddings(process_indices)
+    
+    def get_all_embeddings(self) -> torch.Tensor:
+        """
+        Get all CLS embeddings as a lookup table.
+        
+        Returns
+        -------
+        torch.Tensor
+            All CLS embeddings of shape (n_processes, embedding_dim).
+        """
+        return self.embeddings.weight
+
+
 class ClusterEmbedding(nn.Module):
     """
     Cluster embedding module that learns embeddings for each cluster.
