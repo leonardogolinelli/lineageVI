@@ -167,15 +167,16 @@ class LineageVIModel(nn.Module):
             
             # Create cluster embedding module
             self.cluster_embedding = ClusterEmbedding(n_clusters, cluster_embedding_dim)
-            velocity_input_dim = n_latent + cluster_embedding_dim
         else:
             self.cluster_embedding = None
-            velocity_input_dim = n_latent
+            cluster_embedding_dim = 0  # Set to 0 if no cluster embeddings
 
         # submodules
-        self.encoder = Encoder(n_input, n_hidden, n_latent)
+        # Encoder receives cluster embeddings concatenated to input
+        self.encoder = Encoder(n_input, n_hidden, n_latent, cluster_embedding_dim=cluster_embedding_dim if cluster_key is not None else 0)
         self.gene_decoder = MaskedLinearDecoder(n_latent, n_output, mask)
-        self.velocity_decoder = VelocityDecoder(velocity_input_dim, n_hidden, 2 * G, n_latent)
+        # Velocity decoder now only takes n_latent (no cluster embeddings)
+        self.velocity_decoder = VelocityDecoder(n_latent, n_hidden, 2 * G, n_latent)
 
         # keep mask buffer around if needed elsewhere
         self.register_buffer("mask", mask)
@@ -194,7 +195,7 @@ class LineageVIModel(nn.Module):
             concatenated unspliced and spliced gene expression.
         cluster_indices : torch.Tensor, optional
             Cluster indices of shape (batch_size,) with integer cluster indices.
-            Required when cluster_key is set and not in first_regime.
+            Required when cluster_key is set (used in both regimes).
         
         Returns
         -------
@@ -208,30 +209,30 @@ class LineageVIModel(nn.Module):
             - 'velocity_gp': Gene program velocities (if not first regime)
             - 'alpha', 'beta', 'gamma': Kinetic parameters (if not first regime)
         """
-        z, mean, logvar = self.encoder(x)
+        # Get cluster embeddings if available
+        cluster_emb = None
+        if self.cluster_embedding is not None:
+            if cluster_indices is None:
+                raise ValueError(
+                    "cluster_indices is required when cluster_key is set. "
+                    "Please provide cluster indices for each cell in the batch."
+                )
+            # Ensure cluster_indices is a 1D tensor of shape (batch_size,)
+            if cluster_indices.dim() == 0:
+                cluster_indices = cluster_indices.unsqueeze(0)
+            elif cluster_indices.dim() > 1:
+                cluster_indices = cluster_indices.squeeze()
+            
+            # Get cluster embeddings for this batch
+            cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
+        
+        # Encoder receives cluster embeddings concatenated to input (both regimes)
+        z, mean, logvar = self.encoder(x, cluster_emb=cluster_emb)
         recon = self.gene_decoder(z)
 
         if not self.first_regime:
-            # In regime 2, concatenate cluster embeddings to z if available
-            if self.cluster_embedding is not None:
-                if cluster_indices is None:
-                    raise ValueError(
-                        "cluster_indices is required when cluster_key is set. "
-                        "Please provide cluster indices for each cell in the batch."
-                    )
-                # Ensure cluster_indices is a 1D tensor of shape (batch_size,)
-                if cluster_indices.dim() == 0:
-                    cluster_indices = cluster_indices.unsqueeze(0)
-                elif cluster_indices.dim() > 1:
-                    cluster_indices = cluster_indices.squeeze()
-                
-                # Get cluster embeddings for this batch
-                cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-                # Concatenate z and cluster embeddings
-                z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
-            else:
-                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
+            # In regime 2, velocity decoder uses z directly (no cluster embeddings)
+            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         else:
             velocity = velocity_gp = alpha = beta = gamma = None
 
@@ -304,7 +305,7 @@ class LineageVIModel(nn.Module):
         max_sim, _ = cos_sim.max(dim=1)                               # (B,)
         return (1.0 - max_sim).mean()
 
-    def _forward_encoder(self, x, *, generator: Optional[torch.Generator] = None):
+    def _forward_encoder(self, x, cluster_emb: Optional[torch.Tensor] = None, *, generator: Optional[torch.Generator] = None):
         """
         Forward pass through the encoder only.
         
@@ -312,6 +313,9 @@ class LineageVIModel(nn.Module):
         ----------
         x : torch.Tensor
             Input gene expression of shape (batch_size, 2*n_genes).
+        cluster_emb : torch.Tensor, optional
+            Cluster embeddings of shape (batch_size, cluster_embedding_dim).
+            If provided, will be concatenated to the summed expression (u+s).
         generator : torch.Generator, optional
             Random number generator for reproducible sampling.
         
@@ -324,7 +328,7 @@ class LineageVIModel(nn.Module):
         logvar : torch.Tensor
             Encoder log-variance.
         """
-        z, mean, logvar = self.encoder(x, generator=generator)
+        z, mean, logvar = self.encoder(x, cluster_emb=cluster_emb, generator=generator)
         return z, mean, logvar
 
     def _forward_gene_decoder(self, z):
@@ -356,7 +360,8 @@ class LineageVIModel(nn.Module):
             Input gene expression of shape (batch_size, 2*n_genes).
         cluster_indices : torch.Tensor, optional
             Cluster indices of shape (batch_size,) with integer cluster indices.
-            Required when cluster_key is set.
+            Not used in velocity decoder (cluster embeddings are in encoder input),
+            but kept for API compatibility.
         
         Returns
         -------
@@ -371,23 +376,8 @@ class LineageVIModel(nn.Module):
         gamma : torch.Tensor
             Degradation rate parameters of shape (batch_size, n_genes).
         """
-        if self.cluster_embedding is not None:
-            if cluster_indices is None:
-                raise ValueError(
-                    "cluster_indices is required when cluster_key is set. "
-                    "Please provide cluster indices for each cell in the batch."
-                )
-            # Ensure cluster_indices is a 1D tensor of shape (batch_size,)
-            if cluster_indices.dim() == 0:
-                cluster_indices = cluster_indices.unsqueeze(0)
-            elif cluster_indices.dim() > 1:
-                cluster_indices = cluster_indices.squeeze()
-            
-            cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-            z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
-        else:
-            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
+        # Velocity decoder now only takes z directly (no cluster embeddings)
+        velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         return velocity, velocity_gp, alpha, beta, gamma
     
     def latent_enrich(
@@ -487,9 +477,38 @@ class LineageVIModel(nn.Module):
                 u_s = torch.tensor(u_s, dtype=torch.float32)
                 u_s_others = torch.tensor(u_s_others, dtype=torch.float32)
 
+                # Get cluster embeddings if cluster_key is set
+                cluster_emb_cat = None
+                cluster_emb_others = None
+                device = next(self.parameters()).device
+                
+                if self.cluster_embedding is not None:
+                    if self.cluster_key not in adata.obs.columns:
+                        raise ValueError(
+                            f"cluster_key '{self.cluster_key}' not found in adata.obs.columns. "
+                            f"Required for enrichment analysis when cluster_key is set."
+                        )
+                    # Get cluster labels for selected cells
+                    cluster_labels_cat = adata_cat.obs[self.cluster_key].values
+                    cluster_labels_others = adata_others.obs[self.cluster_key].values
+                    
+                    # Convert to cluster indices
+                    cluster_indices_cat = torch.tensor([
+                        self.cluster_to_idx.get(str(label), 0) for label in cluster_labels_cat
+                    ], dtype=torch.long, device=device)
+                    cluster_indices_others = torch.tensor([
+                        self.cluster_to_idx.get(str(label), 0) for label in cluster_labels_others
+                    ], dtype=torch.long, device=device)
+                    
+                    cluster_emb_cat = self.cluster_embedding(cluster_indices_cat)
+                    cluster_emb_others = self.cluster_embedding(cluster_indices_others)
+                
+                u_s = u_s.to(device)
+                u_s_others = u_s_others.to(device)
+
                 with torch.no_grad():
-                    z0, means0, logvars0 = self._forward_encoder(u_s)
-                    z1, means1, logvars1 = self._forward_encoder(u_s_others)
+                    z0, means0, logvars0 = self._forward_encoder(u_s, cluster_emb=cluster_emb_cat)
+                    z1, means1, logvars1 = self._forward_encoder(u_s_others, cluster_emb=cluster_emb_others)
 
                     vars0 = logvars0.exp()
                     vars1 = logvars1.exp()
@@ -631,8 +650,22 @@ class LineageVIModel(nn.Module):
                 raise ValueError(f"Unexpected batch size: {len(batch)}")
             
             x = x.to(device)
-            if cluster_indices is not None:
+            
+            # Get cluster embeddings - required when cluster_key is set
+            cluster_emb = None
+            if self.cluster_embedding is not None:
+                if cluster_indices is None:
+                    raise ValueError(
+                        "cluster_indices is required when cluster_key is set. "
+                        "The dataloader should provide cluster indices in the batch. "
+                        f"Got batch with {len(batch)} elements, expected 4 when cluster_key is set."
+                    )
                 cluster_indices = cluster_indices.to(device)
+                cluster_emb = self.cluster_embedding(cluster_indices)
+            elif cluster_indices is not None:
+                # Warn if cluster_indices provided but cluster_embedding is None
+                # This shouldn't happen if dataloader is configured correctly
+                pass
             
             # per-sample collectors (stack on dim=0 later)
             recon_s, vel_s, velgp_s = [], [], []
@@ -643,7 +676,7 @@ class LineageVIModel(nn.Module):
             mean_first, logvar_first = None, None
             
             for i in range(n_samples):
-                z, mean, logvar = self._forward_encoder(x, generator=gen)
+                z, mean, logvar = self._forward_encoder(x, cluster_emb=cluster_emb, generator=gen)
                 recon = self._forward_gene_decoder(z)  # (B, G)
                 velocity, velocity_gp, alpha, beta, gamma = self._forward_velocity_decoder(z, x, cluster_indices)  # (B, 2G), (B, L), (B, G)x3
 
@@ -1527,7 +1560,17 @@ class LineageVIModel(nn.Module):
                 self.cluster_to_idx.get(label, 0) for label in cluster_labels
             ], dtype=torch.long, device=device)
         
-        z_unpert, _, _ = self._forward_encoder(mu_ms)
+        # Get cluster embeddings - required when cluster_key is set
+        cluster_emb = None
+        if self.cluster_embedding is not None:
+            if cluster_indices is None:
+                raise ValueError(
+                    "cluster_indices is required when cluster_key is set. "
+                    "Cannot perturb genes without cluster information."
+                )
+            cluster_emb = self.cluster_embedding(cluster_indices)
+        
+        z_unpert, _, _ = self._forward_encoder(mu_ms, cluster_emb=cluster_emb)
         z_pert = z_unpert.clone()
         z_pert[:, gp_idx] = perturb_value
         velocity_unpert, velocity_gp_unpert, alpha_unpert, beta_unpert, gamma_unpert = self._forward_velocity_decoder(z_unpert, mu_ms, cluster_indices)

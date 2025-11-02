@@ -197,12 +197,13 @@ class _Trainer:
     # ------- Pieces -------
 
     def _train_regime1(self, loader, lr: float, epochs: int) -> List[float]:
-        # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
+        # Freeze velocity_decoder; unfreeze encoder, gene_decoder, and cluster_embedding
+        # Cluster embeddings are now used in encoder input, so they should learn in regime 1
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
         if self.model.cluster_embedding is not None:
             for p in self.model.cluster_embedding.parameters():
-                p.requires_grad = False
+                p.requires_grad = True  # Learn embeddings in regime 1 (used in encoder)
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = True
@@ -255,11 +256,23 @@ class _Trainer:
             for batch in loader:
                 if len(batch) == 4:  # Has cluster indices
                     x, idx, x_neigh, cluster_idx = batch
+                    cluster_idx = cluster_idx.to(self.device)
                 else:
                     x, idx, x_neigh = batch
+                    cluster_idx = None
                 
                 x = x.to(self.device)
-                _, mu, _ = self.model.encoder(x)
+                # Get cluster embeddings - required when cluster_key is set
+                cluster_emb = None
+                if self.model.cluster_embedding is not None:
+                    if cluster_idx is None:
+                        raise ValueError(
+                            "cluster_idx is required when cluster_key is set. "
+                            "The dataloader should provide cluster indices in the batch. "
+                            f"Got batch with {len(batch)} elements, expected 4 when cluster_key is set."
+                        )
+                    cluster_emb = self.model.cluster_embedding(cluster_idx)
+                _, mu, _ = self.model.encoder(x, cluster_emb=cluster_emb)
                 latent_list.append(mu.cpu())
                 idx_all.extend(idx.numpy().tolist())
 

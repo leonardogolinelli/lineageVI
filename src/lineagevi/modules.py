@@ -10,18 +10,22 @@ class Encoder(nn.Module):
     
     This encoder implements a variational autoencoder (VAE) encoder that:
     1. Takes concatenated unspliced+spliced gene expression as input
-    2. Projects to a shared hidden representation
-    3. Outputs mean and log-variance for latent space sampling
-    4. Uses reparameterization trick for differentiable sampling
+    2. Optionally concatenates cluster embeddings to the summed expression (u+s)
+    3. Projects to a shared hidden representation
+    4. Outputs mean and log-variance for latent space sampling
+    5. Uses reparameterization trick for differentiable sampling
     
     Parameters
     ----------
     n_input : int
-        Input dimension (2 * number of genes for unspliced+spliced).
+        Input dimension (number of genes).
     n_hidden : int
         Number of hidden units in the encoder network.
     n_latent : int
         Dimension of the latent space (number of gene programs).
+    cluster_embedding_dim : int, default 0
+        Dimension of cluster embeddings. If > 0, cluster embeddings will be
+        concatenated to the summed expression (u+s) before encoding.
     
     Attributes
     ----------
@@ -42,11 +46,15 @@ class Encoder(nn.Module):
     >>> # z, mean, logvar shape: (batch, 50)
     """
     
-    def __init__(self, n_input: int, n_hidden: int, n_latent: int):
+    def __init__(self, n_input: int, n_hidden: int, n_latent: int, cluster_embedding_dim: int = 0):
         super().__init__()
+        # Input dimension includes cluster embeddings if provided
+        # In forward, we concatenate cluster embeddings to the summed expression (u+s)
+        self.cluster_embedding_dim = cluster_embedding_dim
+        encoder_input_dim = n_input + cluster_embedding_dim
         # shared encoder MLP
         self.encoder = nn.Sequential(
-            nn.Linear(n_input, n_hidden),
+            nn.Linear(encoder_input_dim, n_hidden),
             nn.LayerNorm(n_hidden),
             nn.ReLU(),
         )
@@ -55,7 +63,7 @@ class Encoder(nn.Module):
         self.mean_layer = nn.Linear(n_hidden, n_latent)
         self.logvar_layer = nn.Linear(n_hidden, n_latent)
 
-    def forward(self, x: torch.Tensor, *, generator: Optional[torch.Generator] = None):
+    def forward(self, x: torch.Tensor, cluster_emb: Optional[torch.Tensor] = None, *, generator: Optional[torch.Generator] = None):
         """
         Forward pass through the encoder.
         
@@ -64,6 +72,9 @@ class Encoder(nn.Module):
         x : torch.Tensor
             Input tensor of shape (batch_size, 2*n_genes) containing
             concatenated unspliced and spliced gene expression.
+        cluster_emb : torch.Tensor, optional
+            Cluster embeddings of shape (batch_size, cluster_embedding_dim).
+            If provided, will be concatenated to the summed expression (u+s).
         generator : torch.Generator, optional
             Random number generator for reproducible sampling.
         
@@ -78,7 +89,18 @@ class Encoder(nn.Module):
         """
         # x is concatenated [u, s] so split then sum for the encoder signal
         u, s = torch.split(x, x.shape[1] // 2, dim=1)
-        xs = u + s
+        xs = u + s  # (batch_size, n_genes)
+        
+        # Concatenate cluster embeddings - required when cluster_embedding_dim > 0
+        if self.cluster_embedding_dim > 0:
+            if cluster_emb is None:
+                raise ValueError(
+                    f"cluster_emb is required when cluster_embedding_dim > 0. "
+                    f"Expected cluster_emb of shape (batch_size, {self.cluster_embedding_dim}), "
+                    f"but got None. Please ensure cluster embeddings are provided for all cells."
+                )
+            xs = torch.cat([xs, cluster_emb], dim=1)  # (batch_size, n_genes + cluster_embedding_dim)
+        
         h = self.encoder(xs)
         mean = self.mean_layer(h)
         logvar = self.logvar_layer(h)
@@ -200,7 +222,8 @@ class VelocityDecoder(nn.Module):
     Parameters
     ----------
     n_input : int
-        Input dimension (n_latent or n_latent + cluster_embedding_dim when cluster embeddings are used).
+        Input dimension (n_latent). Cluster embeddings are no longer concatenated here;
+        they are now used in the encoder input instead.
     n_hidden : int
         Number of hidden units in the shared decoder.
     n_output : int
@@ -271,8 +294,7 @@ class VelocityDecoder(nn.Module):
         Parameters
         ----------
         z : torch.Tensor
-            Latent representations (and optionally cluster embeddings) of shape (batch_size, n_input).
-            When cluster embeddings are used, this is the concatenation of z and cluster embeddings.
+            Latent representations of shape (batch_size, n_input).
         x : torch.Tensor
             Input gene expression of shape (batch_size, 2*n_genes) containing
             concatenated unspliced and spliced counts.
