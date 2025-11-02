@@ -652,6 +652,8 @@ class LineageVIModel(nn.Module):
         latent_key: str = "z",
         nn_key: str = "indices",
         batch_size: int = 256,
+        rescale_velocity_magnitude: bool = True,
+        max_velocity_magnitude: float = 1.0,
     ):
         """
         Samples the model over the dataset.
@@ -676,6 +678,20 @@ class LineageVIModel(nn.Module):
 
         NOTE: If n_samples > 1, averages across samples BEFORE writing,
                 overriding a potential return_mean=False.
+        
+        Parameters
+        ----------
+        rescale_velocity_magnitude : bool, default True
+            Whether to rescale velocity magnitudes based on neighbor consistency.
+            If True, computes cosine similarity between each cell's velocity direction
+            and its K nearest neighbors' velocity directions. Velocities with high
+            consistency (neighbors agree) get higher magnitudes, while inconsistent
+            velocities get lower magnitudes. Uses the same K as the training regime.
+        max_velocity_magnitude : float, default 1.0
+            Maximum velocity magnitude after rescaling. Velocities with perfect
+            consistency (average cosine similarity = 1.0) will have this magnitude.
+            Velocities with zero consistency (average cosine similarity = 0.0) will
+            have zero magnitude.
         """
         from .dataloader import make_dataloader
 
@@ -826,6 +842,122 @@ class LineageVIModel(nn.Module):
         alpha_all  = _maybe_squeeze(alpha_all)
         beta_all   = _maybe_squeeze(beta_all)
         gamma_all  = _maybe_squeeze(gamma_all)
+
+        # Rescale velocity magnitudes based on neighbor consistency (inference-time)
+        if rescale_velocity_magnitude and vel_all is not None:
+            # Get nearest neighbor indices from adata.uns
+            nn_indices = adata.uns.get(nn_key)
+            if nn_indices is None:
+                import warnings
+                warnings.warn(
+                    f"Nearest neighbor indices not found in adata.uns['{nn_key}']. "
+                    f"Skipping velocity magnitude rescaling. "
+                    f"Run lineagevi.utils.compute_nearest_neighbors(adata) first.",
+                    UserWarning
+                )
+            else:
+                # Ensure velocities are 2D (cells, features)
+                if vel_all.ndim == 3:
+                    # (n_samples, cells, features) - take mean across samples
+                    vel_mean = vel_all.mean(dim=0)  # (cells, features)
+                else:
+                    vel_mean = vel_all  # (cells, features)
+                
+                # Convert nn_indices to torch tensor
+                nn_indices_tensor = torch.from_numpy(np.asarray(nn_indices, dtype=np.int64)).to(vel_mean.device)
+                n_cells = vel_mean.shape[0]
+                n_features = vel_mean.shape[1]
+                K_total = nn_indices_tensor.shape[1]
+                K = K_total - 1  # Exclude self (first column)
+                
+                # Normalize all velocities to get directions
+                vel_mean_norm = F.normalize(vel_mean, p=2, dim=1)  # (cells, features)
+                
+                # Compute consistency scores for each cell
+                consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
+                
+                for i in range(n_cells):
+                    # Get cell's velocity direction (already normalized)
+                    v_i_norm = vel_mean_norm[i]  # (features,)
+                    
+                    # Get neighbor indices (exclude self, which is at position 0)
+                    neighbor_indices = nn_indices_tensor[i, 1:K_total]  # (K,)
+                    # Filter out invalid indices (-1 for padding)
+                    valid_mask = neighbor_indices >= 0
+                    valid_indices = neighbor_indices[valid_mask]  # (K_valid,)
+                    
+                    if valid_indices.numel() == 0:
+                        # No valid neighbors, set consistency to 0
+                        consistency_scores[i] = 0.0
+                        continue
+                    
+                    # Get neighbors' velocity directions (already normalized)
+                    v_neigh_norm = vel_mean_norm[valid_indices]  # (K_valid, features)
+                    
+                    # Compute cosine similarities between cell's velocity and neighbors' velocities
+                    cos_sims = F.cosine_similarity(
+                        v_i_norm.unsqueeze(0), 
+                        v_neigh_norm, 
+                        dim=1
+                    )  # (K_valid,)
+                    
+                    # Use mean cosine similarity as consistency score
+                    # Clamp to [0, 1] range (cosine similarity is in [-1, 1])
+                    consistency = (cos_sims.mean() + 1.0) / 2.0  # Map from [-1, 1] to [0, 1]
+                    consistency_scores[i] = consistency.clamp(0.0, 1.0)
+                
+                # Scale velocity magnitudes: consistency → magnitude
+                # Max consistency (1.0) → max_velocity_magnitude
+                # Zero consistency (0.0) → 0.0
+                if vel_all.ndim == 3:
+                    # (n_samples, cells, features)
+                    for s in range(vel_all.shape[0]):
+                        for i in range(n_cells):
+                            # Get original velocity vector
+                            v_orig = vel_all[s, i]  # (features,)
+                            # Get original magnitude
+                            magnitude_orig = v_orig.norm(p=2)
+                            if magnitude_orig > 0:
+                                # Compute scale factor based on consistency
+                                scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                # Scale velocity: maintain direction, scale magnitude
+                                vel_all[s, i] = v_orig * scale_factor
+                else:
+                    # (cells, features)
+                    for i in range(n_cells):
+                        # Get original velocity vector
+                        v_orig = vel_all[i]  # (features,)
+                        # Get original magnitude
+                        magnitude_orig = v_orig.norm(p=2)
+                        if magnitude_orig > 0:
+                            # Compute scale factor based on consistency
+                            scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                            # Scale velocity: maintain direction, scale magnitude
+                            vel_all[i] = v_orig * scale_factor
+                
+                # Also rescale velocity_gp if available
+                if velgp_all is not None:
+                    if velgp_all.ndim == 3:
+                        velgp_mean = velgp_all.mean(dim=0)  # (cells, features)
+                    else:
+                        velgp_mean = velgp_all  # (cells, features)
+                    
+                    # Apply same consistency scores to velocity_gp
+                    if velgp_all.ndim == 3:
+                        for s in range(velgp_all.shape[0]):
+                            for i in range(n_cells):
+                                vgp_orig = velgp_all[s, i]
+                                magnitude_orig = vgp_orig.norm(p=2)
+                                if magnitude_orig > 0:
+                                    scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                    velgp_all[s, i] = vgp_orig * scale_factor
+                    else:
+                        for i in range(n_cells):
+                            vgp_orig = velgp_all[i]
+                            magnitude_orig = vgp_orig.norm(p=2)
+                            if magnitude_orig > 0:
+                                scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                velgp_all[i] = vgp_orig * scale_factor
 
         # split velocity into u/s in NumPy space
         vel_u_np = vel_s_np = None

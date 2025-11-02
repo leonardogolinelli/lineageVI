@@ -260,6 +260,8 @@ class LineageVI:
         spliced_key: str = "Ms",
         nn_key: str = "indices",
         batch_size: int = 256,
+        rescale_velocity_magnitude: bool = True,
+        max_velocity_magnitude: float = 1.0,
     ):
         """
         Get model predictions including velocities and latent representations.
@@ -290,6 +292,13 @@ class LineageVI:
             Key for nearest neighbor indices in adata.uns.
         batch_size : int, default 256
             Batch size for processing.
+        rescale_velocity_magnitude : bool, default True
+            Whether to rescale velocity magnitudes based on neighbor consistency.
+            If True, velocities with consistent directions across neighbors get
+            higher magnitudes, while inconsistent velocities get lower magnitudes.
+        max_velocity_magnitude : float, default 1.0
+            Maximum velocity magnitude after rescaling. Velocities with perfect
+            consistency (all neighbors agree) will have this magnitude.
         
         Returns
         -------
@@ -325,7 +334,9 @@ class LineageVI:
             spliced_key=spliced_key,
             latent_key=self.latent_key,  # Always "z" - hardcoded
             nn_key=nn_key,
-            batch_size=256,
+            batch_size=batch_size,
+            rescale_velocity_magnitude=rescale_velocity_magnitude,
+            max_velocity_magnitude=max_velocity_magnitude,
         )
 
     def latent_enrich(
