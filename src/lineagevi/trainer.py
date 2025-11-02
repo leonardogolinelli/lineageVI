@@ -197,11 +197,16 @@ class _Trainer:
     # ------- Pieces -------
 
     def _train_regime1(self, loader, lr: float, epochs: int) -> List[float]:
-        # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
+        # Freeze velocity_decoder (including attention and GP embeddings), cluster_embedding; 
+        # unfreeze encoder & gene_decoder
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
         if self.model.cluster_embedding is not None:
             for p in self.model.cluster_embedding.parameters():
+                p.requires_grad = False
+        # Explicitly freeze GP embeddings if attention is used
+        if self.model.velocity_decoder.attention is not None:
+            for p in self.model.velocity_decoder.attention.gp_embeddings.parameters():
                 p.requires_grad = False
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
@@ -270,7 +275,8 @@ class _Trainer:
         return z_all.numpy()
 
     def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True) -> List[float]:
-        # Freeze encoder & gene_decoder; unfreeze velocity_decoder and cluster_embedding
+        # Freeze encoder & gene_decoder; unfreeze velocity_decoder (including attention and GP embeddings) 
+        # and cluster_embedding
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = False
@@ -278,6 +284,10 @@ class _Trainer:
             p.requires_grad = True
         if self.model.cluster_embedding is not None:
             for p in self.model.cluster_embedding.parameters():
+                p.requires_grad = True
+        # Explicitly unfreeze GP embeddings if attention is used (so they're learned in regime 2)
+        if self.model.velocity_decoder.attention is not None:
+            for p in self.model.velocity_decoder.attention.gp_embeddings.parameters():
                 p.requires_grad = True
 
         self.model.first_regime = False

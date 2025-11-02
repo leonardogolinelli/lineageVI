@@ -83,6 +83,8 @@ class LineageVI:
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
+        gp_embedding_dim: int = 32,
+        attention_dim: Optional[int] = None,
     ):
         self.adata = adata
         self.model = LineageVIModel(
@@ -92,6 +94,8 @@ class LineageVI:
             seed=seed,
             cluster_key=cluster_key,
             cluster_embedding_dim=cluster_embedding_dim,
+            gp_embedding_dim=gp_embedding_dim,
+            attention_dim=attention_dim,
         )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)

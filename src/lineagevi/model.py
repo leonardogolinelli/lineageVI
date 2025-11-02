@@ -92,6 +92,14 @@ class LineageVIModel(nn.Module):
         Key for gene program mask in adata.varm.
     seed : int, optional
         Random seed for reproducible initialization.
+    cluster_key : str, optional
+        Key in adata.obs containing cluster labels for cluster embeddings.
+    cluster_embedding_dim : int, default 32
+        Dimension of cluster embeddings.
+    gp_embedding_dim : int, default 32
+        Dimension of gene program-specific embeddings used in attention mechanism.
+    attention_dim : int, optional
+        Dimension of attention space. If None, uses n_latent.
     
     Attributes
     ----------
@@ -133,6 +141,8 @@ class LineageVIModel(nn.Module):
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
+        gp_embedding_dim: int = 32,
+        attention_dim: Optional[int] = None,
     ):
         # If a seed is provided, lock all RNGs *before* instantiating any layers
         if seed is not None:
@@ -167,15 +177,22 @@ class LineageVIModel(nn.Module):
             
             # Create cluster embedding module
             self.cluster_embedding = ClusterEmbedding(n_clusters, cluster_embedding_dim)
-            velocity_input_dim = n_latent + cluster_embedding_dim
         else:
             self.cluster_embedding = None
-            velocity_input_dim = n_latent
 
         # submodules
         self.encoder = Encoder(n_input, n_hidden, n_latent)
         self.gene_decoder = MaskedLinearDecoder(n_latent, n_output, mask)
-        self.velocity_decoder = VelocityDecoder(velocity_input_dim, n_hidden, 2 * G, n_latent)
+        # Pass cluster_embedding_dim to velocity decoder (uses attention when cluster_key is set)
+        self.velocity_decoder = VelocityDecoder(
+            n_latent,  # Input is always n_latent (attention or no attention)
+            n_hidden, 
+            2 * G, 
+            n_latent,
+            cluster_embedding_dim=cluster_embedding_dim if cluster_key is not None else None,
+            gp_embedding_dim=gp_embedding_dim if cluster_key is not None else 32,
+            attention_dim=attention_dim,
+        )
 
         # keep mask buffer around if needed elsewhere
         self.register_buffer("mask", mask)
@@ -212,7 +229,7 @@ class LineageVIModel(nn.Module):
         recon = self.gene_decoder(z)
 
         if not self.first_regime:
-            # In regime 2, concatenate cluster embeddings to z if available
+            # In regime 2, use attention mechanism if cluster embeddings are available
             if self.cluster_embedding is not None:
                 if cluster_indices is None:
                     raise ValueError(
@@ -227,9 +244,8 @@ class LineageVIModel(nn.Module):
                 
                 # Get cluster embeddings for this batch
                 cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-                # Concatenate z and cluster embeddings
-                z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
+                # Use attention mechanism: Q from cluster_emb, K and V from enriched GP embeddings
+                velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x, cluster_emb=cluster_emb)
             else:
                 velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         else:
@@ -384,8 +400,8 @@ class LineageVIModel(nn.Module):
                 cluster_indices = cluster_indices.squeeze()
             
             cluster_emb = self.cluster_embedding(cluster_indices)  # (B, E)
-            z_with_cluster = torch.cat([z, cluster_emb], dim=1)  # (B, L+E)
-            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_cluster, x)
+            # Use attention mechanism: Q from cluster_emb, K and V from enriched GP embeddings
+            velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x, cluster_emb=cluster_emb)
         else:
             velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z, x)
         return velocity, velocity_gp, alpha, beta, gamma

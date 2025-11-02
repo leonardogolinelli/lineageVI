@@ -230,24 +230,56 @@ class VelocityDecoder(nn.Module):
     >>> # α, β, γ shape: (batch, 2000)
     """
 
-    def __init__(self, n_input: int, n_hidden: int, n_output: int, n_latent: int):
+    def __init__(
+        self, 
+        n_input: int, 
+        n_hidden: int, 
+        n_output: int, 
+        n_latent: int,
+        cluster_embedding_dim: Optional[int] = None,
+        gp_embedding_dim: int = 32,
+        attention_dim: Optional[int] = None,
+    ):
         """
         Initialize velocity decoder.
         
         Parameters
         ----------
         n_input : int
-            Input dimension (n_latent or n_latent + cluster_embedding_dim).
+            Input dimension (n_latent).
         n_hidden : int
             Number of hidden units in the shared decoder.
         n_output : int
             Output dimension (2 * number of genes for unspliced+spliced velocities).
         n_latent : int
             Number of gene programs (latent dimensions) for gp_velocity_decoder output.
+        cluster_embedding_dim : int, optional
+            Dimension of cluster embeddings. If provided, attention mechanism is used.
+        gp_embedding_dim : int, default 32
+            Dimension of gene program-specific embeddings used in attention.
+        attention_dim : int, optional
+            Dimension of attention space. If None, uses n_latent.
         """
         super().__init__()
+        
+        # Initialize attention mechanism if cluster embeddings are used
+        self.use_attention = cluster_embedding_dim is not None
+        if self.use_attention:
+            self.attention = ClusterAttention(
+                cluster_embedding_dim=cluster_embedding_dim,
+                n_latent=n_latent,
+                gp_embedding_dim=gp_embedding_dim,
+                attention_dim=attention_dim
+            )
+            # Input to decoder is attention_dim (output of attention mechanism)
+            decoder_input_dim = self.attention.attention_dim
+        else:
+            self.attention = None
+            # Input to decoder is n_latent (no cluster embeddings)
+            decoder_input_dim = n_latent
+        
         self.shared_decoder = nn.Sequential(
-            nn.Linear(n_input, n_hidden),
+            nn.Linear(decoder_input_dim, n_hidden),
             nn.LayerNorm(n_hidden),
             nn.ReLU(),
         )
@@ -264,18 +296,20 @@ class VelocityDecoder(nn.Module):
         )
         self._G = G
 
-    def forward(self, z: torch.Tensor, x: torch.Tensor):
+    def forward(self, z: torch.Tensor, x: torch.Tensor, cluster_emb: Optional[torch.Tensor] = None):
         """
         Forward pass through the velocity decoder.
         
         Parameters
         ----------
         z : torch.Tensor
-            Latent representations (and optionally cluster embeddings) of shape (batch_size, n_input).
-            When cluster embeddings are used, this is the concatenation of z and cluster embeddings.
+            Latent representations of shape (batch_size, n_latent).
         x : torch.Tensor
             Input gene expression of shape (batch_size, 2*n_genes) containing
             concatenated unspliced and spliced counts.
+        cluster_emb : torch.Tensor, optional
+            Cluster embeddings of shape (batch_size, cluster_embedding_dim).
+            Required if attention mechanism is enabled.
         
         Returns
         -------
@@ -296,8 +330,23 @@ class VelocityDecoder(nn.Module):
         The gene-level velocity is computed using the kinetic model:
         - velocity_u = α - β * unspliced
         - velocity_s = β * unspliced - γ * spliced
+        
+        If cluster embeddings are provided, they are integrated with z via attention
+        mechanism using GP-specific embeddings before being passed to the decoder.
+        The attention mechanism computes L attention weights (one per gene program),
+        allowing selective attention to different gene programs based on cluster identity.
         """
-        h = self.shared_decoder(z)
+        if self.use_attention:
+            if cluster_emb is None:
+                raise ValueError("cluster_emb is required when attention mechanism is enabled")
+            # Apply attention: Q from cluster_emb, K and V from enriched GP embeddings
+            attended_output = self.attention(cluster_emb, z)  # (batch_size, attention_dim)
+            decoder_input = attended_output
+        else:
+            # No cluster embeddings, use z directly
+            decoder_input = z
+        
+        h = self.shared_decoder(decoder_input)
         velocity_gp = self.gp_velocity_decoder(h)
 
         kinetic_params = self.gene_velocity_decoder(h)  # (B, 3G)
@@ -373,3 +422,145 @@ class ClusterEmbedding(nn.Module):
             All cluster embeddings of shape (n_clusters, embedding_dim).
         """
         return self.embeddings.weight
+
+
+class ClusterAttention(nn.Module):
+    """
+    Attention mechanism to integrate cluster embeddings with latent representations.
+    
+    This module uses gene program-specific embeddings to create keys and values:
+    1. Each gene program has its own learnable embedding
+    2. Each GP embedding is enriched by concatenating with its corresponding z_i value
+    3. The enriched GP embeddings are transformed using a shared transformation
+    4. Query (Q) comes from cluster embeddings
+    5. Keys (K) and Values (V) come from enriched GP embeddings (one per GP)
+    6. Attention computes L weights (one per GP), allowing selective attention
+    
+    Parameters
+    ----------
+    cluster_embedding_dim : int
+        Dimension of cluster embeddings (E).
+    n_latent : int
+        Dimension of latent representations (L) - number of gene programs.
+    gp_embedding_dim : int, default 32
+        Dimension of gene program-specific embeddings.
+    attention_dim : int, optional
+        Dimension of the attention space (d_k). If None, uses n_latent.
+    
+    Attributes
+    ----------
+    gp_embeddings : nn.Embedding
+        Gene program-specific embeddings of shape (n_latent, gp_embedding_dim).
+    gp_enricher : nn.Linear
+        Shared transformation from [gp_emb, z_i] to enriched GP embedding.
+    key_proj : nn.Linear
+        Key projection from enriched GP embeddings to attention_dim.
+    value_proj : nn.Linear
+        Value projection from enriched GP embeddings to attention_dim.
+    query_proj : nn.Linear
+        Query projection from cluster embedding to attention_dim.
+    attention_dim : int
+        Dimension of the attention space.
+    scale : float
+        Scaling factor for attention scores (1 / sqrt(attention_dim)).
+    
+    Examples
+    --------
+    >>> # Create attention module for 32-dim cluster embeddings and 50 gene programs
+    >>> attn = ClusterAttention(cluster_embedding_dim=32, n_latent=50)
+    >>> 
+    >>> # Forward pass
+    >>> cluster_emb = torch.randn(10, 32)  # (batch_size, cluster_embedding_dim)
+    >>> z = torch.randn(10, 50)  # (batch_size, n_latent)
+    >>> out = attn(cluster_emb, z)  # shape: (batch_size, attention_dim)
+    """
+    
+    def __init__(
+        self, 
+        cluster_embedding_dim: int, 
+        n_latent: int, 
+        gp_embedding_dim: int = 32,
+        attention_dim: Optional[int] = None
+    ):
+        super().__init__()
+        self.cluster_embedding_dim = cluster_embedding_dim
+        self.n_latent = n_latent
+        self.gp_embedding_dim = gp_embedding_dim
+        self.attention_dim = attention_dim if attention_dim is not None else n_latent
+        
+        # Step 1: GP-specific embeddings (one per gene program)
+        self.gp_embeddings = nn.Embedding(n_latent, gp_embedding_dim)
+        
+        # Step 2: Shared transformation from [gp_emb, z_i] to enriched embedding
+        self.gp_enricher = nn.Linear(gp_embedding_dim + 1, self.attention_dim)
+        
+        # Step 3: Key and value projections from enriched GP embeddings
+        self.key_proj = nn.Linear(self.attention_dim, self.attention_dim)
+        self.value_proj = nn.Linear(self.attention_dim, self.attention_dim)
+        
+        # Step 4: Query projection from cluster embedding
+        self.query_proj = nn.Linear(cluster_embedding_dim, self.attention_dim)
+        
+        # Scaling factor for attention scores
+        self.scale = 1.0 / (self.attention_dim ** 0.5)
+        
+        # Initialize weights
+        nn.init.normal_(self.gp_embeddings.weight, mean=0.0, std=0.01)
+        nn.init.xavier_uniform_(self.gp_enricher.weight)
+        nn.init.xavier_uniform_(self.key_proj.weight)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.xavier_uniform_(self.query_proj.weight)
+    
+    def forward(self, cluster_emb: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through attention mechanism.
+        
+        Parameters
+        ----------
+        cluster_emb : torch.Tensor
+            Cluster embeddings of shape (batch_size, cluster_embedding_dim).
+        z : torch.Tensor
+            Latent representations of shape (batch_size, n_latent).
+            Each dimension z_i corresponds to one gene program.
+        
+        Returns
+        -------
+        torch.Tensor
+            Attention output of shape (batch_size, attention_dim).
+            This is a weighted combination of enriched GP embeddings, where weights
+            are computed via attention between cluster embeddings and GP embeddings.
+        """
+        B, L = z.shape
+        
+        # Step 1: Get GP embeddings for all gene programs
+        gp_indices = torch.arange(L, device=z.device)  # (L,)
+        gp_emb = self.gp_embeddings(gp_indices)  # (L, gp_embedding_dim)
+        
+        # Step 2: Enrich each GP embedding with its corresponding z_i
+        # Expand GP embeddings to batch dimension
+        gp_emb_expanded = gp_emb.unsqueeze(0).expand(B, -1, -1)  # (B, L, gp_embedding_dim)
+        
+        # Get z_i for each GP (reshape to (B, L, 1))
+        z_expanded = z.unsqueeze(-1)  # (B, L, 1)
+        
+        # Concatenate: [gp_emb_i, z_i] for each GP
+        enriched_input = torch.cat([gp_emb_expanded, z_expanded], dim=-1)  # (B, L, gp_embedding_dim + 1)
+        
+        # Transform enriched GP embeddings using shared transformation
+        enriched_gp = self.gp_enricher(enriched_input)  # (B, L, attention_dim)
+        
+        # Step 3: Create keys and values from enriched GP embeddings
+        K = self.key_proj(enriched_gp)  # (B, L, attention_dim)
+        V = self.value_proj(enriched_gp)  # (B, L, attention_dim)
+        
+        # Step 4: Query from cluster embedding
+        Q = self.query_proj(cluster_emb)  # (B, attention_dim)
+        
+        # Attention: Q attends to L keys (one per gene program)
+        scores = Q.unsqueeze(1) @ K.transpose(-1, -2) * self.scale  # (B, 1, L)
+        attn_weights = F.softmax(scores, dim=-1)  # (B, 1, L) - L weights!
+        
+        # Weighted sum of values
+        out = attn_weights @ V  # (B, 1, L) @ (B, L, attention_dim) -> (B, 1, attention_dim)
+        
+        return out.squeeze(1)  # (B, attention_dim)
