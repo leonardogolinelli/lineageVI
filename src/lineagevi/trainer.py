@@ -145,6 +145,7 @@ class _Trainer:
         history = {"regime1_loss": [], "regime2_velocity_loss": []}
 
         # ------- Regime 1 -------
+        cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
         loader1 = make_dataloader(
             self.adata,
             first_regime=True,
@@ -156,7 +157,8 @@ class _Trainer:
             spliced_key=self.spliced_key,
             latent_key=self.latent_key,
             nn_key=self.nn_key,
-
+            cluster_key=self.model.cluster_key,
+            cluster_to_idx=cluster_to_idx,
         )
         r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1)
         history["regime1_loss"] = r1_losses
@@ -176,7 +178,9 @@ class _Trainer:
             unspliced_key=self.unspliced_key,
             spliced_key=self.spliced_key,
             latent_key=self.latent_key,
-            nn_key=self.nn_key
+            nn_key=self.nn_key,
+            cluster_key=self.model.cluster_key,
+            cluster_to_idx=cluster_to_idx,
         )
 
         r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo)
@@ -193,9 +197,12 @@ class _Trainer:
     # ------- Pieces -------
 
     def _train_regime1(self, loader, lr: float, epochs: int) -> List[float]:
-        # Freeze velocity_decoder; unfreeze encoder & gene_decoder
+        # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
+        if self.model.cluster_embedding is not None:
+            for p in self.model.cluster_embedding.parameters():
+                p.requires_grad = False
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = True
@@ -207,11 +214,18 @@ class _Trainer:
         losses = []
         for epoch in range(1, epochs + 1):
             running = 0.0
-            for x, idx, x_neigh in loader:
+            for batch in loader:
+                if len(batch) == 4:  # Has cluster indices
+                    x, idx, x_neigh, cluster_idx = batch
+                    cluster_idx = cluster_idx.to(self.device)
+                else:
+                    x, idx, x_neigh = batch
+                    cluster_idx = None
+                
                 x = x.to(self.device)
                 x_neigh = x_neigh.to(self.device)
 
-                out = self.model(x)                 # <-- dict
+                out = self.model(x, cluster_indices=cluster_idx)  # <-- dict
                 recon  = out["recon"]
                 mean   = out["mean"]
                 logvar = out["logvar"]
@@ -238,7 +252,12 @@ class _Trainer:
         latent_list, idx_all = [], []
 
         with torch.no_grad():
-            for x, idx, x_neigh in loader:
+            for batch in loader:
+                if len(batch) == 4:  # Has cluster indices
+                    x, idx, x_neigh, cluster_idx = batch
+                else:
+                    x, idx, x_neigh = batch
+                
                 x = x.to(self.device)
                 _, mu, _ = self.model.encoder(x)
                 latent_list.append(mu.cpu())
@@ -251,12 +270,15 @@ class _Trainer:
         return z_all.numpy()
 
     def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True) -> List[float]:
-        # Freeze encoder & gene_decoder; unfreeze velocity_decoder
+        # Freeze encoder & gene_decoder; unfreeze velocity_decoder and cluster_embedding
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = False
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = True
+        if self.model.cluster_embedding is not None:
+            for p in self.model.cluster_embedding.parameters():
+                p.requires_grad = True
 
         self.model.first_regime = False
         self.model.train()
@@ -265,10 +287,17 @@ class _Trainer:
         losses = []
         for epoch in range(1, epochs + 1):
             running = 0.0
-            for x, idx, x_neigh, z, z_neigh in loader:
+            for batch in loader:
+                if len(batch) == 6:  # Has cluster indices
+                    x, idx, x_neigh, z, z_neigh, cluster_idx = batch
+                    cluster_idx = cluster_idx.to(self.device)
+                else:
+                    x, idx, x_neigh, z, z_neigh = batch
+                    cluster_idx = None
+                
                 x, x_neigh, z, z_neigh = [t.to(self.device) for t in (x, x_neigh, z, z_neigh)]
 
-                out = self.model(x)                      # <-- dict
+                out = self.model(x, cluster_indices=cluster_idx)  # <-- dict
                 v_pred = out["velocity"]                 # (B, G) spliced velocities
                 v_gp   = out["velocity_gp"]              # (B, L)
 
@@ -342,6 +371,9 @@ class _Trainer:
             temp_adata.layers["velocity_u"] = outputs["velocity_u"]
             temp_adata.layers["velocity"] = outputs["velocity"]
         
+        # Get cluster key from model (default to "clusters" if not set)
+        cell_type_key = self.model.cluster_key if self.model.cluster_key is not None else "clusters"
+        
         # Generate plots for each monitoring gene
         for gene_name in monitor_genes:
             if gene_name not in temp_adata.var_names:
@@ -363,6 +395,7 @@ class _Trainer:
                     show_plot=False,  # Don't display, just save
                     save_plot=True,
                     save_path=os.path.join(plots_dir, f"{gene_name}_epoch_{epoch:03d}.png"),
+                    cell_type_key=cell_type_key,  # Use cluster_key from model
                     unspliced_key=self.unspliced_key,
                     spliced_key=self.spliced_key,
                     velocity_u_key="velocity_u",

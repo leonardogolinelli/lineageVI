@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Optional
 import torch
 import scanpy as sc
+import numpy as np
 
 from .model import LineageVIModel
 from .trainer import _Trainer  # internal; do NOT export
@@ -80,9 +81,18 @@ class LineageVI:
         nn_key: str = "indices",
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        cluster_key: Optional[str] = None,
+        cluster_embedding_dim: int = 32,
     ):
         self.adata = adata
-        self.model = LineageVIModel(adata, n_hidden=n_hidden, mask_key=mask_key, seed=seed)
+        self.model = LineageVIModel(
+            adata, 
+            n_hidden=n_hidden, 
+            mask_key=mask_key, 
+            seed=seed,
+            cluster_key=cluster_key,
+            cluster_embedding_dim=cluster_embedding_dim,
+        )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
@@ -91,6 +101,7 @@ class LineageVI:
         self.spliced_key = spliced_key
         self.latent_key = latent_key
         self.nn_key = nn_key
+        self.cluster_key = cluster_key
 
     # -------------------------
     # Training
@@ -471,3 +482,4 @@ class LineageVI:
             unspliced_key=unspliced_key,
             spliced_key=spliced_key,
         )
+    

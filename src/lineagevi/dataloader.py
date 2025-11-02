@@ -54,12 +54,15 @@ class RegimeDataset(Dataset):
         spliced_key: str = 'spliced',
         latent_key: str = 'z',
         nn_key: str = 'indices',
+        cluster_key: Optional[str] = None,
+        cluster_to_idx: Optional[dict] = None,
     ):
         self.adata        = adata
         self.K            = K
         self.unspliced_key = unspliced_key
         self.spliced_key  = spliced_key
         self.latent_key   = latent_key
+        self.cluster_key  = cluster_key
 
         # kNN indices from adata.uns['indices']
         indices = adata.uns.get(nn_key)
@@ -74,6 +77,17 @@ class RegimeDataset(Dataset):
         s = s.toarray().astype(np.float32) if sp.issparse(s) else np.asarray(s, dtype=np.float32)
         full = np.concatenate([u, s], axis=1)
         self.x = torch.from_numpy(full)
+
+        # Cluster indices (if cluster_key is provided)
+        if cluster_key is not None:
+            if cluster_to_idx is None:
+                raise ValueError("cluster_to_idx is required when cluster_key is provided")
+            cluster_labels = adata.obs[cluster_key]
+            # Map cluster labels to indices
+            cluster_idx_array = np.array([cluster_to_idx.get(label, 0) for label in cluster_labels])
+            self.cluster_indices = torch.from_numpy(cluster_idx_array.astype(np.int64))
+        else:
+            self.cluster_indices = None
 
         # will load latent z at switch to regime 2
         self.latent_data = None
@@ -109,12 +123,20 @@ class RegimeDataset(Dataset):
 
         if self.first_regime:
             x = self.x[idx]
-            return x, idx, x_neigh      # you only need x and its neighs
+            if self.cluster_indices is not None:
+                cluster_idx = self.cluster_indices[idx]
+                return x, idx, x_neigh, cluster_idx
+            else:
+                return x, idx, x_neigh      # you only need x and its neighs
         else:
             x       = self.x[idx]
             z       = self.latent_data[idx]
             z_neigh = self.latent_data[neigh_idx]
-            return x, idx, x_neigh, z, z_neigh
+            if self.cluster_indices is not None:
+                cluster_idx = self.cluster_indices[idx]
+                return x, idx, x_neigh, z, z_neigh, cluster_idx
+            else:
+                return x, idx, x_neigh, z, z_neigh
 
 def make_dataloader(
     adata: sc.AnnData,
@@ -128,6 +150,8 @@ def make_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     seed: Optional[int] = None,
+    cluster_key: Optional[str] = None,
+    cluster_to_idx: Optional[dict] = None,
 ) -> DataLoader:
     """
     Create a PyTorch DataLoader for LineageVI training.
@@ -190,6 +214,8 @@ def make_dataloader(
         spliced_key=spliced_key,
         latent_key=latent_key,
         nn_key=nn_key,
+        cluster_key=cluster_key,
+        cluster_to_idx=cluster_to_idx,
     )
     ds.set_regime(first_regime)
 

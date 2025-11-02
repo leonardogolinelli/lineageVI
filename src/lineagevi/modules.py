@@ -199,12 +199,14 @@ class VelocityDecoder(nn.Module):
     
     Parameters
     ----------
-    n_latent : int
-        Number of gene programs (latent dimensions).
+    n_input : int
+        Input dimension (n_latent or n_latent + cluster_embedding_dim when cluster embeddings are used).
     n_hidden : int
         Number of hidden units in the shared decoder.
     n_output : int
         Output dimension (2 * number of genes for unspliced+spliced velocities).
+    n_latent : int
+        Number of gene programs (latent dimensions) for gp_velocity_decoder output.
     
     Attributes
     ----------
@@ -220,7 +222,7 @@ class VelocityDecoder(nn.Module):
     Examples
     --------
     >>> # Create velocity decoder for 2000 genes and 50 gene programs
-    >>> decoder = VelocityDecoder(n_latent=50, n_hidden=128, n_output=4000)
+    >>> decoder = VelocityDecoder(n_input=50, n_hidden=128, n_output=4000, n_latent=50)
     >>> 
     >>> # Forward pass
     >>> vel, vel_gp, α, β, γ = decoder(z, x)
@@ -228,10 +230,24 @@ class VelocityDecoder(nn.Module):
     >>> # α, β, γ shape: (batch, 2000)
     """
 
-    def __init__(self, n_latent: int, n_hidden: int, n_output: int):
+    def __init__(self, n_input: int, n_hidden: int, n_output: int, n_latent: int):
+        """
+        Initialize velocity decoder.
+        
+        Parameters
+        ----------
+        n_input : int
+            Input dimension (n_latent or n_latent + cluster_embedding_dim).
+        n_hidden : int
+            Number of hidden units in the shared decoder.
+        n_output : int
+            Output dimension (2 * number of genes for unspliced+spliced velocities).
+        n_latent : int
+            Number of gene programs (latent dimensions) for gp_velocity_decoder output.
+        """
         super().__init__()
         self.shared_decoder = nn.Sequential(
-            nn.Linear(n_latent, n_hidden),
+            nn.Linear(n_input, n_hidden),
             nn.LayerNorm(n_hidden),
             nn.ReLU(),
         )
@@ -255,7 +271,8 @@ class VelocityDecoder(nn.Module):
         Parameters
         ----------
         z : torch.Tensor
-            Latent representations of shape (batch_size, n_latent).
+            Latent representations (and optionally cluster embeddings) of shape (batch_size, n_input).
+            When cluster embeddings are used, this is the concatenation of z and cluster embeddings.
         x : torch.Tensor
             Input gene expression of shape (batch_size, 2*n_genes) containing
             concatenated unspliced and spliced counts.
@@ -291,3 +308,68 @@ class VelocityDecoder(nn.Module):
         velocity = torch.cat([velocity_u, velocity_s], dim=1)  # (B, 2G)
         
         return velocity, velocity_gp, alpha, beta, gamma
+
+
+class ClusterEmbedding(nn.Module):
+    """
+    Cluster embedding module that learns embeddings for each cluster.
+    
+    This module creates a lookup table of embeddings for each unique cluster label.
+    All cells in the same cluster share the same embedding, which can be concatenated
+    to the latent representation to provide lineage-specific information to the velocity decoder.
+    
+    Parameters
+    ----------
+    n_clusters : int
+        Number of unique clusters.
+    embedding_dim : int, default 32
+        Dimension of cluster embeddings.
+    
+    Attributes
+    ----------
+    embeddings : nn.Embedding
+        Embedding table with shape (n_clusters, embedding_dim).
+    
+    Examples
+    --------
+    >>> # Create cluster embeddings for 10 clusters with 32-dimensional embeddings
+    >>> cluster_emb = ClusterEmbedding(n_clusters=10, embedding_dim=32)
+    >>> 
+    >>> # Forward pass with cluster indices
+    >>> cluster_idx = torch.tensor([0, 1, 2, 0, 1])  # 5 cells, 3 clusters
+    >>> emb = cluster_emb(cluster_idx)  # shape: (5, 32)
+    """
+    
+    def __init__(self, n_clusters: int, embedding_dim: int = 32):
+        super().__init__()
+        self.embeddings = nn.Embedding(n_clusters, embedding_dim)
+        
+        # Initialize with small random values
+        nn.init.normal_(self.embeddings.weight, mean=0.0, std=0.01)
+    
+    def forward(self, cluster_indices: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass to get cluster embeddings.
+        
+        Parameters
+        ----------
+        cluster_indices : torch.Tensor
+            Cluster indices of shape (batch_size,) with integer values in [0, n_clusters).
+        
+        Returns
+        -------
+        torch.Tensor
+            Cluster embeddings of shape (batch_size, embedding_dim).
+        """
+        return self.embeddings(cluster_indices)
+    
+    def get_all_embeddings(self) -> torch.Tensor:
+        """
+        Get all cluster embeddings as a lookup table.
+        
+        Returns
+        -------
+        torch.Tensor
+            All cluster embeddings of shape (n_clusters, embedding_dim).
+        """
+        return self.embeddings.weight
