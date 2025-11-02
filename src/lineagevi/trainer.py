@@ -98,6 +98,7 @@ class _Trainer:
         output_dir: str,
         monitor_genes: Optional[List[str]] = None,
         monitor_negative_velo: bool = True,
+        monitor_every_epochs: int = 1,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -124,8 +125,13 @@ class _Trainer:
             Directory to save model weights.
         monitor_genes : List[str], optional
             List of gene names to monitor during training. Phase plane plots will be
-            generated for these genes at each epoch during regime 2 and saved to
+            generated for these genes during both regimes and saved to
             output_dir/training_plots/ with filenames like {gene_name}_epoch_{epoch:03d}.png.
+        monitor_negative_velo : bool, default True
+            Whether to use negative velocities in monitoring plots.
+        monitor_every_epochs : int, default 1
+            Generate monitoring plots every N epochs. Plots are always generated at
+            epoch 0 and the last epoch of each regime if monitor_genes is provided.
         
         Returns
         -------
@@ -160,12 +166,12 @@ class _Trainer:
             cluster_key=self.model.cluster_key,
             cluster_to_idx=cluster_to_idx,
         )
-        r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1)
+        r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
         history["regime1_loss"] = r1_losses
 
         # Latent for all cells (used by regime 2 dataloader)
         z = self._compute_latent(loader1)
-        self.adata.obsm["z"] = z
+        self.adata.obsm[self.latent_key] = z
 
         # ------- Regime 2 -------
         loader2 = make_dataloader(
@@ -183,7 +189,7 @@ class _Trainer:
             cluster_to_idx=cluster_to_idx,
         )
 
-        r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo)
+        r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
         history["regime2_velocity_loss"] = r2_losses
 
         # Save model weights only (no automatic annotation)
@@ -196,7 +202,7 @@ class _Trainer:
 
     # ------- Pieces -------
 
-    def _train_regime1(self, loader, lr: float, epochs: int) -> List[float]:
+    def _train_regime1(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True, monitor_every_epochs: int = 1) -> List[float]:
         # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
@@ -269,7 +275,7 @@ class _Trainer:
         z_all[idx_all] = z_concat
         return z_all.numpy()
 
-    def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True) -> List[float]:
+    def _train_regime2(self, loader, lr: float, epochs: int, monitor_genes: Optional[List[str]] = None, output_dir: str = ".", monitor_negative_velo: bool = True, monitor_every_epochs: int = 1) -> List[float]:
         # Freeze encoder & gene_decoder; unfreeze velocity_decoder and cluster_embedding
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
@@ -283,6 +289,10 @@ class _Trainer:
         self.model.first_regime = False
         self.model.train()
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr)
+
+        # Generate epoch 0 plots if monitoring is enabled
+        if monitor_genes is not None and len(monitor_genes) > 0:
+            self._generate_monitoring_plots(0, monitor_genes, output_dir, monitor_negative_velo, regime=2, total_epochs=epochs)
 
         losses = []
         for epoch in range(1, epochs + 1):
@@ -319,19 +329,21 @@ class _Trainer:
             if self.verbose:
                 print(f"[Regime2] Epoch {epoch}/{epochs} - Velocity Loss: {epoch_loss:.4f}")
             
-            # Generate monitoring plots if requested (only during regime 2)
+            # Generate monitoring plots if requested
             if monitor_genes is not None and len(monitor_genes) > 0:
-                self._generate_monitoring_plots(epoch, monitor_genes, output_dir, monitor_negative_velo)
+                should_plot = (epoch == epochs) or (epoch % monitor_every_epochs == 0)
+                if should_plot:
+                    self._generate_monitoring_plots(epoch, monitor_genes, output_dir, monitor_negative_velo, regime=2, total_epochs=epochs)
         return losses
 
-    def _generate_monitoring_plots(self, epoch: int, monitor_genes: List[str], output_dir: str, monitor_negative_velo: bool = True):
+    def _generate_monitoring_plots(self, epoch: int, monitor_genes: List[str], output_dir: str, monitor_negative_velo: bool = True, regime: int = 2, total_epochs: int = 50):
         """
-        Generate phase plane plots for monitoring genes during regime 2 training.
+        Generate phase plane plots for monitoring genes during training.
         
         Parameters
         ----------
         epoch : int
-            Current regime 2 epoch number.
+            Current epoch number (0-indexed: 0 means before training, 1-N means after epoch).
         monitor_genes : List[str]
             List of gene names to plot.
         output_dir : str
@@ -339,14 +351,18 @@ class _Trainer:
         monitor_negative_velo : bool, default True
             Whether to use negative velocities in monitoring plots. If True, shows negative
             velocities (matches scVelo convention). If False, shows positive velocities.
+        regime : int, default 2
+            Training regime (1 or 2). Used to organize plots into subdirectories.
+        total_epochs : int, default 50
+            Total number of epochs for this regime. Used for determining if this is the last epoch.
         """
         import os
         import matplotlib.pyplot as plt
         from .plots import plot_phase_plane
         
-        # Create training plots directory
-        plots_dir = os.path.join(output_dir, "training_plots")
-        os.makedirs(plots_dir, exist_ok=True)
+        # Create base training plots directory
+        base_plots_dir = os.path.join(output_dir, "training_plots")
+        os.makedirs(base_plots_dir, exist_ok=True)
         
         # Get current model outputs for plotting
         with torch.no_grad():
@@ -371,7 +387,8 @@ class _Trainer:
             temp_adata.layers["velocity_u"] = outputs["velocity_u"]
             temp_adata.layers["velocity"] = outputs["velocity"]
         
-        # Get cluster key from model (default to "clusters" if not set)
+        # Get cluster key from model - use the exact cluster_key used in initialization
+        # This ensures colors match the cluster_key specified in LineageVI initialization
         cell_type_key = self.model.cluster_key if self.model.cluster_key is not None else "clusters"
         
         # Generate plots for each monitoring gene
@@ -380,6 +397,10 @@ class _Trainer:
                 if self.verbose:
                     print(f"Warning: Gene '{gene_name}' not found in adata.var_names, skipping...")
                 continue
+            
+            # Create a folder for each monitored gene
+            gene_plots_dir = os.path.join(base_plots_dir, gene_name)
+            os.makedirs(gene_plots_dir, exist_ok=True)
             
             try:
                 # Generate phase plane plot
@@ -394,7 +415,7 @@ class _Trainer:
                     length_includes_head=False,
                     show_plot=False,  # Don't display, just save
                     save_plot=True,
-                    save_path=os.path.join(plots_dir, f"{gene_name}_epoch_{epoch:03d}.png"),
+                    save_path=os.path.join(gene_plots_dir, f"{gene_name}_regime{regime}_epoch_{epoch:03d}.png"),
                     cell_type_key=cell_type_key,  # Use cluster_key from model
                     unspliced_key=self.unspliced_key,
                     spliced_key=self.spliced_key,
@@ -407,8 +428,8 @@ class _Trainer:
                 if self.verbose:
                     print(f"Warning: Failed to generate plot for gene '{gene_name}' at epoch {epoch}: {e}")
         
-        if self.verbose and epoch % 10 == 0:  # Print every 10 epochs to avoid spam
-            print(f"Generated monitoring plots for epoch {epoch} → {plots_dir}")
+        if self.verbose:
+            print(f"Generated monitoring plots for regime {regime}, epoch {epoch} → {base_plots_dir}")
 
 
 

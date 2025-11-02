@@ -30,8 +30,6 @@ class LineageVI:
         Key for unspliced counts in adata.layers.
     spliced_key : str, default "spliced"
         Key for spliced counts in adata.layers.
-    latent_key : str, default "z"
-        Key for latent representations in adata.obsm.
     nn_key : str, default "indices"
         Key for nearest neighbor indices in adata.uns.
     device : torch.device, optional
@@ -77,7 +75,6 @@ class LineageVI:
         *,
         unspliced_key: str = "unspliced",
         spliced_key: str = "spliced",
-        latent_key: str = "z",
         nn_key: str = "indices",
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
@@ -97,9 +94,10 @@ class LineageVI:
         self.model.to(self.device)
 
         # dataloader / field names
+        # latent_key is always 'z' since we use the mean (deterministic)
         self.unspliced_key = unspliced_key
         self.spliced_key = spliced_key
-        self.latent_key = latent_key
+        self.latent_key = "z"  # Hardcoded - always uses mean from encoder
         self.nn_key = nn_key
         self.cluster_key = cluster_key
 
@@ -118,6 +116,7 @@ class LineageVI:
         verbose: int = 1,
         monitor_genes: Optional[List[str]] = None,
         monitor_negative_velo: bool = True,
+        monitor_every_epochs: int = 1,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -146,11 +145,16 @@ class LineageVI:
             Verbosity level (0=silent, 1=progress, 2=detailed).
         monitor_genes : List[str], optional
             List of gene names to monitor during training. Phase plane plots will be
-            generated for these genes at each epoch during regime 2 (velocity prediction)
-            and saved to output_dir/training_plots/ with filenames like {gene_name}_epoch_{epoch:03d}.png.
+            generated for these genes during both regimes and saved to 
+            output_dir/training_plots/regime{1|2}/ with filenames like 
+            {gene_name}_regime{1|2}_epoch_{epoch:03d}.png.
         monitor_negative_velo : bool, default True
             Whether to use negative velocities in monitoring plots. If True, shows negative
             velocities (matches scVelo convention). If False, shows positive velocities.
+        monitor_every_epochs : int, default 1
+            Generate monitoring plots every N epochs. Plots are always generated at
+            epoch 0 (before training starts) and the last epoch of each regime if 
+            monitor_genes is provided.
         
         Returns
         -------
@@ -205,6 +209,7 @@ class LineageVI:
             output_dir=(output_dir or "."),
             monitor_genes=monitor_genes,
             monitor_negative_velo=monitor_negative_velo,
+            monitor_every_epochs=monitor_every_epochs,
         )
         self.adata = engine.adata
         return history    
@@ -236,7 +241,6 @@ class LineageVI:
         save_to_adata: bool = False,
         unspliced_key: str = "Mu",
         spliced_key: str = "Ms",
-        latent_key: str = "z",
         nn_key: str = "indices",
         batch_size: int = 256,
     ):
@@ -265,8 +269,6 @@ class LineageVI:
             Key for unspliced counts in adata.layers.
         spliced_key : str, default "Ms"
             Key for spliced counts in adata.layers.
-        latent_key : str, default "z"
-            Key for latent representations in adata.obsm.
         nn_key : str, default "indices"
             Key for nearest neighbor indices in adata.uns.
         batch_size : int, default 256
@@ -297,13 +299,16 @@ class LineageVI:
         """
         return self.model._get_model_outputs(
             adata,
-            n_samples,
-            return_mean,
-            return_negative_velo,
-            base_seed,
-            save_to_adata,
-            unspliced_key,
-            spliced_key
+            n_samples=n_samples,
+            return_mean=return_mean,
+            return_negative_velo=return_negative_velo,
+            base_seed=base_seed,
+            save_to_adata=save_to_adata,
+            unspliced_key=unspliced_key,
+            spliced_key=spliced_key,
+            latent_key=self.latent_key,  # Always "z" - hardcoded
+            nn_key=nn_key,
+            batch_size=256,
         )
 
     def latent_enrich(
