@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import scanpy as sc
 import numpy as np
+import scipy.sparse as sp
 
 from .api import LineageVI  # avoid importing the top-level package to prevent circulars
 
@@ -186,4 +189,111 @@ def build_gp_adata(
 
         adata_gp.var_names_make_unique()
         return adata_gp
+
+
+def compute_nearest_neighbors(
+    adata: sc.AnnData,
+    K: Optional[int] = None,
+    *,
+    neighbors_key: str = 'neighbors',
+    indices_key: str = 'indices',
+) -> None:
+    """
+    Extract K-nearest neighbor indices from scanpy's pre-computed neighbor graph.
+    
+    This function extracts neighbor indices from adata.obsp['distances'] that were
+    computed by sc.pp.neighbors(). This avoids recomputing neighbors and reuses
+    scanpy's neighbor graph.
+    
+    Requires that sc.pp.neighbors() has been called on the AnnData object first.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix with pre-computed neighbors from sc.pp.neighbors().
+    K : int, optional
+        Number of neighbors to extract (excluding self). If None, uses all
+        available neighbors from the computed graph. The function will extract
+        K+1 neighbors total (including self as the first neighbor).
+    neighbors_key : str, default 'neighbors'
+        Key in adata.uns where the neighbors structure is stored (from sc.pp.neighbors).
+    indices_key : str, default 'indices'
+        Key in adata.uns where to store the neighbor indices array.
+    
+    Examples
+    --------
+    >>> # First compute neighbors with scanpy
+    >>> sc.pp.pca(adata)
+    >>> sc.pp.neighbors(adata, n_neighbors=20)
+    >>> 
+    >>> # Extract indices from scanpy's neighbor graph
+    >>> lineagevi.utils.compute_nearest_neighbors(adata, K=20)
+    >>> # Access indices: adata.uns['indices']
+    
+    Notes
+    -----
+    The indices array will have shape (n_cells, K+1) where the first column contains
+    the cell index itself, followed by its K nearest neighbors sorted by distance.
+    """
+    # Check if neighbors have been computed
+    if neighbors_key not in adata.uns:
+        raise ValueError(
+            f"Neighbors not found. Please run sc.pp.neighbors(adata) first. "
+            f"Key '{neighbors_key}' not found in adata.uns. "
+            f"Available uns keys: {list(adata.uns.keys())}"
+        )
+    
+    # Get the distances sparse matrix
+    if 'distances' not in adata.obsp:
+        raise ValueError(
+            f"Key 'distances' not found in adata.obsp. "
+            f"Available obsp keys: {list(adata.obsp.keys())}. "
+            f"Make sure sc.pp.neighbors() has been called."
+        )
+    
+    distances_matrix = adata.obsp['distances']
+    
+    # Ensure it's a sparse matrix
+    if not sp.issparse(distances_matrix):
+        raise TypeError(f"Expected sparse matrix in adata.obsp['distances'], got {type(distances_matrix)}")
+    
+    n_cells = distances_matrix.shape[0]
+    indices_list = []
+    
+    # Extract indices from sparse CSR matrix
+    # Each row contains the neighbors for that cell
+    for i in range(n_cells):
+        # Get the row (neighbors and distances for cell i)
+        row_start = distances_matrix.indptr[i]
+        row_end = distances_matrix.indptr[i + 1]
+        
+        # Column indices are the neighbor indices
+        neighbor_indices = distances_matrix.indices[row_start:row_end]
+        # Values are the distances
+        neighbor_distances = distances_matrix.data[row_start:row_end]
+        
+        # Sort by distance (closest first)
+        sorted_idx = np.argsort(neighbor_distances)
+        neighbor_indices = neighbor_indices[sorted_idx]
+        
+        # Include self as first neighbor
+        full_indices = np.concatenate([[i], neighbor_indices])
+        
+        # Limit to K+1 if K is specified
+        if K is not None:
+            full_indices = full_indices[:K + 1]
+        
+        indices_list.append(full_indices)
+    
+    # Convert to numpy array - pad with -1 if rows have different lengths
+    if indices_list:
+        max_neighbors = max(len(idx) for idx in indices_list)
+        indices_array = np.full((n_cells, max_neighbors), -1, dtype=np.int64)
+        
+        for i, idx in enumerate(indices_list):
+            indices_array[i, :len(idx)] = idx
+    else:
+        indices_array = np.array([], dtype=np.int64).reshape(n_cells, 0)
+    
+    adata.uns[indices_key] = indices_array
 

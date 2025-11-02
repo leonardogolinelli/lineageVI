@@ -19,7 +19,9 @@ dependencies = [
   "scipy>=1.10",
   "pandas>=2.0",
   "matplotlib>=3.7",
-  "scvelo>=0.3.3"
+  "scvelo>=0.3.3",
+  "igraph>=0.10",
+  "leidenalg>=0.9"
 ]
 
 [project.optional-dependencies]
