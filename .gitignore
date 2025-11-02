@@ -34,6 +34,62 @@ dist/
 *.mtx
 *.npz
 
+# --- Sequencing data files ---
+*.sra
+*.sra.lock
+*.sra.prf
+*.sra.tmp
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+
+# --- Data directories ---
+# Ignore all data files in docs/data/ but keep scripts and documentation
+docs/data/**/*.h5ad
+docs/data/**/*.h5ad.h5
+docs/data/**/*.tar.gz
+docs/data/**/*.tar
+docs/data/**/*.mtx
+docs/data/**/extracted_data/
+docs/data/**/sra_data/
+docs/data/**/fastq/
+docs/data/**/cellranger_output/
+docs/data/**/velocyto_output/
+docs/data/**/output/
+
+# --- Velocyto-specific files and directories ---
+# Velocyto source/build files
+velocyto-*.tar.gz
+velocyto-*/
+**/velocyto-*/
+
+# Velocyto conda environment
+lineagevi-velocyto/
+envs/lineagevi-velocyto/
+
+# Velocyto processed outputs (loom files already covered by *.loom pattern above)
+**/possorted_genome_bam.loom
+**/velocyto/*.loom
+**/*_velocyto.h5ad
+
+# Keep scripts and documentation in data directories (but exclude velocyto-related files)
+!docs/data/**/*.py
+!docs/data/**/*.sh
+!docs/data/**/*.md
+!docs/data/**/*.yml
+!docs/data/**/*.yaml
+
+# Explicitly ignore velocyto-related files in Pancreas directory (overrides negations above)
+docs/data/Pancreas/*velocyto*
+docs/data/Pancreas/setup_velocyto*.py
+docs/data/Pancreas/setup_velocyto*.sh
+docs/data/Pancreas/velocyto_*.py
+docs/data/Pancreas/velocyto_*.sh
+docs/data/Pancreas/download*velocyto*.sh
+docs/data/Pancreas/README*velocyto*.md
+docs/data/Pancreas/velocyto-*.tar.gz
+
 # --- Notebook-run data layout (current tree) ---
 # inputs
 notebooks/data/inputs/anndata/raw/**
@@ -72,3 +128,7 @@ docs/_build/latex/
 docs/_build/epub/
 docs/_build/linkcheck/
 docs/_build/doctest/
+docs/data/Pancreas/download_and_process_velocyto.sh
+.gitignore
+docs/data/Pancreas/environment.yml
+docs/data/Pancreas/download_sra_and_velocyto.sh
