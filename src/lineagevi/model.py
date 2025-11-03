@@ -2116,6 +2116,307 @@ class LineageVIModel(nn.Module):
         
         # No return value since adata_gp is modified in place
         return None
+    
+    @torch.inference_mode()
+    def compute_cluster_alignment(
+        self,
+        adata: sc.AnnData,
+        source_cluster: str,
+        target_cluster: str,
+        cluster_key: str = 'clusters',
+        use_gp_space: bool = False,
+        velocity_key: Optional[str] = None,
+        state_key: Optional[str] = None,
+        aggregation: str = 'mean',
+    ) -> float:
+        """
+        Compute alignment metric: how much do velocities in source_cluster
+        point toward target_cluster's state.
+        
+        This metric measures the directional alignment between velocity vectors
+        of cells in the source cluster and the direction from those cells to
+        the target cluster's centroid.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data with computed velocities and states.
+        source_cluster : str
+            Name of the source cluster (cells with velocities).
+        target_cluster : str
+            Name of the target cluster (direction target).
+        cluster_key : str, default 'clusters'
+            Key in adata.obs containing cluster labels.
+        use_gp_space : bool, default False
+            If True, use gene program space (GP velocities and GP states).
+            If False, use gene expression space (gene velocities and spliced states).
+        velocity_key : str, optional
+            Key for velocities:
+            - If use_gp_space=True: key in adata.obsm (default: 'velocity_gp')
+            - If use_gp_space=False: key in adata.layers (default: 'velocity')
+        state_key : str, optional
+            Key for current states:
+            - If use_gp_space=True: key in adata.obsm (default: 'mean')
+            - If use_gp_space=False: key in adata.layers (default: 'Ms')
+        aggregation : str, default 'mean'
+            How to aggregate alignment scores across cells in source cluster:
+            - 'mean': Simple mean of all cell alignments
+            - 'weighted_mean': Velocity magnitude-weighted mean
+        
+        Returns
+        -------
+        float
+            Alignment score in [-1, 1]:
+            - 1.0: Perfect alignment (all velocities point toward target)
+            - 0.0: Orthogonal (no alignment)
+            - -1.0: Opposite direction (velocities point away from target)
+        
+        Examples
+        --------
+        >>> # Compute alignment in gene expression space
+        >>> alignment = model.compute_cluster_alignment(
+        ...     adata,
+        ...     source_cluster='Alpha',
+        ...     target_cluster='Beta'
+        ... )
+        >>> 
+        >>> # Compute alignment in gene program space
+        >>> alignment_gp = model.compute_cluster_alignment(
+        ...     adata,
+        ...     source_cluster='Alpha',
+        ...     target_cluster='Beta',
+        ...     use_gp_space=True
+        ... )
+        """
+        # Set default keys based on space
+        if velocity_key is None:
+            velocity_key = 'velocity_gp' if use_gp_space else 'velocity'
+        if state_key is None:
+            state_key = 'mean' if use_gp_space else 'Ms'
+        
+        # Check that cluster_key exists
+        if cluster_key not in adata.obs.columns:
+            raise ValueError(
+                f"Cluster key '{cluster_key}' not found in adata.obs.columns. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        
+        # Get cells in source and target clusters
+        source_mask = adata.obs[cluster_key] == source_cluster
+        target_mask = adata.obs[cluster_key] == target_cluster
+        
+        n_source = source_mask.sum()
+        n_target = target_mask.sum()
+        
+        if n_source == 0:
+            raise ValueError(f"No cells found in source cluster '{source_cluster}'")
+        if n_target == 0:
+            raise ValueError(f"No cells found in target cluster '{target_cluster}'")
+        
+        # Get velocities and states
+        if use_gp_space:
+            # GP space: velocities and states in obsm
+            if velocity_key not in adata.obsm:
+                raise ValueError(
+                    f"Velocity key '{velocity_key}' not found in adata.obsm. "
+                    f"Please run get_model_outputs() first. Available keys: {list(adata.obsm.keys())}"
+                )
+            if state_key not in adata.obsm:
+                raise ValueError(
+                    f"State key '{state_key}' not found in adata.obsm. "
+                    f"Please run get_model_outputs() first. Available keys: {list(adata.obsm.keys())}"
+                )
+            
+            velocities = torch.from_numpy(adata.obsm[velocity_key][source_mask].astype(np.float32))  # (n_source, n_latent)
+            source_states = torch.from_numpy(adata.obsm[state_key][source_mask].astype(np.float32))  # (n_source, n_latent)
+            target_states = adata.obsm[state_key][target_mask]  # (n_target, n_latent)
+        else:
+            # Gene expression space: velocities and states in layers
+            if velocity_key not in adata.layers:
+                raise ValueError(
+                    f"Velocity key '{velocity_key}' not found in adata.layers. "
+                    f"Please run get_model_outputs() first. Available keys: {list(adata.layers.keys())}"
+                )
+            if state_key not in adata.layers:
+                raise ValueError(
+                    f"State key '{state_key}' not found in adata.layers. "
+                    f"Available keys: {list(adata.layers.keys())}"
+                )
+            
+            velocities = torch.from_numpy(adata.layers[velocity_key][source_mask].astype(np.float32))  # (n_source, n_genes)
+            source_states = torch.from_numpy(adata.layers[state_key][source_mask].astype(np.float32))  # (n_source, n_genes)
+            target_states = adata.layers[state_key][target_mask]  # (n_target, n_genes)
+        
+        # Compute target cluster centroid
+        target_centroid = torch.from_numpy(target_states.mean(axis=0).astype(np.float32))  # (n_features,)
+        
+        # Compute direction vectors from each source cell to target centroid
+        directions = target_centroid.unsqueeze(0) - source_states  # (n_source, n_features)
+        
+        # Normalize vectors for cosine similarity
+        velocities_norm = F.normalize(velocities, p=2, dim=1)  # (n_source, n_features)
+        directions_norm = F.normalize(directions, p=2, dim=1)  # (n_source, n_features)
+        
+        # Compute cosine similarities (alignment scores)
+        alignments = (velocities_norm * directions_norm).sum(dim=1)  # (n_source,)
+        
+        # Aggregate across cells in source cluster
+        if aggregation == 'mean':
+            alignment_score = alignments.mean().item()
+        elif aggregation == 'weighted_mean':
+            velocity_mags = velocities.norm(p=2, dim=1)  # (n_source,)
+            # Avoid division by zero
+            total_mag = velocity_mags.sum()
+            if total_mag > 0:
+                alignment_score = ((alignments * velocity_mags).sum() / total_mag).item()
+            else:
+                alignment_score = alignments.mean().item()  # Fallback to mean if no magnitude
+        else:
+            raise ValueError(
+                f"Unknown aggregation method '{aggregation}'. "
+                f"Must be 'mean' or 'weighted_mean'."
+            )
+        
+        return float(alignment_score)
+    
+    @torch.inference_mode()
+    def compute_cluster_alignment_matrix(
+        self,
+        adata: sc.AnnData,
+        cluster_key: str = 'clusters',
+        use_gp_space: bool = False,
+        velocity_key: Optional[str] = None,
+        state_key: Optional[str] = None,
+        aggregation: str = 'mean',
+        normalize: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Compute alignment matrix for all cluster pairs.
+        
+        Each entry (i, j) represents how much velocities in cluster i point
+        toward cluster j's state.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data with computed velocities and states.
+        cluster_key : str, default 'clusters'
+            Key in adata.obs containing cluster labels.
+        use_gp_space : bool, default False
+            If True, use gene program space. If False, use gene expression space.
+        velocity_key : str, optional
+            Key for velocities (see compute_cluster_alignment for defaults).
+        state_key : str, optional
+            Key for states (see compute_cluster_alignment for defaults).
+        aggregation : str, default 'mean'
+            Aggregation method: 'mean' or 'weighted_mean'.
+        normalize : bool, default False
+            If True, normalize each row (source cluster) using softmax so that
+            alignment scores sum to 1. This converts alignment scores into a
+            probability distribution over target clusters for each source cluster.
+            Softmax preserves relative differences better than simple normalization
+            and avoids many scores becoming zero.
+        
+        Returns
+        -------
+        alignment_df : pd.DataFrame
+            Square DataFrame of shape (n_clusters, n_clusters) where:
+            - Rows (index) = source clusters
+            - Columns = target clusters
+            - Values = alignment scores in [-1, 1] (or normalized probabilities if normalize=True)
+            - Diagonal and failed pairs are NaN
+        
+        Examples
+        --------
+        >>> # Compute alignment matrix in gene expression space
+        >>> df = model.compute_cluster_alignment_matrix(adata)
+        >>> 
+        >>> # Find which cluster Alpha points toward
+        >>> target_cluster = df.loc['Alpha'].idxmax()
+        >>> alignment = df.loc['Alpha', target_cluster]
+        >>> print(f"Alpha → {target_cluster}: {alignment:.3f}")
+        >>> 
+        >>> # Access specific alignment
+        >>> alignment_ab = df.loc['Alpha', 'Beta']
+        >>> 
+        >>> # Get normalized probability distribution
+        >>> df_norm = model.compute_cluster_alignment_matrix(adata, normalize=True)
+        >>> # Visualize with labels on top, red for high probability
+        >>> import seaborn as sns
+        >>> import matplotlib.pyplot as plt
+        >>> fig, ax = plt.subplots(figsize=(10, 8))
+        >>> sns.heatmap(df_norm, cmap='RdBu_r', vmin=0, vmax=1, annot=True, 
+        ...             fmt='.3f', xticklabels=True, yticklabels=True, ax=ax)
+        >>> ax.xaxis.tick_top()  # Move x-axis ticks to top
+        >>> ax.xaxis.set_label_position('top')
+        >>> plt.setp(ax.xaxis.get_majorticklabels(), rotation=90)  # Rotate labels vertically
+        >>> ax.set_title('Normalized Cluster Alignment Matrix (Probabilities)')
+        >>> plt.tight_layout()
+        >>> plt.show()
+        """
+        if cluster_key not in adata.obs.columns:
+            raise ValueError(
+                f"Cluster key '{cluster_key}' not found in adata.obs.columns. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        
+        clusters = adata.obs[cluster_key].unique()
+        clusters = np.sort(clusters)  # Sort for consistent ordering
+        n_clusters = len(clusters)
+        
+        alignment_matrix = np.zeros((n_clusters, n_clusters))
+        
+        # Compute alignment for each pair
+        for i, source_cluster in enumerate(clusters):
+            for j, target_cluster in enumerate(clusters):
+                if i != j:  # Skip self-alignment
+                    try:
+                        alignment_matrix[i, j] = self.compute_cluster_alignment(
+                            adata,
+                            source_cluster=source_cluster,
+                            target_cluster=target_cluster,
+                            cluster_key=cluster_key,
+                            use_gp_space=use_gp_space,
+                            velocity_key=velocity_key,
+                            state_key=state_key,
+                            aggregation=aggregation,
+                        )
+                    except Exception as e:
+                        # If alignment fails for a pair, set to NaN
+                        alignment_matrix[i, j] = np.nan
+                else:
+                    # Self-alignment: set to NaN (not meaningful)
+                    alignment_matrix[i, j] = np.nan
+        
+        # Normalize if requested (per-row normalization using softmax)
+        if normalize:
+            for i in range(n_clusters):
+                row_scores = alignment_matrix[i, :]
+                # Get valid (non-NaN) scores
+                valid_mask = ~np.isnan(row_scores)
+                if valid_mask.sum() > 0:
+                    valid_scores = row_scores[valid_mask]
+                    # Apply softmax to preserve relative differences and avoid zeros
+                    # softmax(x_i) = exp(x_i) / sum(exp(x_j))
+                    # Subtract max for numerical stability
+                    max_score = valid_scores.max()
+                    exp_scores = np.exp(valid_scores - max_score)
+                    normalized_scores = exp_scores / exp_scores.sum()
+                    # Update the row with normalized scores
+                    normalized_row = np.full(n_clusters, np.nan)
+                    normalized_row[valid_mask] = normalized_scores
+                    alignment_matrix[i, :] = normalized_row
+        
+        # Convert to DataFrame with cluster names as row and column indices
+        # Convert clusters to list for pandas (in case they're numpy array with object dtype)
+        cluster_list = [str(c) for c in clusters]
+        alignment_df = pd.DataFrame(
+            alignment_matrix,
+            index=cluster_list,
+            columns=cluster_list
+        )
+        
+        return alignment_df
 
 
 

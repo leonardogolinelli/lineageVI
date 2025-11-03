@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Optional
 import torch
 import scanpy as sc
 import numpy as np
+import pandas as pd
 
 from .model import LineageVIModel
 from .trainer import _Trainer  # internal; do NOT export
@@ -514,5 +515,199 @@ class LineageVI:
             velocity_key=velocity_key,
             unspliced_key=unspliced_key,
             spliced_key=spliced_key,
+        )
+    
+    def compute_cluster_alignment(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        source_cluster: str = None,
+        target_cluster: str = None,
+        *,
+        cluster_key: str = 'clusters',
+        use_gp_space: bool = False,
+        velocity_key: Optional[str] = None,
+        state_key: Optional[str] = None,
+        aggregation: str = 'mean',
+    ) -> float:
+        """
+        Compute alignment metric: how much do velocities in source_cluster
+        point toward target_cluster's state.
+        
+        This metric measures the directional alignment between velocity vectors
+        of cells in the source cluster and the direction from those cells to
+        the target cluster's centroid.
+        
+        Parameters
+        ----------
+        adata : AnnData, optional
+            Single-cell data with computed velocities and states.
+            If None, uses self.adata.
+        source_cluster : str
+            Name of the source cluster (cells with velocities).
+        target_cluster : str
+            Name of the target cluster (direction target).
+        cluster_key : str, default 'clusters'
+            Key in adata.obs containing cluster labels.
+        use_gp_space : bool, default False
+            If True, use gene program space (GP velocities and GP states).
+            If False, use gene expression space (gene velocities and spliced states).
+        velocity_key : str, optional
+            Key for velocities:
+            - If use_gp_space=True: key in adata.obsm (default: 'velocity_gp')
+            - If use_gp_space=False: key in adata.layers (default: 'velocity')
+        state_key : str, optional
+            Key for current states:
+            - If use_gp_space=True: key in adata.obsm (default: 'mean')
+            - If use_gp_space=False: key in adata.layers (default: 'Ms')
+        aggregation : str, default 'mean'
+            How to aggregate alignment scores across cells in source cluster:
+            - 'mean': Simple mean of all cell alignments
+            - 'weighted_mean': Velocity magnitude-weighted mean
+        
+        Returns
+        -------
+        float
+            Alignment score in [-1, 1]:
+            - 1.0: Perfect alignment (all velocities point toward target)
+            - 0.0: Orthogonal (no alignment)
+            - -1.0: Opposite direction (velocities point away from target)
+        
+        Examples
+        --------
+        >>> # Compute alignment in gene expression space
+        >>> alignment = linvi.compute_cluster_alignment(
+        ...     source_cluster='Alpha',
+        ...     target_cluster='Beta'
+        ... )
+        >>> 
+        >>> # Compute alignment in gene program space
+        >>> alignment_gp = linvi.compute_cluster_alignment(
+        ...     source_cluster='Alpha',
+        ...     target_cluster='Beta',
+        ...     use_gp_space=True
+        ... )
+        >>> 
+        >>> # Use weighted mean aggregation
+        >>> alignment_weighted = linvi.compute_cluster_alignment(
+        ...     source_cluster='Alpha',
+        ...     target_cluster='Beta',
+        ...     aggregation='weighted_mean'
+        ... )
+        """
+        return self.model.compute_cluster_alignment(
+            (adata or self.adata),
+            source_cluster=source_cluster,
+            target_cluster=target_cluster,
+            cluster_key=cluster_key,
+            use_gp_space=use_gp_space,
+            velocity_key=velocity_key,
+            state_key=state_key,
+            aggregation=aggregation,
+        )
+    
+    def compute_cluster_alignment_matrix(
+        self,
+        adata: Optional[sc.AnnData] = None,
+        *,
+        cluster_key: str = 'clusters',
+        use_gp_space: bool = False,
+        velocity_key: Optional[str] = None,
+        state_key: Optional[str] = None,
+        aggregation: str = 'mean',
+        normalize: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Compute alignment matrix for all cluster pairs.
+        
+        Each entry (i, j) represents how much velocities in cluster i point
+        toward cluster j's state.
+        
+        Parameters
+        ----------
+        adata : AnnData, optional
+            Single-cell data with computed velocities and states.
+            If None, uses self.adata.
+        cluster_key : str, default 'clusters'
+            Key in adata.obs containing cluster labels.
+        use_gp_space : bool, default False
+            If True, use gene program space. If False, use gene expression space.
+        velocity_key : str, optional
+            Key for velocities:
+            - If use_gp_space=True: key in adata.obsm (default: 'velocity_gp')
+            - If use_gp_space=False: key in adata.layers (default: 'velocity')
+        state_key : str, optional
+            Key for states:
+            - If use_gp_space=True: key in adata.obsm (default: 'mean')
+            - If use_gp_space=False: key in adata.layers (default: 'Ms')
+        aggregation : str, default 'mean'
+            Aggregation method: 'mean' or 'weighted_mean'.
+        normalize : bool, default False
+            If True, normalize each row (source cluster) using softmax so that
+            alignment scores sum to 1. This converts alignment scores into a
+            probability distribution over target clusters for each source cluster.
+            Softmax preserves relative differences better than simple normalization
+            and avoids many scores becoming zero.
+        
+        Returns
+        -------
+        alignment_df : pd.DataFrame
+            Square DataFrame of shape (n_clusters, n_clusters) where:
+            - Rows (index) = source clusters
+            - Columns = target clusters (column labels appear at top when visualizing)
+            - Values = alignment scores in [-1, 1] (or normalized probabilities if normalize=True)
+            - Diagonal and failed pairs are NaN
+        
+        Examples
+        --------
+        >>> # Compute alignment matrix in gene expression space
+        >>> df = linvi.compute_cluster_alignment_matrix()
+        >>> 
+        >>> # Find which cluster Alpha points toward
+        >>> target_cluster = df.loc['Alpha'].idxmax()
+        >>> alignment = df.loc['Alpha', target_cluster]
+        >>> print(f"Alpha → {target_cluster}: {alignment:.3f}")
+        >>> 
+        >>> # Access specific alignment
+        >>> alignment_ab = df.loc['Alpha', 'Beta']
+        >>> 
+        >>> # Get normalized probability distribution over targets for Alpha
+        >>> df_normalized = linvi.compute_cluster_alignment_matrix(normalize=True)
+        >>> alpha_probs = df_normalized.loc['Alpha']  # Probability distribution over targets
+        >>> 
+        >>> # Visualize the alignment matrix (raw scores)
+        >>> import seaborn as sns
+        >>> import matplotlib.pyplot as plt
+        >>> fig, ax = plt.subplots(figsize=(10, 8))
+        >>> sns.heatmap(df, cmap='RdBu_r', center=0, annot=True, fmt='.2f', 
+        ...             xticklabels=True, yticklabels=True, ax=ax)
+        >>> ax.set_xlabel('Target Cluster')
+        >>> ax.set_ylabel('Source Cluster')
+        >>> ax.set_title('Cluster Alignment Matrix')
+        >>> plt.tight_layout()
+        >>> plt.show()
+        >>> 
+        >>> # Visualize normalized matrix (probabilities) with labels on top
+        >>> # High probability = red, low probability = blue (using 'RdBu_r' colormap)
+        >>> fig, ax = plt.subplots(figsize=(10, 8))
+        >>> # 'RdBu_r' maps: low values (0) → blue, high values (1) → red
+        >>> sns.heatmap(df_normalized, cmap='RdBu_r', vmin=0, vmax=1, 
+        ...             annot=True, fmt='.3f', xticklabels=True, yticklabels=True, ax=ax)
+        >>> # Move x-axis ticks and labels to top
+        >>> ax.xaxis.tick_top()
+        >>> ax.xaxis.set_label_position('top')
+        >>> # Rotate x-axis labels vertically
+        >>> plt.setp(ax.xaxis.get_majorticklabels(), rotation=90)
+        >>> ax.set_title('Normalized Cluster Alignment Matrix (Probabilities)')
+        >>> plt.tight_layout()
+        >>> plt.show()
+        """
+        return self.model.compute_cluster_alignment_matrix(
+            (adata or self.adata),
+            cluster_key=cluster_key,
+            use_gp_space=use_gp_space,
+            velocity_key=velocity_key,
+            state_key=state_key,
+            aggregation=aggregation,
+            normalize=normalize,
         )
     
