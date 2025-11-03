@@ -153,7 +153,7 @@ class _Trainer:
         # ------- Regime 1 -------
         cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
         process_to_idx = self.model.process_to_idx  # Always present
-        cls_encoding_key = self.model.cls_encoding_key if self.model.cls_encoding_key is not None else 'cls_encoding'
+        cls_encoding_key = self.model.cls_encoding_key
         loader1 = make_dataloader(
             self.adata,
             first_regime=True,

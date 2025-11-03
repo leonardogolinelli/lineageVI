@@ -183,15 +183,18 @@ class LineageVIModel(nn.Module):
             self.cluster_embedding = None
         
         # CLS embeddings - process-specific (learns process-specific global dynamics)
-        self.cls_encoding_key = cls_encoding_key
         self.cls_embedding_dim = cls_embedding_dim
         
         # Handle CLS encoding key - create 'cls_encoding' column if needed
         if cls_encoding_key is None or cls_encoding_key not in adata.obs.columns:
             # Create cls_encoding column with 'Unspecified' for all cells
             adata.obs['cls_encoding'] = 'Unspecified'
+            # Update cls_encoding_key to point to the created column
+            self.cls_encoding_key = 'cls_encoding'
             process_labels = adata.obs['cls_encoding']
         else:
+            # Use the provided key
+            self.cls_encoding_key = cls_encoding_key
             process_labels = adata.obs[cls_encoding_key]
         
         # Get unique processes and create mapping
@@ -701,7 +704,7 @@ class LineageVIModel(nn.Module):
         
         cluster_to_idx = self.cluster_to_idx if self.cluster_key is not None else None
         process_to_idx = self.process_to_idx  # Always present
-        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
+        cls_encoding_key = self.cls_encoding_key
         dl = make_dataloader(
             adata,
             first_regime=True,     # encoder uses Mu/Ms; we decode per-batch
@@ -1678,7 +1681,7 @@ class LineageVIModel(nn.Module):
             ], dtype=torch.long, device=x_pert.device)
         
         # Get process indices (always present)
-        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
+        cls_encoding_key = self.cls_encoding_key
         process_labels_unpert = adata.obs[cls_encoding_key].iloc[cell_idx]
         process_labels_pert = adata.obs[cls_encoding_key].iloc[cell_idx]
         process_indices_unpert = torch.tensor([
@@ -1867,7 +1870,7 @@ class LineageVIModel(nn.Module):
             ], dtype=torch.long, device=device)
         
         # Get process indices (always present)
-        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
+        cls_encoding_key = self.cls_encoding_key
         if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
             # Single cell case
             if isinstance(cell_idx, (int, np.integer)):
