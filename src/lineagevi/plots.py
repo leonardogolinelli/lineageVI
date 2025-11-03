@@ -121,7 +121,7 @@ def plot_phase_plane(
     show_plot: bool = True,
     save_plot: bool = False,
     save_path: Optional[str] = None,
-    cell_type_key: str = "clusters",
+    cluster_key: str = "clusters",
     title_fontsize: int = 16,
     axis_fontsize: int = 14,
     legend_fontsize: int = 12,
@@ -147,8 +147,9 @@ def plot_phase_plane(
         - "velocity_u" (unspliced velocity), "velocity" (spliced velocity)
     gene_name : str
         Gene to plot (must be in `adata.var_names`).
-    u_scale, s_scale : float
+    u_scale, s_scale : float, default 0.1
         Multiplicative scaling of velocity arrows in unspliced/spliced directions.
+        Reduce these values (e.g., 0.05) to make arrows shorter.
     alpha : float
         Arrow alpha.
     head_width, head_length : float
@@ -170,9 +171,9 @@ def plot_phase_plane(
         "phase_plane_{gene_name}.png" in the current directory.
     save_path : Optional[str]
         Path to save PNG. Only used if `save_plot` is True.
-    cell_type_key : str
+    cluster_key : str
         Categorical obs column used for coloring points/arrows. Requires corresponding
-        colors in `adata.uns[f"{cell_type_key}_colors"]` when available.
+        colors in `adata.uns[f"{cluster_key}_colors"]` when available.
     *_fontsize : int
         Font sizes for title, axes, legend, and ticks.
     ax : Optional[plt.Axes]
@@ -298,16 +299,16 @@ def plot_phase_plane(
     # Default to gray if mapping not available.
     colors = np.full(u_expr.shape, "#888888", dtype=object)
 
-    if cell_type_key in adata.obs:
+    if cluster_key in adata.obs:
         # Slice obs to the valid cells
-        cell_types = adata.obs[cell_type_key].iloc[np.where(valid)[0]]
+        cell_types = adata.obs[cluster_key].iloc[np.where(valid)[0]]
 
-        # Try mapping from adata.uns[f"{cell_type_key}_colors"]
+        # Try mapping from adata.uns[f"{cluster_key}_colors"]
         mapping_available = False
-        if f"{cell_type_key}_colors" in adata.uns:
+        if f"{cluster_key}_colors" in adata.uns:
             try:
-                unique_ct = list(adata.obs[cell_type_key].cat.categories)  # requires categorical
-                ct_colors = list(adata.uns[f"{cell_type_key}_colors"])
+                unique_ct = list(adata.obs[cluster_key].cat.categories)  # requires categorical
+                ct_colors = list(adata.uns[f"{cluster_key}_colors"])
                 if len(unique_ct) == len(ct_colors):
                     color_map = dict(zip(unique_ct, ct_colors))
                     colors = cell_types.map(color_map).astype(object).to_numpy()
@@ -336,10 +337,14 @@ def plot_phase_plane(
     # --- Scatter points (background) and velocity quiver
     ax.scatter(s_expr, u_expr, c=colors, s=12, alpha=0.6, linewidths=0)
 
+    # Compute scaled velocities for axis limit calculation
+    s_vel_scaled = s_vel * s_scale
+    u_vel_scaled = u_vel * u_scale
+
     # Quiver expects U,V as x- and y- components respectively
     quiv = ax.quiver(
         s_expr, u_expr,                   # starting points (x=spliced, y=unspliced)
-        s_vel * s_scale, u_vel * u_scale,  # components (dx, dy)
+        s_vel_scaled, u_vel_scaled,       # components (dx, dy)
         angles="xy",
         scale_units="xy",
         scale=1.0,  # keep raw scale; we already scaled velocities
@@ -350,6 +355,29 @@ def plot_phase_plane(
         color=colors,
         alpha=alpha,
         pivot="tail",
+        clip_on=True,  # Clip arrows to axis limits
+    )
+
+    # --- Set axis limits with padding to accommodate arrows
+    # Calculate maximum arrow extension to ensure arrows stay within bounds
+    s_max_ext = np.max(s_expr + s_vel_scaled) if len(s_expr) > 0 else 1.0
+    s_min_ext = np.min(s_expr + s_vel_scaled) if len(s_expr) > 0 else 0.0
+    u_max_ext = np.max(u_expr + u_vel_scaled) if len(u_expr) > 0 else 1.0
+    u_min_ext = np.min(u_expr + u_vel_scaled) if len(u_expr) > 0 else 0.0
+    
+    # Add padding (5% of range or fixed minimum)
+    s_range = max(s_expr.max() - s_expr.min(), 0.01) if len(s_expr) > 0 else 0.01
+    u_range = max(u_expr.max() - u_expr.min(), 0.01) if len(u_expr) > 0 else 0.01
+    s_pad = max(s_range * 0.05, 0.02)
+    u_pad = max(u_range * 0.05, 0.02)
+    
+    ax.set_xlim(
+        max(-0.05, min(s_expr.min(), s_min_ext) - s_pad),
+        min(1.05, max(s_expr.max(), s_max_ext) + s_pad)
+    )
+    ax.set_ylim(
+        max(-0.05, min(u_expr.min(), u_min_ext) - u_pad),
+        min(1.05, max(u_expr.max(), u_max_ext) + u_pad)
     )
 
     # --- Labels & title
@@ -414,33 +442,34 @@ def plot_gp_phase_planes(
     adata_gp: AnnData,
     program_pairs: Union[Pair, Sequence[Pair]],
     *,
-    cell_type_key: str = "clusters",
+    cluster_key: str = "clusters",
     title: Optional[str] = None,
-    # visibility & styling
-    point_size: float = 10.0,
-    alpha_points: float = 0.6,
-    alpha_arrows: float = 0.7,
-    tick_fontsize: int = 10,
-    axis_fontsize: int = 12,
-    title_fontsize: int = 14,
-    legend_fontsize: int = 10,
+    # visibility & styling (matching plot_phase_plane)
+    alpha: float = 1,
+    head_width: float = 0.02,
+    head_length: float = 0.03,
+    length_includes_head: bool = False,
+    title_fontsize: int = 16,
+    axis_fontsize: int = 14,
+    legend_fontsize: int = 12,
+    tick_fontsize: int = 11,
     # velocity transforms
+    log: bool = False,
     norm_velocity: bool = True,
-    log_velocity: bool = False,
     # filtering
-    filter_cells_positive: bool = False,  # keep only cells with both gp spliced > 0 for each pair
+    filter_cells: bool = False,
     # arrow sizing (autoscaled; these act as multipliers)
     arrow_multiplier: float = 1.0,
     # layout
     ncols: int = 2,
     figsize_per_panel: Tuple[float, float] = (5.2, 4.4),
     # save/show
-    show: bool = True,
-    save: bool = False,
+    show_plot: bool = True,
+    save_plot: bool = False,
     save_path: Optional[str] = None,
     # Configurable layer keys
     latent_key: str = "z",
-    velocity_key: str = "velocity_gp",
+    velocity_key: str = "velocity",
 ):
     """
     Plot 2D phase planes for GP pairs with velocity overlays.
@@ -452,15 +481,47 @@ def plot_gp_phase_planes(
         Gene program AnnData object with configurable layer keys.
     program_pairs : Union[Pair, Sequence[Pair]]
         Gene program pairs to plot.
-    cell_type_key : str, default "clusters"
-        Key for cell type coloring.
+    cluster_key : str, default "clusters"
+        Key for cluster coloring.
+    alpha : float, default 1
+        Arrow alpha (same alpha used for both points and arrows, matching plot_phase_plane).
+    head_width, head_length : float
+        Arrow head geometry for quiver (matching plot_phase_plane defaults).
+    length_includes_head : bool, default False
+        Whether arrow length includes head length.
+    title_fontsize : int, default 16
+        Font size for subplot titles (matching plot_phase_plane).
+    axis_fontsize : int, default 14
+        Font size for axis labels (matching plot_phase_plane).
+    legend_fontsize : int, default 12
+        Font size for legend (matching plot_phase_plane).
+    tick_fontsize : int, default 11
+        Font size for tick labels (matching plot_phase_plane).
+    log : bool, default False
+        If True, apply log1p to velocities (matching plot_phase_plane parameter name).
+    norm_velocity : bool, default True
+        If True, normalize velocity components.
+    filter_cells : bool, default False
+        If True, keep only cells with both expressions > 0 (matching plot_phase_plane parameter name).
+    arrow_multiplier : float, default 1.0
+        Multiplier for arrow sizing (autoscaled). 
+        Reduce this value (e.g., 0.5) to make arrows shorter.
+    ncols : int, default 2
+        Number of columns in subplot grid.
+    figsize_per_panel : Tuple[float, float], default (5.2, 4.4)
+        Figure size per panel.
+    show_plot : bool, default True
+        Whether to show the plot (matching plot_phase_plane parameter name).
+    save_plot : bool, default False
+        Whether to save the plot (matching plot_phase_plane parameter name).
+    save_path : Optional[str], default None
+        Path to save the plot.
     latent_key : str, default "z"
         Key for latent representations in adata_gp.layers.
-    velocity_key : str, default "velocity_gp"
+    velocity_key : str, default "velocity"
         Key for velocities in adata_gp.layers.
-    Other parameters control plotting appearance and behavior.
     
-    Colors by `adata_gp.obs[cell_type_key]`, using `adata_gp.uns[f"{cell_type_key}_colors"]` if available.
+    Colors by `adata_gp.obs[cluster_key]`, using `adata_gp.uns[f"{cluster_key}_colors"]` if available.
     """
 
     # --- Basic checks
@@ -502,16 +563,16 @@ def plot_gp_phase_planes(
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True)
     axes_list = axes.ravel()
 
-    # --- Colors by cell type
-    if cell_type_key in adata_gp.obs:
-        cell_types_full = adata_gp.obs[cell_type_key]
+    # --- Colors by cluster
+    if cluster_key in adata_gp.obs:
+        cell_types_full = adata_gp.obs[cluster_key]
         colors_full = np.full(cell_types_full.shape[0], "#888888", dtype=object)
 
         mapping_available = False
-        if f"{cell_type_key}_colors" in adata_gp.uns:
+        if f"{cluster_key}_colors" in adata_gp.uns:
             try:
                 cats = list(cell_types_full.cat.categories)  # if categorical
-                palette = list(adata_gp.uns[f"{cell_type_key}_colors"])
+                palette = list(adata_gp.uns[f"{cluster_key}_colors"])
                 if len(cats) == len(palette):
                     color_map = dict(zip(cats, palette))
                     colors_full = cell_types_full.map(color_map).astype(object).to_numpy()
@@ -580,7 +641,7 @@ def plot_gp_phase_planes(
         dy_raw = V[:, iy].astype(float).ravel()
 
         # Per-subplot filtering
-        if filter_cells_positive:
+        if filter_cells:
             valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(dx_raw) & np.isfinite(dy_raw)
         else:
             valid = np.isfinite(x_raw) & np.isfinite(y_raw) & np.isfinite(dx_raw) & np.isfinite(dy_raw)
@@ -601,7 +662,7 @@ def plot_gp_phase_planes(
         if norm_velocity:
             dx = dx / (vel_norms[gp_x] if vel_norms[gp_x] > 0 else 1.0)
             dy = dy / (vel_norms[gp_y] if vel_norms[gp_y] > 0 else 1.0)
-        if log_velocity:
+        if log:
             dx = signed_log1p(dx)
             dy = signed_log1p(dy)
 
@@ -609,7 +670,7 @@ def plot_gp_phase_planes(
         vmag = np.hypot(dx, dy)
         finite = np.isfinite(vmag) & (vmag > 0)
         if not np.any(finite):
-            ax.scatter(x, y, c=cols, s=point_size, alpha=alpha_points, linewidths=0)
+            ax.scatter(x, y, c=cols, s=12, alpha=0.6, linewidths=0)
             ax.text(0.5, 0.5, "All velocities ~0", ha="center", va="center", transform=ax.transAxes, fontsize=10)
         else:
             x_span = max(1e-12, np.max(x) - np.min(x))
@@ -620,12 +681,37 @@ def plot_gp_phase_planes(
             dxp = dx * base_scale * arrow_multiplier
             dyp = dy * base_scale * arrow_multiplier
 
-            ax.scatter(x, y, c=cols, s=point_size, alpha=alpha_points, linewidths=0, zorder=3)
+            ax.scatter(x, y, c=cols, s=12, alpha=0.6, linewidths=0, zorder=3)
             ax.quiver(
                 x, y, dxp, dyp,
                 angles="xy", scale_units="xy", scale=1.0,
-                width=0.004, minlength=1.5, headwidth=4.5, headlength=6.5,
-                color=cols, alpha=alpha_arrows, pivot="tail", zorder=4
+                width=0.002,
+                headwidth=head_width / 0.02 * 3.0,   # normalize to quiver's units (matching plot_phase_plane)
+                headlength=head_length / 0.03 * 5.0, # normalize to quiver's units (matching plot_phase_plane)
+                minlength=0,
+                color=cols, alpha=alpha, pivot="tail", zorder=4,
+                clip_on=True,  # Clip arrows to axis limits
+            )
+            
+            # Set axis limits with padding to accommodate arrows
+            x_max_ext = np.max(x + dxp) if len(x) > 0 else 1.0
+            x_min_ext = np.min(x + dxp) if len(x) > 0 else 0.0
+            y_max_ext = np.max(y + dyp) if len(y) > 0 else 1.0
+            y_min_ext = np.min(y + dyp) if len(y) > 0 else 0.0
+            
+            # Add padding (5% of range or fixed minimum)
+            x_range = max(x.max() - x.min(), 0.01) if len(x) > 0 else 0.01
+            y_range = max(y.max() - y.min(), 0.01) if len(y) > 0 else 0.01
+            x_pad = max(x_range * 0.05, 0.02)
+            y_pad = max(y_range * 0.05, 0.02)
+            
+            ax.set_xlim(
+                max(-0.05, min(x.min(), x_min_ext) - x_pad),
+                min(1.05, max(x.max(), x_max_ext) + x_pad)
+            )
+            ax.set_ylim(
+                max(-0.05, min(y.min(), y_min_ext) - y_pad),
+                min(1.05, max(y.max(), y_max_ext) + y_pad)
             )
 
         # Labels and cosmetics
@@ -681,7 +767,7 @@ def plot_gp_phase_planes(
         # Anchor legend just outside the grid's top-right corner
         fig.legend(
             handles=handles,
-            title=cell_type_key,
+            title=cluster_key,
             loc="upper left",
             bbox_to_anchor=(right_edge + pad_x, top_edge - pad_y),
             bbox_transform=fig.transFigure,
@@ -694,10 +780,10 @@ def plot_gp_phase_planes(
         fig.subplots_adjust(right=min(0.95, right_edge + 0.08))
 
     # Save/show
-    if save:
+    if save_plot:
         out = save_path or "gp_phase_planes.png"
-        fig.savefig(out, dpi=200, bbox_inches="tight")
-    if show:
+        fig.savefig(out, dpi=120, bbox_inches="tight")
+    if show_plot:
         plt.show()
 
     return fig, axes

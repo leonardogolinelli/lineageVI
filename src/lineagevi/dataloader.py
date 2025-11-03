@@ -56,7 +56,7 @@ class RegimeDataset(Dataset):
         nn_key: str = 'indices',
         cluster_key: Optional[str] = None,
         cluster_to_idx: Optional[dict] = None,
-        bio_processes_key: Optional[str] = None,
+        cls_encoding_key: Optional[str] = None,
         process_to_idx: Optional[dict] = None,
     ):
         self.adata        = adata
@@ -65,7 +65,7 @@ class RegimeDataset(Dataset):
         self.spliced_key  = spliced_key
         self.latent_key   = latent_key
         self.cluster_key  = cluster_key
-        self.bio_processes_key = bio_processes_key
+        self.cls_encoding_key = cls_encoding_key
 
         # kNN indices from adata.uns['indices']
         indices = adata.uns.get(nn_key)
@@ -92,15 +92,15 @@ class RegimeDataset(Dataset):
         else:
             self.cluster_indices = None
 
-        # Process indices (always present - use 'bio_process' if bio_processes_key not provided)
-        if bio_processes_key is None or bio_processes_key not in adata.obs.columns:
-            # Use 'bio_process' column (created during model initialization)
-            if 'bio_process' not in adata.obs.columns:
-                # Fallback: create 'bio_process' with 'Unspecified'
-                adata.obs['bio_process'] = 'Unspecified'
-            process_labels = adata.obs['bio_process']
+        # Process indices (always present - use 'cls_encoding' if cls_encoding_key not provided)
+        if cls_encoding_key is None or cls_encoding_key not in adata.obs.columns:
+            # Use 'cls_encoding' column (created during model initialization)
+            if 'cls_encoding' not in adata.obs.columns:
+                # Fallback: create 'cls_encoding' with 'Unspecified'
+                adata.obs['cls_encoding'] = 'Unspecified'
+            process_labels = adata.obs['cls_encoding']
         else:
-            process_labels = adata.obs[bio_processes_key]
+            process_labels = adata.obs[cls_encoding_key]
         
         if process_to_idx is None:
             raise ValueError("process_to_idx is required")
@@ -173,7 +173,7 @@ def make_dataloader(
     seed: Optional[int] = None,
     cluster_key: Optional[str] = None,
     cluster_to_idx: Optional[dict] = None,
-    bio_processes_key: Optional[str] = None,
+    cls_encoding_key: Optional[str] = None,
     process_to_idx: Optional[dict] = None,
 ) -> DataLoader:
     """
@@ -239,7 +239,7 @@ def make_dataloader(
         nn_key=nn_key,
         cluster_key=cluster_key,
         cluster_to_idx=cluster_to_idx,
-        bio_processes_key=bio_processes_key,
+        cls_encoding_key=cls_encoding_key,
         process_to_idx=process_to_idx,
     )
     ds.set_regime(first_regime)

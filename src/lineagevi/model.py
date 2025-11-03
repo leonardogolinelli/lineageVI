@@ -143,7 +143,7 @@ class LineageVIModel(nn.Module):
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
-        bio_processes_key: Optional[str] = None,
+        cls_encoding_key: Optional[str] = None,
         cls_embedding_dim: int = 32,
     ):
         # If a seed is provided, lock all RNGs *before* instantiating any layers
@@ -183,17 +183,16 @@ class LineageVIModel(nn.Module):
             self.cluster_embedding = None
         
         # CLS embeddings - process-specific (learns process-specific global dynamics)
-        self.bio_processes_key = bio_processes_key
+        self.cls_encoding_key = cls_encoding_key
         self.cls_embedding_dim = cls_embedding_dim
         
-        # Handle biological process key - create 'bio_process' column if needed
-        if bio_processes_key is None or bio_processes_key not in adata.obs.columns:
-            # Create bio_process column with 'Unspecified' for all cells
-            if 'bio_process' not in adata.obs.columns:
-                adata.obs['bio_process'] = 'Unspecified'
-            process_labels = adata.obs['bio_process']
+        # Handle CLS encoding key - create 'cls_encoding' column if needed
+        if cls_encoding_key is None or cls_encoding_key not in adata.obs.columns:
+            # Create cls_encoding column with 'Unspecified' for all cells
+            adata.obs['cls_encoding'] = 'Unspecified'
+            process_labels = adata.obs['cls_encoding']
         else:
-            process_labels = adata.obs[bio_processes_key]
+            process_labels = adata.obs[cls_encoding_key]
         
         # Get unique processes and create mapping
         unique_processes = process_labels.unique().tolist()
@@ -684,14 +683,15 @@ class LineageVIModel(nn.Module):
         rescale_velocity_magnitude : bool, default True
             Whether to rescale velocity magnitudes based on neighbor consistency.
             If True, computes cosine similarity between each cell's velocity direction
-            and its K nearest neighbors' velocity directions. Velocities with high
-            consistency (neighbors agree) get higher magnitudes, while inconsistent
-            velocities get lower magnitudes. Uses the same K as the training regime.
+            and differences to its K nearest neighbors (matching the training loss).
+            Velocities with high consistency (aligned with neighbor differences) get
+            higher magnitudes, while inconsistent velocities get lower magnitudes.
+            Uses the same K as the training regime.
         max_velocity_magnitude : float, default 1.0
             Maximum velocity magnitude after rescaling. Velocities with perfect
-            consistency (average cosine similarity = 1.0) will have this magnitude.
-            Velocities with zero consistency (average cosine similarity = 0.0) will
-            have zero magnitude.
+            consistency (max cosine similarity = 1.0 with neighbor differences) will
+            have this magnitude. Velocities with zero consistency (max cosine similarity = -1.0)
+            will have zero magnitude.
         """
         from .dataloader import make_dataloader
 
@@ -701,7 +701,7 @@ class LineageVIModel(nn.Module):
         
         cluster_to_idx = self.cluster_to_idx if self.cluster_key is not None else None
         process_to_idx = self.process_to_idx  # Always present
-        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
+        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
         dl = make_dataloader(
             adata,
             first_regime=True,     # encoder uses Mu/Ms; we decode per-batch
@@ -716,7 +716,7 @@ class LineageVIModel(nn.Module):
             seed=None,
             cluster_key=self.cluster_key,
             cluster_to_idx=cluster_to_idx,
-            bio_processes_key=bio_processes_key,
+            cls_encoding_key=cls_encoding_key,
             process_to_idx=process_to_idx,
         )
 
@@ -870,94 +870,177 @@ class LineageVIModel(nn.Module):
                 K_total = nn_indices_tensor.shape[1]
                 K = K_total - 1  # Exclude self (first column)
                 
-                # Normalize all velocities to get directions
-                vel_mean_norm = F.normalize(vel_mean, p=2, dim=1)  # (cells, features)
+                # vel_all is shape (cells, 2*genes): [unspliced_vel, spliced_vel]
+                # Split to get spliced velocities for comparison with differences in spliced space
+                vel_u, vel_s = torch.split(vel_mean, n_features // 2, dim=1)
+                vel_s = vel_s.to(vel_mean.device)  # (cells, genes) - spliced velocities
                 
-                # Compute consistency scores for each cell
-                consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
-                
-                for i in range(n_cells):
-                    # Get cell's velocity direction (already normalized)
-                    v_i_norm = vel_mean_norm[i]  # (features,)
+                # Get current spliced state from adata for computing neighbor differences
+                if spliced_key not in adata.layers:
+                    import warnings
+                    warnings.warn(
+                        f"Spliced counts not found in adata.layers['{spliced_key}']. "
+                        f"Skipping velocity magnitude rescaling.",
+                        UserWarning
+                    )
+                else:
+                    # Get current state (spliced counts)
+                    current_state = torch.from_numpy(adata.layers[spliced_key].astype(np.float32)).to(vel_mean.device)  # (cells, genes)
                     
-                    # Get neighbor indices (exclude self, which is at position 0)
-                    neighbor_indices = nn_indices_tensor[i, 1:K_total]  # (K,)
-                    # Filter out invalid indices (-1 for padding)
-                    valid_mask = neighbor_indices >= 0
-                    valid_indices = neighbor_indices[valid_mask]  # (K_valid,)
+                    # Compute consistency scores for each cell
+                    consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
                     
-                    if valid_indices.numel() == 0:
-                        # No valid neighbors, set consistency to 0
-                        consistency_scores[i] = 0.0
-                        continue
+                    for i in range(n_cells):
+                        # Get cell's velocity direction (spliced part)
+                        v_i = vel_s[i]  # (genes,)
+                        v_i_norm = F.normalize(v_i.unsqueeze(0), p=2, dim=1).squeeze(0)  # (genes,)
+                        
+                        # Get neighbor indices (exclude self, which is at position 0)
+                        neighbor_indices = nn_indices_tensor[i, 1:K_total]  # (K,)
+                        # Filter out invalid indices (-1 for padding)
+                        valid_mask = neighbor_indices >= 0
+                        valid_indices = neighbor_indices[valid_mask]  # (K_valid,)
+                        
+                        if valid_indices.numel() == 0:
+                            # No valid neighbors, set consistency to 0
+                            consistency_scores[i] = 0.0
+                            continue
+                        
+                        # Get current state for cell and neighbors
+                        x_i = current_state[i]  # (genes,)
+                        x_neigh = current_state[valid_indices]  # (K_valid, genes)
+                        
+                        # Compute differences to neighbors (like in velocity_loss)
+                        diffs = x_neigh - x_i.unsqueeze(0)  # (K_valid, genes)
+                        
+                        # Normalize differences
+                        diffs_norm = F.normalize(diffs, p=2, dim=1)  # (K_valid, genes)
+                        
+                        # Compute cosine similarities between velocity direction and neighbor differences
+                        cos_sims = F.cosine_similarity(
+                            v_i_norm.unsqueeze(0), 
+                            diffs_norm, 
+                            dim=1
+                        )  # (K_valid,)
+                        
+                        # Use max cosine similarity (like in velocity_loss) as consistency score
+                        max_sim = cos_sims.max()  # Maximum consistency across neighbors
+                        # Map from [-1, 1] to [0, 1] for magnitude scaling
+                        consistency = (max_sim + 1.0) / 2.0
+                        consistency_scores[i] = consistency.clamp(0.0, 1.0)
                     
-                    # Get neighbors' velocity directions (already normalized)
-                    v_neigh_norm = vel_mean_norm[valid_indices]  # (K_valid, features)
-                    
-                    # Compute cosine similarities between cell's velocity and neighbors' velocities
-                    cos_sims = F.cosine_similarity(
-                        v_i_norm.unsqueeze(0), 
-                        v_neigh_norm, 
-                        dim=1
-                    )  # (K_valid,)
-                    
-                    # Use mean cosine similarity as consistency score
-                    # Clamp to [0, 1] range (cosine similarity is in [-1, 1])
-                    consistency = (cos_sims.mean() + 1.0) / 2.0  # Map from [-1, 1] to [0, 1]
-                    consistency_scores[i] = consistency.clamp(0.0, 1.0)
-                
-                # Scale velocity magnitudes: consistency → magnitude
-                # Max consistency (1.0) → max_velocity_magnitude
-                # Zero consistency (0.0) → 0.0
-                if vel_all.ndim == 3:
-                    # (n_samples, cells, features)
-                    for s in range(vel_all.shape[0]):
+                    # Scale velocity magnitudes: consistency → magnitude
+                    # Max consistency (1.0) → max_velocity_magnitude
+                    # Zero consistency (0.0) → 0.0
+                    if vel_all.ndim == 3:
+                        # (n_samples, cells, features)
+                        for s in range(vel_all.shape[0]):
+                            for i in range(n_cells):
+                                # Get original velocity vector
+                                v_orig = vel_all[s, i]  # (features,)
+                                # Get original magnitude
+                                magnitude_orig = v_orig.norm(p=2)
+                                if magnitude_orig > 0:
+                                    # Compute scale factor based on consistency
+                                    scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                    # Scale velocity: maintain direction, scale magnitude
+                                    vel_all[s, i] = v_orig * scale_factor
+                    else:
+                        # (cells, features)
                         for i in range(n_cells):
                             # Get original velocity vector
-                            v_orig = vel_all[s, i]  # (features,)
+                            v_orig = vel_all[i]  # (features,)
                             # Get original magnitude
                             magnitude_orig = v_orig.norm(p=2)
                             if magnitude_orig > 0:
                                 # Compute scale factor based on consistency
                                 scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
                                 # Scale velocity: maintain direction, scale magnitude
-                                vel_all[s, i] = v_orig * scale_factor
-                else:
-                    # (cells, features)
-                    for i in range(n_cells):
-                        # Get original velocity vector
-                        v_orig = vel_all[i]  # (features,)
-                        # Get original magnitude
-                        magnitude_orig = v_orig.norm(p=2)
-                        if magnitude_orig > 0:
-                            # Compute scale factor based on consistency
-                            scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
-                            # Scale velocity: maintain direction, scale magnitude
-                            vel_all[i] = v_orig * scale_factor
-                
-                # Also rescale velocity_gp if available
-                if velgp_all is not None:
-                    if velgp_all.ndim == 3:
-                        velgp_mean = velgp_all.mean(dim=0)  # (cells, features)
-                    else:
-                        velgp_mean = velgp_all  # (cells, features)
+                                vel_all[i] = v_orig * scale_factor
                     
-                    # Apply same consistency scores to velocity_gp
-                    if velgp_all.ndim == 3:
-                        for s in range(velgp_all.shape[0]):
+                    # Also rescale velocity_gp if available (using differences in latent space)
+                    if velgp_all is not None:
+                        # Get current latent state (mean)
+                        if "mean" in adata.obsm:
+                            current_latent_state = torch.from_numpy(adata.obsm["mean"].astype(np.float32)).to(vel_mean.device)  # (cells, L)
+                            
+                            if velgp_all.ndim == 3:
+                                velgp_mean = velgp_all.mean(dim=0)  # (cells, features)
+                            else:
+                                velgp_mean = velgp_all  # (cells, features)
+                            
+                            # Compute consistency scores for GP velocities
+                            gp_consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
+                            
                             for i in range(n_cells):
-                                vgp_orig = velgp_all[s, i]
-                                magnitude_orig = vgp_orig.norm(p=2)
-                                if magnitude_orig > 0:
-                                    scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
-                                    velgp_all[s, i] = vgp_orig * scale_factor
-                    else:
-                        for i in range(n_cells):
-                            vgp_orig = velgp_all[i]
-                            magnitude_orig = vgp_orig.norm(p=2)
-                            if magnitude_orig > 0:
-                                scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
-                                velgp_all[i] = vgp_orig * scale_factor
+                                # Get cell's GP velocity direction
+                                vgp_i = velgp_mean[i]  # (L,)
+                                vgp_i_norm = F.normalize(vgp_i.unsqueeze(0), p=2, dim=1).squeeze(0)  # (L,)
+                                
+                                # Get neighbor indices
+                                neighbor_indices = nn_indices_tensor[i, 1:K_total]
+                                valid_mask = neighbor_indices >= 0
+                                valid_indices = neighbor_indices[valid_mask]
+                                
+                                if valid_indices.numel() == 0:
+                                    gp_consistency_scores[i] = 0.0
+                                    continue
+                                
+                                # Get current latent state for cell and neighbors
+                                z_i = current_latent_state[i]  # (L,)
+                                z_neigh = current_latent_state[valid_indices]  # (K_valid, L)
+                                
+                                # Compute differences to neighbors in latent space
+                                diffs_latent = z_neigh - z_i.unsqueeze(0)  # (K_valid, L)
+                                
+                                # Normalize differences
+                                diffs_latent_norm = F.normalize(diffs_latent, p=2, dim=1)  # (K_valid, L)
+                                
+                                # Compare GP velocity direction with neighbor differences
+                                cos_sims_gp = F.cosine_similarity(
+                                    vgp_i_norm.unsqueeze(0),
+                                    diffs_latent_norm,
+                                    dim=1
+                                )  # (K_valid,)
+                                
+                                # Use max cosine similarity as consistency score
+                                max_sim_gp = cos_sims_gp.max()
+                                consistency_gp = (max_sim_gp + 1.0) / 2.0
+                                gp_consistency_scores[i] = consistency_gp.clamp(0.0, 1.0)
+                            
+                            # Apply GP consistency scores to velocity_gp
+                            if velgp_all.ndim == 3:
+                                for s in range(velgp_all.shape[0]):
+                                    for i in range(n_cells):
+                                        vgp_orig = velgp_all[s, i]
+                                        magnitude_orig = vgp_orig.norm(p=2)
+                                        if magnitude_orig > 0:
+                                            scale_factor = gp_consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                            velgp_all[s, i] = vgp_orig * scale_factor
+                            else:
+                                for i in range(n_cells):
+                                    vgp_orig = velgp_all[i]
+                                    magnitude_orig = vgp_orig.norm(p=2)
+                                    if magnitude_orig > 0:
+                                        scale_factor = gp_consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                        velgp_all[i] = vgp_orig * scale_factor
+                        else:
+                            # If mean not available, use same consistency scores as gene velocities
+                            if velgp_all.ndim == 3:
+                                for s in range(velgp_all.shape[0]):
+                                    for i in range(n_cells):
+                                        vgp_orig = velgp_all[s, i]
+                                        magnitude_orig = vgp_orig.norm(p=2)
+                                        if magnitude_orig > 0:
+                                            scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                            velgp_all[s, i] = vgp_orig * scale_factor
+                            else:
+                                for i in range(n_cells):
+                                    vgp_orig = velgp_all[i]
+                                    magnitude_orig = vgp_orig.norm(p=2)
+                                    if magnitude_orig > 0:
+                                        scale_factor = consistency_scores[i] * max_velocity_magnitude / magnitude_orig
+                                        velgp_all[i] = vgp_orig * scale_factor
 
         # split velocity into u/s in NumPy space
         vel_u_np = vel_s_np = None
@@ -1595,9 +1678,9 @@ class LineageVIModel(nn.Module):
             ], dtype=torch.long, device=x_pert.device)
         
         # Get process indices (always present)
-        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
-        process_labels_unpert = adata.obs[bio_processes_key].iloc[cell_idx]
-        process_labels_pert = adata.obs[bio_processes_key].iloc[cell_idx]
+        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
+        process_labels_unpert = adata.obs[cls_encoding_key].iloc[cell_idx]
+        process_labels_pert = adata.obs[cls_encoding_key].iloc[cell_idx]
         process_indices_unpert = torch.tensor([
             self.process_to_idx.get(str(label), 0) for label in process_labels_unpert
         ], dtype=torch.long, device=x_unpert.device)
@@ -1784,17 +1867,17 @@ class LineageVIModel(nn.Module):
             ], dtype=torch.long, device=device)
         
         # Get process indices (always present)
-        bio_processes_key = self.bio_processes_key if self.bio_processes_key is not None else 'bio_process'
+        cls_encoding_key = self.cls_encoding_key if self.cls_encoding_key is not None else 'cls_encoding'
         if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
             # Single cell case
             if isinstance(cell_idx, (int, np.integer)):
                 idx = cell_idx
             else:
                 idx = cell_idx[0]
-            process_labels = [adata.obs[bio_processes_key].iloc[idx]]
+            process_labels = [adata.obs[cls_encoding_key].iloc[idx]]
         else:
             # Multiple cells case
-            process_labels = adata.obs[bio_processes_key].iloc[cell_idx]
+            process_labels = adata.obs[cls_encoding_key].iloc[cell_idx]
             if hasattr(process_labels, 'values'):
                 process_labels = process_labels.values.tolist()
             else:

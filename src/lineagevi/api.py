@@ -41,9 +41,9 @@ class LineageVI:
         will be learned and used in velocity prediction.
     cluster_embedding_dim : int, default 32
         Dimension of cluster embeddings. Used when cluster_key is provided.
-    bio_processes_key : str, optional
-        Key in adata.obs for biological processes. If provided, process-specific CLS
-        embeddings will be learned. If None or non-existent, a 'bio_process' column
+    cls_encoding_key : str, optional
+        Key in adata.obs for CLS encoding (biological processes). If provided, process-specific CLS
+        embeddings will be learned. If None or non-existent, a 'cls_encoding' column
         will be created with all cells assigned to 'Unspecified' (single global CLS embedding).
     cls_embedding_dim : int, default 32
         Dimension of CLS (classification) embedding. The CLS embedding learns
@@ -93,7 +93,7 @@ class LineageVI:
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
-        bio_processes_key: Optional[str] = None,
+        cls_encoding_key: Optional[str] = None,
         cls_embedding_dim: int = 32,
     ):
         self.adata = adata
@@ -104,7 +104,7 @@ class LineageVI:
             seed=seed,
             cluster_key=cluster_key,
             cluster_embedding_dim=cluster_embedding_dim,
-            bio_processes_key=bio_processes_key,
+            cls_encoding_key=cls_encoding_key,
             cls_embedding_dim=cls_embedding_dim,
         )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -252,7 +252,7 @@ class LineageVI:
         self,
         adata,
         n_samples: int = 1,
-        return_mean: bool = True,
+        return_mean: bool = False,
         return_negative_velo: bool = True,
         base_seed: Optional[int] = None,
         save_to_adata: bool = False,

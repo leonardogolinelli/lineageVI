@@ -153,7 +153,7 @@ class _Trainer:
         # ------- Regime 1 -------
         cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
         process_to_idx = self.model.process_to_idx  # Always present
-        bio_processes_key = self.model.bio_processes_key if self.model.bio_processes_key is not None else 'bio_process'
+        cls_encoding_key = self.model.cls_encoding_key if self.model.cls_encoding_key is not None else 'cls_encoding'
         loader1 = make_dataloader(
             self.adata,
             first_regime=True,
@@ -167,7 +167,7 @@ class _Trainer:
             nn_key=self.nn_key,
             cluster_key=self.model.cluster_key,
             cluster_to_idx=cluster_to_idx,
-            bio_processes_key=bio_processes_key,
+            cls_encoding_key=cls_encoding_key,
             process_to_idx=process_to_idx,
         )
         r1_losses = self._train_regime1(loader1, lr=lr, epochs=epochs1, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
@@ -191,7 +191,7 @@ class _Trainer:
             nn_key=self.nn_key,
             cluster_key=self.model.cluster_key,
             cluster_to_idx=cluster_to_idx,
-            bio_processes_key=bio_processes_key,
+            cls_encoding_key=cls_encoding_key,
             process_to_idx=process_to_idx,
         )
 
@@ -411,7 +411,7 @@ class _Trainer:
         
         # Get cluster key from model - use the exact cluster_key used in initialization
         # This ensures colors match the cluster_key specified in LineageVI initialization
-        cell_type_key = self.model.cluster_key if self.model.cluster_key is not None else "clusters"
+        cluster_key = self.model.cluster_key if self.model.cluster_key is not None else "clusters"
         
         # Generate plots for each monitoring gene
         for gene_name in monitor_genes:
@@ -438,7 +438,7 @@ class _Trainer:
                     show_plot=False,  # Don't display, just save
                     save_plot=True,
                     save_path=os.path.join(gene_plots_dir, f"{gene_name}_regime{regime}_epoch_{epoch:03d}.png"),
-                    cell_type_key=cell_type_key,  # Use cluster_key from model
+                    cluster_key=cluster_key,  # Use cluster_key from model
                     unspliced_key=self.unspliced_key,
                     spliced_key=self.spliced_key,
                     velocity_u_key="velocity_u",
