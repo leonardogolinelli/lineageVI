@@ -1804,7 +1804,7 @@ class LineageVIModel(nn.Module):
         group_to_perturb : str
             Name of group to perturb.
         perturb_value : float
-            Value to add to gene program expression (can be negative for downregulation).
+            Value to replace gene program activation with (replaces the activation value for all cells in the group).
         
         Returns
         -------
