@@ -926,14 +926,14 @@ class LineageVIModel(nn.Module):
                             dim=1
                         )  # (K_valid,)
                         
-                        # Use max cosine similarity (like in velocity_loss) as consistency score
-                        max_sim = cos_sims.max()  # Maximum consistency across neighbors
+                        # Use mean cosine similarity across neighbors as consistency score
+                        mean_sim = cos_sims.mean()  # Mean consistency across neighbors
                         # Map from [-1, 1] to [0, 1] for magnitude scaling
-                        consistency = (max_sim + 1.0) / 2.0
+                        consistency = (mean_sim + 1.0) / 2.0
                         consistency_scores[i] = consistency.clamp(0.0, 1.0)
                     
                     # Scale velocity magnitudes: consistency → magnitude
-                    # Max consistency (1.0) → max_velocity_magnitude
+                    # Mean consistency (1.0) → max_velocity_magnitude
                     # Zero consistency (0.0) → 0.0
                     if vel_all.ndim == 3:
                         # (n_samples, cells, features)
@@ -1006,9 +1006,9 @@ class LineageVIModel(nn.Module):
                                     dim=1
                                 )  # (K_valid,)
                                 
-                                # Use max cosine similarity as consistency score
-                                max_sim_gp = cos_sims_gp.max()
-                                consistency_gp = (max_sim_gp + 1.0) / 2.0
+                                # Use mean cosine similarity across neighbors as consistency score
+                                mean_sim_gp = cos_sims_gp.mean()
+                                consistency_gp = (mean_sim_gp + 1.0) / 2.0
                                 gp_consistency_scores[i] = consistency_gp.clamp(0.0, 1.0)
                             
                             # Apply GP consistency scores to velocity_gp

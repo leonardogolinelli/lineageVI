@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import scanpy as sc
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
+from sklearn.metrics.pairwise import cosine_similarity
 
 from .api import LineageVI  # avoid importing the top-level package to prevent circulars
 
@@ -296,4 +298,112 @@ def compute_nearest_neighbors(
         indices_array = np.array([], dtype=np.int64).reshape(n_cells, 0)
     
     adata.uns[indices_key] = indices_array
+
+def compute_cluster_embedding_similarity(
+    adata: Optional[sc.AnnData] = None,
+    *,
+    embeddings: Optional[np.ndarray] = None,
+    cluster_names: Optional[Union[list, np.ndarray]] = None,
+    embeddings_key: str = 'cluster_embeddings',
+    names_key: str = 'cluster_names',
+) -> pd.DataFrame:
+    """
+    Compute cosine similarity matrix between all cluster embeddings.
+    
+    This function computes pairwise cosine similarity between cluster embeddings,
+    which can be used to visualize relationships between clusters in embedding space.
+    
+    Parameters
+    ----------
+    adata : AnnData, optional
+        AnnData object containing cluster embeddings in adata.uns.
+        If None, embeddings and cluster_names must be provided directly.
+    embeddings : np.ndarray, optional
+        Cluster embeddings array of shape (n_clusters, embedding_dim).
+        If None, will be read from adata.uns[embeddings_key].
+    cluster_names : list or np.ndarray, optional
+        List of cluster names of length n_clusters.
+        If None, will be read from adata.uns[names_key].
+    embeddings_key : str, default 'cluster_embeddings'
+        Key in adata.uns where cluster embeddings are stored.
+    names_key : str, default 'cluster_names'
+        Key in adata.uns where cluster names are stored.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Cosine similarity matrix of shape (n_clusters, n_clusters).
+        Rows and columns are indexed by cluster names.
+        Values range from -1 to 1, where 1 indicates identical embeddings.
+        The matrix is symmetric.
+    
+    Examples
+    --------
+    >>> # Compute similarity matrix from AnnData
+    >>> similarity_df = lineagevi.utils.compute_cluster_embedding_similarity(adata)
+    >>> 
+    >>> # Plot as heatmap
+    >>> import lineagevi.plots as lv_plots
+    >>> fig, ax = lv_plots.plot_cluster_alignment_matrix(similarity_df, title='Cluster Embedding Similarity')
+    >>> 
+    >>> # Use custom embeddings
+    >>> embeddings = np.random.randn(10, 32)  # 10 clusters, 32-dim embeddings
+    >>> names = ['Cluster_' + str(i) for i in range(10)]
+    >>> similarity_df = lineagevi.utils.compute_cluster_embedding_similarity(
+    ...     embeddings=embeddings,
+    ...     cluster_names=names
+    ... )
+    """
+    # Get embeddings and names from adata if not provided directly
+    if embeddings is None:
+        if adata is None:
+            raise ValueError("Either adata or embeddings must be provided")
+        if embeddings_key not in adata.uns:
+            raise KeyError(
+                f"Cluster embeddings not found in adata.uns['{embeddings_key}']. "
+                f"Please run get_model_outputs(adata, save_to_adata=True) first. "
+                f"Available uns keys: {list(adata.uns.keys())}"
+            )
+        embeddings = np.asarray(adata.uns[embeddings_key])
+    
+    if cluster_names is None:
+        if adata is None:
+            raise ValueError("Either adata or cluster_names must be provided")
+        if names_key not in adata.uns:
+            raise KeyError(
+                f"Cluster names not found in adata.uns['{names_key}']. "
+                f"Please run get_model_outputs(adata, save_to_adata=True) first. "
+                f"Available uns keys: {list(adata.uns.keys())}"
+            )
+        cluster_names = adata.uns[names_key]
+    
+    # Convert to numpy arrays
+    embeddings = np.asarray(embeddings)
+    cluster_names = np.asarray(cluster_names)
+    
+    # Validate shapes
+    if embeddings.ndim != 2:
+        raise ValueError(f"Embeddings must be 2D array (n_clusters, embedding_dim), got shape {embeddings.shape}")
+    
+    n_clusters = embeddings.shape[0]
+    if len(cluster_names) != n_clusters:
+        raise ValueError(
+            f"Number of cluster names ({len(cluster_names)}) does not match "
+            f"number of embeddings ({n_clusters})"
+        )
+    
+    # Compute cosine similarity matrix
+    similarity_matrix = cosine_similarity(embeddings)
+    
+    # Convert cluster names to strings for DataFrame
+    cluster_names_str = [str(name) for name in cluster_names]
+    
+    # Create DataFrame with cluster names as row and column indices
+    similarity_df = pd.DataFrame(
+        similarity_matrix,
+        index=cluster_names_str,
+        columns=cluster_names_str
+    )
+    
+    return similarity_df
 
