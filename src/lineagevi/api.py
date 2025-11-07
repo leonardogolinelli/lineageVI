@@ -787,51 +787,55 @@ class LineageVI:
     
     def perturb_cluster_labels(
         self,
-        adata: sc.AnnData,
+        adata: Optional[sc.AnnData] = None,
         *,
-        groupby_key: str = 'clusters',
         source_cluster: str = None,
         target_cluster: str = None,
-    ) -> None:
+    ):
         """
-        Perturb cluster labels for cells by switching from one cluster to another.
+        Perturb cluster embeddings by swapping embeddings between two clusters.
         
-        This perturbation modifies which cluster embedding cells use by changing
-        their cluster labels. This allows evaluation of how cluster-specific dynamics
-        affect velocity predictions.
+        This perturbation swaps the cluster embeddings in the model, computes
+        velocity predictions with the swapped embeddings, and then restores
+        the original embeddings. This allows evaluation of how cluster-specific
+        dynamics affect velocity predictions.
         
         Parameters
         ----------
-        adata : AnnData
-            AnnData to modify. Will be modified in place.
-        groupby_key : str, default 'clusters'
-            Key in adata.obs containing cluster labels.
+        adata : AnnData, optional
+            Single-cell data to compute velocities on. If None, uses self.adata.
         source_cluster : str
-            Original cluster label to switch from.
+            Cluster label whose embedding will be swapped.
         target_cluster : str
-            Target cluster label to switch to.
+            Cluster label whose embedding will be swapped with source_cluster.
         
         Returns
         -------
-        None
-            Modifies adata.obs[groupby_key] in place.
+        df_genes : pd.DataFrame
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+        df_gps : pd.DataFrame
+            DataFrame with GP-level differences (GP velocity, etc.).
+        
+        Notes
+        -----
+        Perturbed outputs are stored in adata.obsm and adata.layers with ``_pert`` suffix.
+        This function:
+        1. Saves the original cluster embeddings
+        2. Swaps embeddings between source_cluster and target_cluster
+        3. Computes velocities with swapped embeddings
+        4. Computes differences from original velocities
+        5. Restores original embeddings
         """
-        if source_cluster is None or target_cluster is None:
-            raise ValueError("Both source_cluster and target_cluster must be provided")
+        if adata is None:
+            adata = self.adata
+            if adata is None:
+                raise ValueError("adata must be provided either as parameter or via self.adata")
         
-        if groupby_key not in adata.obs.columns:
-            raise ValueError(f"groupby_key '{groupby_key}' not found in adata.obs.columns")
-        
-        # Get cells in source cluster
-        source_mask = adata.obs[groupby_key] == source_cluster
-        n_cells = source_mask.sum()
-        
-        if n_cells == 0:
-            raise ValueError(f"No cells found with cluster label '{source_cluster}'")
-        
-        # Switch labels
-        adata.obs.loc[source_mask, groupby_key] = target_cluster
-        print(f"Switched {n_cells} cells from cluster '{source_cluster}' to '{target_cluster}'")
+        return self.model.perturb_cluster_labels(
+            adata,
+            source_cluster=source_cluster,
+            target_cluster=target_cluster,
+        )
     
     def evaluate_perturbation_effects(
         self,
@@ -1020,18 +1024,20 @@ class LineageVI:
                 raise ValueError(
                     "Both source_cluster and target_cluster must be provided when perturbation_type='cluster_labels'"
                 )
-            # Validate clusters exist
-            if groupby_key not in adata.obs.columns:
-                raise ValueError(f"groupby_key '{groupby_key}' not found in adata.obs.columns")
-            available_clusters = set(adata.obs[groupby_key].unique())
+            # Validate clusters exist in model
+            if self.model.cluster_embedding is None:
+                raise ValueError("Cluster embeddings are not enabled in this model")
+            if self.model.cluster_to_idx is None:
+                raise ValueError("Model does not have cluster_to_idx mapping")
+            available_clusters = set(self.model.cluster_to_idx.keys())
             if source_cluster not in available_clusters:
                 raise ValueError(
-                    f"Source cluster '{source_cluster}' not found in adata.obs['{groupby_key}']. "
+                    f"Source cluster '{source_cluster}' not found in model. "
                     f"Available clusters: {list(available_clusters)}"
                 )
             if target_cluster not in available_clusters:
                 raise ValueError(
-                    f"Target cluster '{target_cluster}' not found in adata.obs['{groupby_key}']. "
+                    f"Target cluster '{target_cluster}' not found in model. "
                     f"Available clusters: {list(available_clusters)}"
                 )
         else:
@@ -1074,16 +1080,23 @@ class LineageVI:
             # Apply perturbation: replace GP activation values
             # Make a deep copy of the array to ensure we're not modifying the original
             mean_perturbed = np.array(adata_perturbed.obsm['mean'], copy=True)
-            if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
-                # Single cell case
-                if isinstance(cell_idx, (int, np.integer)):
-                    idx = cell_idx
-                else:
-                    idx = cell_idx[0]
-                mean_perturbed[idx, gp_idx] = perturb_value
-            else:
-                # Multiple cells case
-                mean_perturbed[cell_idx, gp_idx] = perturb_value
+            
+            # Convert cell_idx to numpy array if needed
+            if isinstance(cell_idx, (int, np.integer)):
+                cell_idx = np.array([cell_idx])
+            elif not isinstance(cell_idx, np.ndarray):
+                cell_idx = np.array(cell_idx)
+            
+            # Convert gp_idx to numpy array if needed
+            if isinstance(gp_idx, (int, np.integer)):
+                gp_idx = np.array([gp_idx])
+            elif not isinstance(gp_idx, np.ndarray):
+                gp_idx = np.array(gp_idx)
+            
+            # Use broadcasting to set perturbation value for all cells and GPs
+            # mean_perturbed[cell_idx[:, None], gp_idx] broadcasts (n_cells, 1) with (n_gps,)
+            # to set values for all combinations
+            mean_perturbed[np.ix_(cell_idx, gp_idx)] = perturb_value
             
             # Assign the modified copy back to the perturbed adata
             adata_perturbed.obsm['mean'] = mean_perturbed
@@ -1094,17 +1107,39 @@ class LineageVI:
             self._recompute_velocities_from_mean(adata_perturbed)
         
         elif perturbation_type == 'cluster_labels':
-            print(f"Switching cluster labels from '{source_cluster}' to '{target_cluster}'...")
-            # Perturb cluster labels
-            self.perturb_cluster_labels(
-                adata_perturbed,
-                groupby_key=groupby_key,
-                source_cluster=source_cluster,
-                target_cluster=target_cluster,
-            )
-            # Recompute model outputs with new cluster labels
-            print("Recomputing model outputs after cluster label switch...")
-            self.get_model_outputs(adata_perturbed, save_to_adata=True)
+            print(f"Swapping cluster embeddings: '{source_cluster}' <-> '{target_cluster}'...")
+            # Perturb cluster embeddings (this function handles swapping and restoring)
+            # Note: perturb_cluster_labels restores embeddings automatically, so we need to
+            # manually swap again for post-perturbation metrics, or we can use the perturbed outputs
+            # For now, let's swap, compute metrics, then restore
+            # Actually, we should compute baseline first, then swap and compute perturbed
+            
+            # The function already computes everything we need, but we need baseline too
+            # So we'll compute baseline first, then call perturb_cluster_labels which will
+            # compute differences. But we need the actual perturbed outputs for alignment matrix.
+            
+            # For now, let's manually swap for this evaluation
+            # Save original embeddings
+            source_idx = self.model.cluster_to_idx[source_cluster]
+            target_idx = self.model.cluster_to_idx[target_cluster]
+            embeddings = self.model.cluster_embedding.embeddings.weight
+            original_source_emb = embeddings[source_idx].clone()
+            original_target_emb = embeddings[target_idx].clone()
+            
+            try:
+                # Swap embeddings
+                with torch.no_grad():
+                    embeddings[source_idx].copy_(original_target_emb)
+                    embeddings[target_idx].copy_(original_source_emb)
+                
+                # Recompute model outputs with swapped cluster embeddings
+                print("Recomputing model outputs after cluster embedding swap...")
+                self.get_model_outputs(adata_perturbed, save_to_adata=True)
+            finally:
+                # Restore original embeddings
+                with torch.no_grad():
+                    embeddings[source_idx].copy_(original_source_emb)
+                    embeddings[target_idx].copy_(original_target_emb)
         
         # 5. Compute post-perturbation metrics
         print("Computing post-perturbation metrics...")

@@ -1613,11 +1613,14 @@ class LineageVIModel(nn.Module):
         
         Returns
         -------
-        None
-            Results are stored in adata.obs and adata.obsm with ``perturbed_`` prefix.
+        df_genes : pd.DataFrame
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+        df_gp : pd.DataFrame
+            DataFrame with GP-level differences (GP velocity, mean, logvar, etc.).
         
         Notes
         -----
+        Perturbed outputs are stored in adata.obsm and adata.layers with ``_pert`` suffix.
         The method:
         1. Identifies cells of the specified group
         2. Perturbs expression of specified genes
@@ -1780,7 +1783,81 @@ class LineageVIModel(nn.Module):
             'abs_gamma_diff' : abs(gamma_diff),
         })
 
-        return df_genes, df_gp, perturbed_outputs
+        # Store perturbed outputs in adata
+        # For perturb_genes, outputs are computed only for perturbed cells
+        # We need to handle full adata shape - initialize arrays if needed
+        n_cells = adata.shape[0]
+        n_genes = adata.shape[1]
+        n_gps = len(perturbed_outputs['velocity_gp'][0]) if len(perturbed_outputs['velocity_gp'].shape) > 1 else 1
+        
+        # Initialize full arrays if they don't exist
+        if 'velocity_gp_pert' not in adata.obsm:
+            adata.obsm['velocity_gp_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        if 'velocity_u_pert' not in adata.layers:
+            adata.layers['velocity_u_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_pert' not in adata.layers:
+            adata.layers['velocity_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'alpha_pert' not in adata.layers:
+            adata.layers['alpha_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'beta_pert' not in adata.layers:
+            adata.layers['beta_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'gamma_pert' not in adata.layers:
+            adata.layers['gamma_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'recon_pert' not in adata.layers:
+            adata.layers['recon_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'mean_pert' not in adata.obsm:
+            adata.obsm['mean_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        if 'logvar_pert' not in adata.obsm:
+            adata.obsm['logvar_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        
+        # Store perturbed outputs for perturbed cells
+        if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
+            # Single cell case
+            idx = cell_idx if isinstance(cell_idx, (int, np.integer)) else cell_idx[0]
+            # Handle both 1D and 2D outputs
+            if len(perturbed_outputs['velocity_gp'].shape) == 1:
+                adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp']
+            else:
+                adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp'][0]
+            adata.layers['velocity_u_pert'][idx] = perturbed_outputs['velo_u_pert'][0] if len(perturbed_outputs['velo_u_pert'].shape) > 1 else perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_pert'][idx] = perturbed_outputs['velo_pert'][0] if len(perturbed_outputs['velo_pert'].shape) > 1 else perturbed_outputs['velo_pert']
+            adata.layers['alpha_pert'][idx] = perturbed_outputs['alpha_pert'][0] if len(perturbed_outputs['alpha_pert'].shape) > 1 else perturbed_outputs['alpha_pert']
+            adata.layers['beta_pert'][idx] = perturbed_outputs['beta_pert'][0] if len(perturbed_outputs['beta_pert'].shape) > 1 else perturbed_outputs['beta_pert']
+            adata.layers['gamma_pert'][idx] = perturbed_outputs['gamma_pert'][0] if len(perturbed_outputs['gamma_pert'].shape) > 1 else perturbed_outputs['gamma_pert']
+            adata.layers['recon_pert'][idx] = perturbed_outputs['recon'][0] if len(perturbed_outputs['recon'].shape) > 1 else perturbed_outputs['recon']
+            if len(perturbed_outputs['mean'].shape) == 1:
+                adata.obsm['mean_pert'][idx] = perturbed_outputs['mean']
+            else:
+                adata.obsm['mean_pert'][idx] = perturbed_outputs['mean'][0]
+            if len(perturbed_outputs['logvar'].shape) == 1:
+                adata.obsm['logvar_pert'][idx] = perturbed_outputs['logvar']
+            else:
+                adata.obsm['logvar_pert'][idx] = perturbed_outputs['logvar'][0]
+        else:
+            # Multiple cells case
+            adata.obsm['velocity_gp_pert'][cell_idx] = perturbed_outputs['velocity_gp']
+            adata.layers['velocity_u_pert'][cell_idx] = perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_pert'][cell_idx] = perturbed_outputs['velo_pert']
+            adata.layers['alpha_pert'][cell_idx] = perturbed_outputs['alpha_pert']
+            adata.layers['beta_pert'][cell_idx] = perturbed_outputs['beta_pert']
+            adata.layers['gamma_pert'][cell_idx] = perturbed_outputs['gamma_pert']
+            adata.layers['recon_pert'][cell_idx] = perturbed_outputs['recon']
+            adata.obsm['mean_pert'][cell_idx] = perturbed_outputs['mean']
+            adata.obsm['logvar_pert'][cell_idx] = perturbed_outputs['logvar']
+        
+        print("\nPerturbed outputs stored in adata:")
+        print(f"  adata.obsm['velocity_gp_pert']: GP velocities (shape: {adata.obsm['velocity_gp_pert'].shape})")
+        print(f"  adata.obsm['mean_pert']: Perturbed latent means (shape: {adata.obsm['mean_pert'].shape})")
+        print(f"  adata.obsm['logvar_pert']: Perturbed latent logvars (shape: {adata.obsm['logvar_pert'].shape})")
+        print(f"  adata.layers['velocity_u_pert']: Unspliced velocities (shape: {adata.layers['velocity_u_pert'].shape})")
+        print(f"  adata.layers['velocity_pert']: Spliced velocities (shape: {adata.layers['velocity_pert'].shape})")
+        print(f"  adata.layers['alpha_pert']: Transcription rates (shape: {adata.layers['alpha_pert'].shape})")
+        print(f"  adata.layers['beta_pert']: Splicing rates (shape: {adata.layers['beta_pert'].shape})")
+        print(f"  adata.layers['gamma_pert']: Degradation rates (shape: {adata.layers['gamma_pert'].shape})")
+        print(f"  adata.layers['recon_pert']: Reconstructions (shape: {adata.layers['recon_pert'].shape})")
+        print(f"  (Stored for {len(cell_idx) if hasattr(cell_idx, '__len__') else 1} perturbed cell(s))\n")
+
+        return df_genes, df_gp
 
     @torch.inference_mode()
     def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, groupby_key, group_to_perturb, perturb_value):
@@ -1808,11 +1885,14 @@ class LineageVIModel(nn.Module):
         
         Returns
         -------
-        None
-            Results are stored in adata.obs and adata.obsm with ``perturbed_`` prefix.
+        genes_df : pd.DataFrame
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+        gps_df : pd.DataFrame
+            DataFrame with GP-level differences (GP velocity, etc.).
         
         Notes
         -----
+        Perturbed outputs are stored in adata.obsm and adata.layers with ``_pert`` suffix.
         The method:
         1. Identifies cells of the specified group
         2. Perturbs expression of specified gene programs
@@ -1950,7 +2030,254 @@ class LineageVIModel(nn.Module):
                 'abs_velo_gp' : velo_gp_diff,
             })
         
-        return genes_df, gps_df, perturbed_outputs
+        # Store perturbed outputs in adata
+        # For perturb_gps, outputs are computed only for perturbed cells
+        # We need to handle full adata shape - initialize arrays if needed
+        n_cells = adata.shape[0]
+        n_genes = adata.shape[1]
+        n_gps = len(perturbed_outputs['velocity_gp_pert'][0]) if len(perturbed_outputs['velocity_gp_pert'].shape) > 1 else 1
+        
+        # Initialize full arrays if they don't exist
+        if 'velocity_gp_pert' not in adata.obsm:
+            adata.obsm['velocity_gp_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        if 'velocity_u_pert' not in adata.layers:
+            adata.layers['velocity_u_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_pert' not in adata.layers:
+            adata.layers['velocity_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'alpha_pert' not in adata.layers:
+            adata.layers['alpha_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'beta_pert' not in adata.layers:
+            adata.layers['beta_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'gamma_pert' not in adata.layers:
+            adata.layers['gamma_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'recon_pert' not in adata.layers:
+            adata.layers['recon_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        
+        # Store perturbed outputs for perturbed cells
+        if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
+            # Single cell case
+            idx = cell_idx if isinstance(cell_idx, (int, np.integer)) else cell_idx[0]
+            adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp_pert'][0] if len(perturbed_outputs['velocity_gp_pert'].shape) > 1 else perturbed_outputs['velocity_gp_pert']
+            adata.layers['velocity_u_pert'][idx] = perturbed_outputs['velo_u_pert'][0] if len(perturbed_outputs['velo_u_pert'].shape) > 1 else perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_pert'][idx] = perturbed_outputs['velo_pert'][0] if len(perturbed_outputs['velo_pert'].shape) > 1 else perturbed_outputs['velo_pert']
+            adata.layers['alpha_pert'][idx] = perturbed_outputs['alpha_pert'][0] if len(perturbed_outputs['alpha_pert'].shape) > 1 else perturbed_outputs['alpha_pert']
+            adata.layers['beta_pert'][idx] = perturbed_outputs['beta_pert'][0] if len(perturbed_outputs['beta_pert'].shape) > 1 else perturbed_outputs['beta_pert']
+            adata.layers['gamma_pert'][idx] = perturbed_outputs['gamma_pert'][0] if len(perturbed_outputs['gamma_pert'].shape) > 1 else perturbed_outputs['gamma_pert']
+            adata.layers['recon_pert'][idx] = perturbed_outputs['recon'][0] if len(perturbed_outputs['recon'].shape) > 1 else perturbed_outputs['recon']
+        else:
+            # Multiple cells case
+            adata.obsm['velocity_gp_pert'][cell_idx] = perturbed_outputs['velocity_gp_pert']
+            adata.layers['velocity_u_pert'][cell_idx] = perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_pert'][cell_idx] = perturbed_outputs['velo_pert']
+            adata.layers['alpha_pert'][cell_idx] = perturbed_outputs['alpha_pert']
+            adata.layers['beta_pert'][cell_idx] = perturbed_outputs['beta_pert']
+            adata.layers['gamma_pert'][cell_idx] = perturbed_outputs['gamma_pert']
+            adata.layers['recon_pert'][cell_idx] = perturbed_outputs['recon']
+        
+        print("\nPerturbed outputs stored in adata:")
+        print(f"  adata.obsm['velocity_gp_pert']: GP velocities (shape: {adata.obsm['velocity_gp_pert'].shape})")
+        print(f"  adata.layers['velocity_u_pert']: Unspliced velocities (shape: {adata.layers['velocity_u_pert'].shape})")
+        print(f"  adata.layers['velocity_pert']: Spliced velocities (shape: {adata.layers['velocity_pert'].shape})")
+        print(f"  adata.layers['alpha_pert']: Transcription rates (shape: {adata.layers['alpha_pert'].shape})")
+        print(f"  adata.layers['beta_pert']: Splicing rates (shape: {adata.layers['beta_pert'].shape})")
+        print(f"  adata.layers['gamma_pert']: Degradation rates (shape: {adata.layers['gamma_pert'].shape})")
+        print(f"  adata.layers['recon_pert']: Reconstructions (shape: {adata.layers['recon_pert'].shape})")
+        print(f"  (Stored for {len(cell_idx) if hasattr(cell_idx, '__len__') and not isinstance(cell_idx, (int, np.integer)) else 1} perturbed cell(s))\n")
+        
+        return genes_df, gps_df
+
+    @torch.inference_mode()
+    def perturb_cluster_labels(self, adata, source_cluster, target_cluster):
+        """
+        Perturb cluster embeddings by swapping embeddings between two clusters.
+        
+        This perturbation swaps the cluster embeddings in the model, computes
+        velocity predictions with the swapped embeddings, and then restores
+        the original embeddings. This allows evaluation of how cluster-specific
+        dynamics affect velocity predictions.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to compute velocities on.
+        source_cluster : str
+            Cluster label whose embedding will be swapped.
+        target_cluster : str
+            Cluster label whose embedding will be swapped with source_cluster.
+        
+        Returns
+        -------
+        genes_df : pd.DataFrame
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+        gps_df : pd.DataFrame
+            DataFrame with GP-level differences (GP velocity, etc.).
+        
+        Notes
+        -----
+        Perturbed outputs are stored in adata.obsm and adata.layers with ``_pert`` suffix.
+        """
+        import torch
+        import numpy as np
+        import pandas as pd
+        
+        if source_cluster is None or target_cluster is None:
+            raise ValueError("Both source_cluster and target_cluster must be provided")
+        
+        if self.cluster_embedding is None:
+            raise ValueError("Cluster embeddings are not enabled in this model")
+        
+        if self.cluster_to_idx is None:
+            raise ValueError("Model does not have cluster_to_idx mapping")
+        
+        # Get cluster indices
+        if source_cluster not in self.cluster_to_idx:
+            raise ValueError(
+                f"Source cluster '{source_cluster}' not found in model. "
+                f"Available clusters: {list(self.cluster_to_idx.keys())}"
+            )
+        if target_cluster not in self.cluster_to_idx:
+            raise ValueError(
+                f"Target cluster '{target_cluster}' not found in model. "
+                f"Available clusters: {list(self.cluster_to_idx.keys())}"
+            )
+        
+        source_idx = self.cluster_to_idx[source_cluster]
+        target_idx = self.cluster_to_idx[target_cluster]
+        
+        # Get required data
+        mu = adata.layers['Mu']
+        ms = adata.layers['Ms']
+        mu_ms = torch.from_numpy(np.concatenate([mu, ms], axis=1)).float()
+        
+        # Get device
+        device = next(self.parameters()).device
+        mu_ms = mu_ms.to(device)
+        
+        self.first_regime = False
+        
+        # Get cluster indices for all cells
+        cluster_labels = adata.obs[self.cluster_key]
+        cluster_indices_unpert = torch.tensor([
+            self.cluster_to_idx.get(str(label), 0) for label in cluster_labels
+        ], dtype=torch.long, device=device)
+        
+        # Get process indices (always present)
+        cls_encoding_key = self.cls_encoding_key
+        process_labels = adata.obs[cls_encoding_key]
+        process_indices = torch.tensor([
+            self.process_to_idx.get(str(label), 0) for label in process_labels
+        ], dtype=torch.long, device=device)
+        
+        # Save original embeddings
+        embeddings = self.cluster_embedding.embeddings.weight
+        original_source_emb = embeddings[source_idx].clone()
+        original_target_emb = embeddings[target_idx].clone()
+        
+        try:
+            # Compute velocities with original embeddings
+            z_unpert, _, _ = self._forward_encoder(mu_ms)
+            velocity_unpert, velocity_gp_unpert, alpha_unpert, beta_unpert, gamma_unpert = self._forward_velocity_decoder(
+                z_unpert, mu_ms, cluster_indices_unpert, process_indices
+            )
+            x_dec_unpert = self._forward_gene_decoder(z_unpert)
+            
+            # Swap cluster embeddings
+            with torch.no_grad():
+                embeddings[source_idx].copy_(original_target_emb)
+                embeddings[target_idx].copy_(original_source_emb)
+            
+            # Compute velocities with swapped embeddings
+            # Note: cluster_indices remain the same, but the embeddings they point to are swapped
+            velocity_pert, velocity_gp_pert, alpha_pert, beta_pert, gamma_pert = self._forward_velocity_decoder(
+                z_unpert, mu_ms, cluster_indices_unpert, process_indices
+            )
+            x_dec_pert = self._forward_gene_decoder(z_unpert)
+            
+            # Convert to numpy
+            to_numpy = lambda x: x.cpu().numpy()
+            
+            velo_u_unpert, velo_unpert = np.split(to_numpy(velocity_unpert), 2, axis=1)
+            velo_u_pert, velo_pert = np.split(to_numpy(velocity_pert), 2, axis=1)
+            
+            perturbed_outputs = {
+                'velocity_gp_pert': to_numpy(velocity_gp_pert),
+                'velo_u_pert': velo_u_pert,
+                'velo_pert': velo_pert,
+                'alpha_pert': to_numpy(alpha_pert),
+                'beta_pert': to_numpy(beta_pert),
+                'gamma_pert': to_numpy(gamma_pert),
+                'recon': to_numpy(x_dec_pert),
+            }
+            
+            # Compute differences
+            velo_diff = to_numpy(velocity_pert - velocity_unpert)
+            velo_gp_diff = to_numpy(velocity_gp_pert - velocity_gp_unpert)
+            alpha_diff = to_numpy(alpha_pert - alpha_unpert)
+            beta_diff = to_numpy(beta_pert - beta_unpert)
+            gamma_diff = to_numpy(gamma_pert - gamma_unpert)
+            x_dec_diff = to_numpy(x_dec_pert - x_dec_unpert)
+            
+            # Average across cells
+            if velo_diff.shape[0] > 1:
+                velo_diff = velo_diff.mean(0)
+                velo_gp_diff = velo_gp_diff.mean(0)
+                alpha_diff = alpha_diff.mean(0)
+                beta_diff = beta_diff.mean(0)
+                gamma_diff = gamma_diff.mean(0)
+                x_dec_diff = x_dec_diff.mean(0)
+            
+            velo_diff_u, velo_diff_s = np.split(velo_diff, 2)
+            
+            # Create DataFrames
+            genes_df = pd.DataFrame({
+                'genes': adata.var_names,
+                'velo_diff_u': velo_diff_u,
+                'abs_velo_diff_u': np.absolute(velo_diff_u),
+                'velo_diff_s': velo_diff_s,
+                'abs_velo_diff_s': np.absolute(velo_diff_s),
+                'x_dec_diff': x_dec_diff,
+                'x_dec_diff_abs': np.absolute(x_dec_diff),
+                'alpha_diff': alpha_diff,
+                'alpha_diff_abs': np.absolute(alpha_diff),
+                'beta_diff': beta_diff,
+                'beta_diff_abs': np.absolute(beta_diff),
+                'gamma_diff': gamma_diff,
+                'gamma_diff_abs': np.absolute(gamma_diff),
+            })
+            
+            gps_df = pd.DataFrame({
+                'gene_programs': adata.uns['terms'],
+                'velo_gp': velo_gp_diff,
+                'abs_velo_gp': np.absolute(velo_gp_diff),
+            })
+            
+            # Store perturbed outputs in adata
+            # For perturb_cluster_labels, outputs are computed for ALL cells
+            adata.obsm['velocity_gp_pert'] = perturbed_outputs['velocity_gp_pert'].astype(np.float32)
+            adata.layers['velocity_u_pert'] = perturbed_outputs['velo_u_pert'].astype(np.float32)
+            adata.layers['velocity_pert'] = perturbed_outputs['velo_pert'].astype(np.float32)
+            adata.layers['alpha_pert'] = perturbed_outputs['alpha_pert'].astype(np.float32)
+            adata.layers['beta_pert'] = perturbed_outputs['beta_pert'].astype(np.float32)
+            adata.layers['gamma_pert'] = perturbed_outputs['gamma_pert'].astype(np.float32)
+            adata.layers['recon_pert'] = perturbed_outputs['recon'].astype(np.float32)
+            
+            print("\nPerturbed outputs stored in adata:")
+            print(f"  adata.obsm['velocity_gp_pert']: GP velocities (shape: {adata.obsm['velocity_gp_pert'].shape})")
+            print(f"  adata.layers['velocity_u_pert']: Unspliced velocities (shape: {adata.layers['velocity_u_pert'].shape})")
+            print(f"  adata.layers['velocity_pert']: Spliced velocities (shape: {adata.layers['velocity_pert'].shape})")
+            print(f"  adata.layers['alpha_pert']: Transcription rates (shape: {adata.layers['alpha_pert'].shape})")
+            print(f"  adata.layers['beta_pert']: Splicing rates (shape: {adata.layers['beta_pert'].shape})")
+            print(f"  adata.layers['gamma_pert']: Degradation rates (shape: {adata.layers['gamma_pert'].shape})")
+            print(f"  adata.layers['recon_pert']: Reconstructions (shape: {adata.layers['recon_pert'].shape})")
+            print(f"  (Stored for all {adata.shape[0]} cells)\n")
+            
+        finally:
+            # Always restore original embeddings
+            with torch.no_grad():
+                embeddings[source_idx].copy_(original_source_emb)
+                embeddings[target_idx].copy_(original_target_emb)
+        
+        return genes_df, gps_df
 
     @torch.inference_mode()
     def map_velocities(

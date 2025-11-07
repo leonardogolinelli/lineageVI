@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
 import torch
 import scanpy as sc
@@ -9,7 +9,8 @@ import pandas as pd
 import scipy.sparse as sp
 from sklearn.metrics.pairwise import cosine_similarity
 
-from .api import LineageVI  # avoid importing the top-level package to prevent circulars
+if TYPE_CHECKING:
+    from .api import LineageVI  # Only imported for type checking, not at runtime
 
 def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns_key='terms',
                 clean=True, genes_use_upper=True):
@@ -94,6 +95,9 @@ def load_model(
     LineageVI
         Model with weights loaded and in eval() or train() mode depending on `training`.
     """
+    # Import here to avoid circular import
+    from .api import LineageVI
+    
     # initialize a fresh instance
     inst = LineageVI(adata, **kwargs)
 
