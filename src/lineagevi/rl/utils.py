@@ -16,9 +16,12 @@ def compute_lineage_centroids(
     adata: sc.AnnData,
     lineage_key: str,
     z_key: str = "mean",
-) -> tuple[torch.Tensor, list]:
+    allowed: list[str] | None = None,
+    exclude: list[str] | None = None,
+    min_cells: int = 1,
+) -> tuple[torch.Tensor, list[str]]:
     """
-    Compute lineage centroids from AnnData.
+    Compute lineage centroids from AnnData with filtering.
     
     Parameters
     ----------
@@ -28,13 +31,19 @@ def compute_lineage_centroids(
         Key in adata.obs for lineage labels.
     z_key : str, default 'mean'
         Key in adata.obsm for latent states.
+    allowed : list[str], optional
+        If provided, keep only these lineage labels.
+    exclude : list[str], optional
+        If provided, exclude these lineage labels.
+    min_cells : int, default 1
+        Minimum number of cells required per lineage.
     
     Returns
     -------
     centroids : torch.Tensor
         Centroids of shape (n_lineages, n_latent).
-    lineage_names : list
-        List of lineage names (ordered).
+    goal_labels : list[str]
+        List of goal labels (ordered, after filtering).
     """
     if z_key not in adata.obsm:
         raise ValueError(f"Key '{z_key}' not found in adata.obsm. Available keys: {list(adata.obsm.keys())}")
@@ -49,9 +58,34 @@ def compute_lineage_centroids(
     unique_lineages = lineage_labels.unique().tolist()
     unique_lineages = sorted(unique_lineages)  # Sort for consistency
     
-    # Compute centroids
-    centroids = []
+    # Apply filters
+    filtered_lineages = []
     for lineage in unique_lineages:
+        # Check allowed
+        if allowed is not None and lineage not in allowed:
+            continue
+        
+        # Check excluded
+        if exclude is not None and lineage in exclude:
+            continue
+        
+        # Check min_cells
+        mask = lineage_labels == lineage
+        n_cells = mask.sum()
+        if n_cells < min_cells:
+            continue
+        
+        filtered_lineages.append(lineage)
+    
+    if len(filtered_lineages) == 0:
+        raise ValueError(
+            f"No lineages passed filters. "
+            f"allowed={allowed}, exclude={exclude}, min_cells={min_cells}"
+        )
+    
+    # Compute centroids for filtered lineages
+    centroids = []
+    for lineage in filtered_lineages:
         mask = lineage_labels == lineage
         centroid = z[mask].mean(axis=0)
         centroids.append(centroid)
@@ -59,7 +93,7 @@ def compute_lineage_centroids(
     centroids = np.stack(centroids, axis=0)  # (n_lineages, n_latent)
     centroids = torch.from_numpy(centroids).float()
     
-    return centroids, unique_lineages
+    return centroids, filtered_lineages
 
 
 def set_seed(seed: int):
@@ -76,7 +110,7 @@ def set_seed(seed: int):
 def save_policy_checkpoint(
     policy: ActorCriticPolicy,
     centroids: torch.Tensor,
-    lineage_names: list,
+    goal_labels: list,  # Changed from lineage_names for consistency
     config: Dict[str, Any],
     checkpoint_dir: str,
     iteration: Optional[int] = None,
@@ -90,8 +124,8 @@ def save_policy_checkpoint(
         Trained policy.
     centroids : torch.Tensor
         Lineage centroids.
-    lineage_names : list
-        List of lineage names.
+    goal_labels : list
+        List of goal labels (ordered, aligned with centroids).
     config : dict
         Training configuration.
     checkpoint_dir : str
@@ -113,7 +147,8 @@ def save_policy_checkpoint(
     torch.save({
         "policy_state_dict": policy.state_dict(),
         "centroids": centroids.cpu(),
-        "lineage_names": lineage_names,
+        "goal_labels": goal_labels,  # Changed from lineage_names
+        "lineage_names": goal_labels,  # Keep for backward compatibility
         "config": config,
     }, checkpoint_path)
     
@@ -156,8 +191,8 @@ def load_policy_checkpoint(
         Loaded policy.
     centroids : torch.Tensor
         Lineage centroids.
-    lineage_names : list
-        List of lineage names.
+    goal_labels : list
+        List of goal labels (ordered, aligned with centroids).
     config : dict
         Training configuration.
     """
@@ -165,7 +200,8 @@ def load_policy_checkpoint(
     
     policy_state_dict = checkpoint["policy_state_dict"]
     centroids = checkpoint["centroids"].to(device)
-    lineage_names = checkpoint["lineage_names"]
+    # Support both goal_labels (new) and lineage_names (old) for backward compatibility
+    goal_labels = checkpoint.get("goal_labels", checkpoint.get("lineage_names", []))
     config = checkpoint["config"]
     
     # Reconstruct policy from config
@@ -184,4 +220,4 @@ def load_policy_checkpoint(
     policy.load_state_dict(policy_state_dict)
     policy.eval()
     
-    return policy, centroids, lineage_names, config
+    return policy, centroids, goal_labels, config

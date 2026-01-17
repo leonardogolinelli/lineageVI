@@ -74,6 +74,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda)")
     parser.add_argument("--z_key", type=str, default="mean", help="Key in adata.obsm for latent states")
+    parser.add_argument("--goal_allowed", type=str, nargs="*", default=None, help="Allowed goal labels (default: all)")
+    parser.add_argument("--goal_exclude", type=str, nargs="*", default=None, help="Excluded goal labels")
+    parser.add_argument("--goal_min_cells", type=int, default=1, help="Minimum cells per goal lineage")
+    parser.add_argument("--goal_sampling", type=str, default="uniform", choices=["uniform", "balanced_batch"], help="Goal sampling strategy")
+    parser.add_argument("--fixed_goal", type=str, default=None, help="Fixed goal label for all episodes (optional)")
+    parser.add_argument("--allow_same_as_origin", action="store_true", help="Allow goal to be same as origin lineage")
     
     args = parser.parse_args()
     
@@ -112,11 +118,30 @@ def main():
     else:
         print(f"Using existing latent states from obsm['{args.z_key}']")
     
-    # Compute lineage centroids
+    # Compute lineage centroids with filtering
     print(f"Computing lineage centroids from '{args.lineage_key}'...")
-    centroids, lineage_names = compute_lineage_centroids(adata, args.lineage_key, z_key=args.z_key)
+    centroids, goal_labels = compute_lineage_centroids(
+        adata, 
+        args.lineage_key, 
+        z_key=args.z_key,
+        allowed=args.goal_allowed,
+        exclude=args.goal_exclude,
+        min_cells=args.goal_min_cells,
+    )
     centroids = centroids.to(device)
-    print(f"Found {len(lineage_names)} lineages: {lineage_names}")
+    print(f"Found {len(goal_labels)} goal lineages: {goal_labels}")
+    
+    # Create mapping from lineage label to goal index
+    label_to_goal_idx = {label: idx for idx, label in enumerate(goal_labels)}
+    n_goals = len(goal_labels)
+    
+    # Handle fixed_goal
+    fixed_goal_idx = None
+    if args.fixed_goal is not None:
+        if args.fixed_goal not in label_to_goal_idx:
+            raise ValueError(f"Fixed goal '{args.fixed_goal}' not in goal_labels: {goal_labels}")
+        fixed_goal_idx = label_to_goal_idx[args.fixed_goal]
+        print(f"Using fixed goal: {args.fixed_goal} (index {fixed_goal_idx})")
     
     # Create adapter
     velocity_mode = env_config.get("velocity_mode", "decode_x")
@@ -144,7 +169,7 @@ def main():
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
-        goal_names=lineage_names,
+        goal_names=goal_labels,
         batch_size=batch_size,
         dt=dt,
         T_max=env_config.get("T_max", 100),
@@ -156,7 +181,7 @@ def main():
     print(f"Created environment with batch_size={batch_size}, dt={dt}")
     
     # Create policy
-    obs_dim = adapter.n_latent + len(lineage_names) + 1  # z + goal_emb + t
+    obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
     n_latent = adapter.n_latent
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
     delta_max = policy_config.get("delta_max", 1.0)
@@ -198,13 +223,53 @@ def main():
     
     print(f"Starting training for {n_iterations} iterations...")
     
+    # Get origin lineage labels for all cells
+    origin_labels = adata.obs[args.lineage_key].values  # (n_cells,)
+    
     for iteration in tqdm(range(n_iterations), desc="Training"):
-        # Sample random initial states and goals
+        # Sample random initial states
         cell_indices = np.random.choice(n_cells, size=batch_size, replace=True)
         z0 = z_all[cell_indices]  # (B, n_latent)
         
-        # Sample random goals (can exclude current lineage for harder task)
-        goal_idx = torch.randint(0, len(lineage_names), (batch_size,), device=device)
+        # Get origin lineage labels for sampled cells
+        origin_labels_batch = origin_labels[cell_indices]  # (B,)
+        
+        # Map origin labels to goal indices (if they exist in goal_labels)
+        origin_goal_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
+        for i, label in enumerate(origin_labels_batch):
+            origin_goal_idx[i] = label_to_goal_idx.get(str(label), -1)  # -1 if not in goal_labels
+        
+        # Sample goals (excluding origin unless allow_same_as_origin or fixed_goal)
+        if fixed_goal_idx is not None:
+            # Fixed goal for all
+            goal_idx = torch.full((batch_size,), fixed_goal_idx, dtype=torch.long, device=device)
+            # If fixed goal equals origin and not allowed, resample those cells
+            if not args.allow_same_as_origin:
+                mask_same = (goal_idx == origin_goal_idx)
+                if mask_same.any():
+                    # Resample goals for those cells (excluding origin)
+                    for i in range(batch_size):
+                        if mask_same[i]:
+                            valid_goals = [g for g in range(n_goals) if g != origin_goal_idx[i]]
+                            if len(valid_goals) > 0:
+                                goal_idx[i] = np.random.choice(valid_goals)
+        else:
+            # Uniform sampling excluding origin
+            goal_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
+            all_goal_indices = torch.arange(n_goals, device=device)
+            
+            for i in range(batch_size):
+                origin_idx = origin_goal_idx[i].item()
+                if args.allow_same_as_origin or origin_idx == -1:
+                    # Sample from all goals
+                    goal_idx[i] = torch.randint(0, n_goals, (1,), device=device)
+                else:
+                    # Sample from all goals except origin (vectorized)
+                    # Sample integer in [0, n_goals-2], then skip over origin
+                    sampled = torch.randint(0, n_goals - 1, (1,), device=device).item()
+                    if sampled >= origin_idx:
+                        sampled += 1
+                    goal_idx[i] = sampled
         
         # Get per-cell cluster/process indices for sampled cells
         cluster_idx_batch = None
@@ -257,7 +322,7 @@ def main():
             save_policy_checkpoint(
                 policy,
                 centroids,
-                lineage_names,
+                goal_labels,  # Save goal_labels (not lineage_names)
                 save_config,
                 output_dir,
                 iteration=iteration + 1,

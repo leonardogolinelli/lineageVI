@@ -347,7 +347,9 @@ class VectorizedLatentVelocityEnv:
             if x0.dim() == 1:
                 # Single x for all, expand to batch
                 x0 = x0.unsqueeze(0).expand(self.batch_size, -1)
-            self.adapter.set_fixed_x(x0[0])  # Use first as template
+            # Ensure x0 is on adapter device and pass full batch
+            x0 = x0.to(self.adapter.device)
+            self.adapter.set_fixed_x(x0)
         
         obs = self._get_obs()
         distances = self._compute_distances()
