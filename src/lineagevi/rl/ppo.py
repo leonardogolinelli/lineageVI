@@ -59,6 +59,8 @@ class PPOTrainer:
         goal_idx: torch.Tensor,  # (B,)
         T_rollout: int,
         x0: Optional[torch.Tensor] = None,
+        cluster_idx: Optional[torch.Tensor] = None,  # (B,)
+        process_idx: Optional[torch.Tensor] = None,  # (B,)
     ) -> Dict[str, torch.Tensor]:
         """
         Collect rollout trajectories.
@@ -73,6 +75,10 @@ class PPOTrainer:
             Rollout horizon.
         x0 : torch.Tensor, optional
             Initial gene expression for fixed_x mode.
+        cluster_idx : torch.Tensor, optional
+            Cluster indices of shape (batch_size,).
+        process_idx : torch.Tensor, optional
+            Process indices of shape (batch_size,).
         
         Returns
         -------
@@ -91,7 +97,7 @@ class PPOTrainer:
         batch_size = z0.shape[0]
         
         # Reset environment
-        obs, info = self.env.reset(z0, goal_idx, x0)
+        obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
         
         # Storage
         obs_list = []
@@ -112,16 +118,16 @@ class PPOTrainer:
             action, delta, raw_delta, log_prob = self.policy.sample(obs_tensor)
             value = self.policy.value(obs_tensor).squeeze(-1)  # (B,)
             
-            # Step environment
-            obs_next, reward, done, info_next = self.env.step((action.cpu(), delta.cpu()))
+            # Step environment (env handles device internally)
+            obs_next, reward, done, info_next = self.env.step((action, delta))
             
-            # Store
+            # Store (ensure all on CPU for consistency)
             obs_list.append(obs_tensor.cpu())
             action_list.append(action.cpu())
             delta_list.append(delta.cpu())
             raw_delta_list.append(raw_delta.cpu())
-            reward_list.append(torch.from_numpy(reward) if isinstance(reward, np.ndarray) else reward)
-            done_list.append(torch.from_numpy(done) if isinstance(done, np.ndarray) else done)
+            reward_list.append(reward.detach().cpu() if torch.is_tensor(reward) else torch.from_numpy(reward))
+            done_list.append(done.detach().cpu() if torch.is_tensor(done) else torch.from_numpy(done))
             log_prob_list.append(log_prob.cpu())
             value_list.append(value.cpu())
             
@@ -151,7 +157,7 @@ class PPOTrainer:
         # If done, next_value = 0 (terminal/absorbing)
         obs_next_tensor = torch.from_numpy(obs_next) if isinstance(obs_next, np.ndarray) else obs_next
         obs_next_tensor = obs_next_tensor.to(self.device).float()
-        next_value = self.policy.value(obs_next_tensor).squeeze(-1)  # (B,)
+        next_value = self.policy.value(obs_next_tensor).squeeze(-1).detach().cpu()  # (B,) on CPU
         
         # Build next_value_batch: value at t+1 (0 if done at t)
         next_value_batch = torch.zeros(T_actual, batch_size)
@@ -214,7 +220,7 @@ class PPOTrainer:
         
         # Compute GAE advantages (backward recursion)
         advantages = torch.zeros_like(td_residuals)  # (T, B)
-        last_gae = 0.0
+        last_gae = torch.zeros(B, device=td_residuals.device)  # Per-environment GAE
         
         for t in reversed(range(T)):
             # A_t = δ_t + γ * λ * (1 - done_t) * A_{t+1}

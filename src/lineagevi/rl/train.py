@@ -138,7 +138,7 @@ def main():
         vae.model.process_to_idx.get(str(label), 0) for label in process_labels
     ], dtype=torch.long, device=device)
     
-    # Create environment
+    # Create environment (cluster/process indices now passed per-reset, not in constructor)
     batch_size = training_config.get("batch_size", 64)
     dt = env_config.get("dt", 0.1)
     env = VectorizedLatentVelocityEnv(
@@ -152,8 +152,6 @@ def main():
         lambda_act=env_config.get("lambda_act", 0.01),
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),
-        cluster_indices=cluster_indices,
-        process_indices=process_indices,
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}")
     
@@ -208,6 +206,14 @@ def main():
         # Sample random goals (can exclude current lineage for harder task)
         goal_idx = torch.randint(0, len(lineage_names), (batch_size,), device=device)
         
+        # Get per-cell cluster/process indices for sampled cells
+        cluster_idx_batch = None
+        process_idx_batch = None
+        if cluster_indices is not None:
+            cluster_idx_batch = cluster_indices[cell_indices]
+        if process_indices is not None:
+            process_idx_batch = process_indices[cell_indices]
+        
         # Get initial x if needed for fixed_x mode
         x0 = None
         if velocity_mode == "fixed_x":
@@ -219,7 +225,7 @@ def main():
             x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
         
         # Collect rollouts
-        batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0)
+        batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch)
         
         # Update policy
         metrics = trainer.update(

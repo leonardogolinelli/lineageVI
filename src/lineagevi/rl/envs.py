@@ -76,6 +76,8 @@ class LatentVelocityEnv:
         z0: torch.Tensor,
         goal_idx: int,
         x0: Optional[torch.Tensor] = None,
+        cluster_idx: Optional[torch.Tensor] = None,
+        process_idx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Reset environment to initial state.
@@ -88,6 +90,10 @@ class LatentVelocityEnv:
             Index of target goal/lineage.
         x0 : torch.Tensor, optional
             Initial gene expression for fixed_x mode.
+        cluster_idx : torch.Tensor, optional
+            Cluster index (scalar tensor or int).
+        process_idx : torch.Tensor, optional
+            Process index (scalar tensor or int).
         
         Returns
         -------
@@ -105,6 +111,10 @@ class LatentVelocityEnv:
             "perturbation_magnitude": [],
             "state_change": [],
         }
+        
+        # Store per-episode cluster/process indices
+        self.cluster_indices = cluster_idx
+        self.process_indices = process_idx
         
         # Set fixed x if provided
         if x0 is not None and self.adapter.velocity_mode == "fixed_x":
@@ -183,6 +193,7 @@ class LatentVelocityEnv:
         ).squeeze(0)  # (n_latent,)
         
         # Update state: z_next = z_tilde + dt * v
+        z_old = self.z  # Save before update for state_change logging
         z_next = z_tilde + self.dt * v
         
         # Compute distances
@@ -210,7 +221,7 @@ class LatentVelocityEnv:
         # Log step norms
         v_norm = torch.norm(v, p=2).item()
         u_norm = torch.norm(u, p=2).item()
-        z_change_norm = torch.norm(z_next - self.z, p=2).item() if not success else 0.0
+        z_change_norm = torch.norm(z_next - z_old, p=2).item()
         
         self.step_norms["velocity_magnitude"].append(v_norm)
         self.step_norms["perturbation_magnitude"].append(u_norm)
@@ -290,6 +301,8 @@ class VectorizedLatentVelocityEnv:
         z0: torch.Tensor,  # (B, n_latent)
         goal_idx: torch.Tensor,  # (B,)
         x0: Optional[torch.Tensor] = None,  # (B, 2*n_genes) or (2*n_genes,)
+        cluster_idx: Optional[torch.Tensor] = None,  # (B,)
+        process_idx: Optional[torch.Tensor] = None,  # (B,)
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Reset batch of environments.
@@ -302,6 +315,10 @@ class VectorizedLatentVelocityEnv:
             Goal indices of shape (batch_size,).
         x0 : torch.Tensor, optional
             Initial gene expression for fixed_x mode.
+        cluster_idx : torch.Tensor, optional
+            Cluster indices of shape (batch_size,).
+        process_idx : torch.Tensor, optional
+            Process indices of shape (batch_size,).
         
         Returns
         -------
@@ -314,6 +331,10 @@ class VectorizedLatentVelocityEnv:
         self.goal_idx = goal_idx.to(self.adapter.device).long()
         self.t = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.done = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
+        
+        # Store per-batch cluster/process indices
+        self.cluster_idx = cluster_idx.to(self.adapter.device) if cluster_idx is not None else None
+        self.process_idx = process_idx.to(self.adapter.device) if process_idx is not None else None
         
         self.step_norms = {
             "velocity_magnitude": [],
@@ -397,36 +418,15 @@ class VectorizedLatentVelocityEnv:
         dim_indices = (a_t - 1).clamp(min=0, max=self.n_latent - 1)
         # Only apply perturbation if a_t > 0
         perturb_mask = (a_t > 0) & active_mask
-        u[perturb_mask, dim_indices[perturb_mask]] = delta_t[perturb_mask].unsqueeze(1)
+        u[perturb_mask, dim_indices[perturb_mask]] = delta_t[perturb_mask]
         
         z_tilde = self.z + u
         
-        # Compute velocities (batched)
-        # Get cluster/process indices for batch if needed
-        # For vectorized env, we use the same indices for all batch elements
-        # (assuming they come from the same cell type/process)
-        cluster_batch = None
-        if self.cluster_indices is not None:
-            if self.cluster_indices.dim() == 0:
-                cluster_batch = self.cluster_indices.expand(B)
-            elif len(self.cluster_indices) >= B:
-                cluster_batch = self.cluster_indices[:B]
-            else:
-                cluster_batch = self.cluster_indices[0].expand(B)
-        
-        process_batch = None
-        if self.process_indices is not None:
-            if self.process_indices.dim() == 0:
-                process_batch = self.process_indices.expand(B)
-            elif len(self.process_indices) >= B:
-                process_batch = self.process_indices[:B]
-            else:
-                process_batch = self.process_indices[0].expand(B)
-        
+        # Compute velocities (batched) using stored per-batch indices
         v = self.adapter.velocity(
             z_tilde,
-            cluster_indices=cluster_batch,
-            process_indices=process_batch,
+            cluster_indices=self.cluster_idx,
+            process_indices=self.process_idx,
         )  # (B, n_latent)
         
         # Update states: z_next = z_tilde + dt * v
@@ -434,16 +434,18 @@ class VectorizedLatentVelocityEnv:
         
         # Compute distances before update
         d_t = self._compute_distances()
-        # Update state
-        self.z = z_next
-        d_tp1 = self._compute_distances()
         
         # Check success (terminal/absorbing)
-        success = (d_tp1 < self.eps_success) & active_mask
+        success = (torch.norm(z_next - self.centroids[self.goal_idx], p=2, dim=1) < self.eps_success) & active_mask
         self.done = self.done | success
         
+        # Only update active envs (absorbing terminal states)
+        self.z = torch.where(active_mask.unsqueeze(1), z_next, self.z)
+        self.t = torch.where(active_mask, self.t + 1, self.t)
+        
+        d_tp1 = self._compute_distances()
+        
         # Check timeout
-        self.t += 1
         timeout = self.t >= self.T_max
         
         # Compute rewards

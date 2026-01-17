@@ -203,7 +203,7 @@ class ActorCriticPolicy(nn.Module):
         tanh_raw = torch.tanh(raw_delta)
         log_det_jacobian = torch.log(self.delta_max * (1 - tanh_raw**2) + 1e-8)  # (B,)
         
-        log_prob_mag = log_prob_mag_raw + log_det_jacobian  # (B,)
+        log_prob_mag = log_prob_mag_raw - log_det_jacobian  # (B,) - correct change of variables
         
         # Total log prob: categorical + magnitude (only if action > 0)
         log_prob = log_prob_cat + action_mask * log_prob_mag

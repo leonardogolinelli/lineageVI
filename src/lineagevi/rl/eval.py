@@ -23,6 +23,8 @@ def evaluate_episode(
     z0: torch.Tensor,
     goal_idx: int,
     x0: Optional[torch.Tensor] = None,
+    cluster_idx: Optional[torch.Tensor] = None,
+    process_idx: Optional[torch.Tensor] = None,
     max_steps: int = 200,
 ) -> Dict:
     """
@@ -33,7 +35,7 @@ def evaluate_episode(
     episode_info : dict
         Episode statistics.
     """
-    obs, info = env.reset(z0, goal_idx, x0)
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
     
     trajectory = {
         "z": [z0.cpu().numpy()],
@@ -166,7 +168,7 @@ def main():
         vae.model.process_to_idx.get(str(label), 0) for label in process_labels
     ], dtype=torch.long, device=device)
     
-    # Create environment (single episode)
+    # Create environment (single episode, indices passed per-reset)
     env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -177,8 +179,6 @@ def main():
         lambda_act=env_config.get("lambda_act", 0.01),
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),
-        cluster_indices=cluster_indices[0] if cluster_indices is not None else None,
-        process_indices=process_indices[0] if process_indices is not None else None,
     )
     
     # Get latent states
@@ -196,6 +196,10 @@ def main():
         z0 = z_all[cell_idx]  # (n_latent,)
         goal_idx = np.random.randint(0, len(lineage_names))
         
+        # Get per-episode cluster/process indices
+        cluster_idx = cluster_indices[cell_idx] if cluster_indices is not None else None
+        process_idx = process_indices[cell_idx] if process_indices is not None else None
+        
         # Get initial x if needed
         x0 = None
         if velocity_mode == "fixed_x":
@@ -207,7 +211,7 @@ def main():
         
         # Run episode
         episode_info, trajectory = evaluate_episode(
-            env, policy, z0, goal_idx, x0, max_steps=args.max_steps
+            env, policy, z0, goal_idx, x0, cluster_idx, process_idx, max_steps=args.max_steps
         )
         
         all_episodes.append(episode_info)
