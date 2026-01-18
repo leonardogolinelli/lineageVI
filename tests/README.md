@@ -6,7 +6,7 @@ This directory contains test scripts for both LineageVI model training and RL ag
 
 ```
 tests/
-├── velovi/          # Tests for LineageVI (VAE) model training
+├── lineagevi/       # Tests for LineageVI (VAE) model training
 │   └── test_training.py
 ├── rl/              # Tests for RL agent (PPO) training
 │   └── test_training.py
@@ -18,9 +18,9 @@ tests/
 Test the basic VAE model training workflow:
 
 ```bash
-python -m tests.velovi.test_training \
+python -m tests.lineagevi.test_training \
     --adata_path <path_to_data.h5ad> \
-    --output_dir ./test_outputs/velovi \
+    --output_dir ./test_outputs/lineagevi \
     --epochs1 10 \
     --epochs2 10
 ```

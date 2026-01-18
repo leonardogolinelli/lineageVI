@@ -207,11 +207,17 @@ def plot_phase_plane(
         if layer not in adata.layers:
             raise KeyError(f"Required layer '{layer}' is missing from adata.layers")
 
-    # --- Fetch raw vectors
-    u_expr = np.asarray(adata.layers[expr_u_layer][:, gidx]).ravel()
-    s_expr = np.asarray(adata.layers[expr_s_layer][:, gidx]).ravel()
-    u_vel  = np.asarray(adata.layers[velocity_u_key][:, gidx]).ravel()
-    s_vel  = np.asarray(adata.layers[velocity_s_key][:, gidx]).ravel()
+    # --- Fetch raw vectors (handle sparse matrices)
+    def to_dense_array(data):
+        """Convert sparse matrix to dense numpy array if needed."""
+        if sparse.issparse(data):
+            return data.toarray()
+        return np.asarray(data)
+    
+    u_expr = to_dense_array(adata.layers[expr_u_layer][:, gidx]).ravel()
+    s_expr = to_dense_array(adata.layers[expr_s_layer][:, gidx]).ravel()
+    u_vel  = to_dense_array(adata.layers[velocity_u_key][:, gidx]).ravel()
+    s_vel  = to_dense_array(adata.layers[velocity_s_key][:, gidx]).ravel()
 
     # --- Optional filtering (before normalization)
     if filter_cells:
@@ -552,8 +558,15 @@ def plot_gp_phase_planes(
     # Indices for fast slicing
     idx_map = {gp: adata_gp.var_names.get_loc(gp) for gp in set([g for p in pairs for g in p])}
 
-    S = np.asarray(adata_gp.layers[latent_key])   # (cells × programs)
-    V = np.asarray(adata_gp.layers[velocity_key])  # (cells × programs)
+    # Handle sparse matrices
+    def to_dense_array(data):
+        """Convert sparse matrix to dense numpy array if needed."""
+        if sparse.issparse(data):
+            return data.toarray()
+        return np.asarray(data)
+    
+    S = to_dense_array(adata_gp.layers[latent_key])   # (cells × programs)
+    V = to_dense_array(adata_gp.layers[velocity_key])  # (cells × programs)
 
     n_pairs = len(pairs)
     ncols = max(1, int(ncols))

@@ -66,6 +66,214 @@ def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns
     adata.uns[uns_key] = [term[0] for i, term in enumerate(annot) if i not in np.where(~mask)[0]]
 
 
+def preprocess_for_lineagevi(
+    dataset_name: Optional[str] = None,
+    adata_path: Optional[str] = None,
+    adata: Optional[sc.AnnData] = None,
+    annotation_file: Optional[Union[str, list[str]]] = None,
+    min_shared_counts: int = 20,
+    n_top_genes: int = 2000,
+    min_genes_per_term: int = 12,
+    n_pcs: int = 100,
+    n_neighbors: int = 200,
+    K_neighbors: int = 20,
+    skip_if_preprocessed: bool = True,
+    cluster_key: Optional[str] = None,
+) -> sc.AnnData:
+    """
+    Preprocess AnnData for LineageVI training.
+    
+    This function performs the complete preprocessing pipeline:
+    1. Loads data (from scvelo datasets, file path, or provided AnnData)
+    2. Sets X and counts layers from unspliced/spliced
+    3. Adds gene set annotations (if provided)
+    4. Filters and normalizes data
+    5. Filters annotation terms
+    6. Computes moments and neighbors
+    
+    Parameters
+    ----------
+    dataset_name : str, optional
+        Name of dataset to load from scvelo (e.g., 'pancreas', 'gastrulation').
+        If provided, will call scv.datasets.{dataset_name}().
+    adata_path : str, optional
+        Path to AnnData file (.h5ad). Used if dataset_name is None.
+    adata : AnnData, optional
+        Pre-loaded AnnData object. Used if both dataset_name and adata_path are None.
+    annotation_file : str or list[str], optional
+        Full path(s) to annotation file(s) (e.g., .gmt files).
+        If a single string, will be converted to a list. If None, annotations are skipped.
+    min_shared_counts : int, default 20
+        Minimum shared counts for filtering in scv.pp.filter_and_normalize.
+    n_top_genes : int, default 2000
+        Number of top highly variable genes to keep.
+    min_genes_per_term : int, default 12
+        Minimum genes per annotation term to retain.
+    n_pcs : int, default 100
+        Number of PCs for moments computation.
+    n_neighbors : int, default 200
+        Number of neighbors for moments computation (smoothing parameter).
+    K_neighbors : int, default 20
+        Number of neighbors to extract for model (K+1 including self).
+    skip_if_preprocessed : bool, default True
+        If True, skip steps that appear already done (checks for 'Mu', 'Ms', 'I', etc.).
+    cluster_key : str, optional
+        Key for storing cluster labels. If None, uses 'leiden' after clustering.
+    
+    Returns
+    -------
+    adata : AnnData
+        Preprocessed AnnData ready for LineageVI training.
+    
+    Examples
+    --------
+    >>> import lineagevi as lvi
+    >>> 
+    >>> # Load from scvelo dataset
+    >>> adata = lvi.utils.preprocess_for_lineagevi(
+    ...     dataset_name='pancreas',
+    ...     annotation_file="/path/to/annotations/msigdb_development.gmt",
+    ...     n_pcs=100,
+    ...     n_neighbors=200,
+    ... )
+    >>> 
+    >>> # Load from file
+    >>> adata = lvi.utils.preprocess_for_lineagevi(
+    ...     adata_path="data.h5ad",
+    ...     annotation_file="/path/to/annotations/msigdb_development.gmt",
+    ... )
+    >>> 
+    >>> # Use pre-loaded AnnData
+    >>> import scanpy as sc
+    >>> adata = sc.read_h5ad("data.h5ad")
+    >>> adata = lvi.utils.preprocess_for_lineagevi(
+    ...     adata=adata,
+    ...     annotation_file="/path/to/annotations/msigdb_development.gmt",
+    ... )
+    >>> 
+    >>> # Initialize and train model
+    >>> vae = lvi.LineageVI(adata, ...)
+    >>> vae.fit(...)
+    """
+    import scvelo as scv
+    
+    # Load data
+    if dataset_name is not None:
+        print(f"Loading dataset '{dataset_name}' from scvelo...")
+        dataset_func = getattr(scv.datasets, dataset_name, None)
+        if dataset_func is None:
+            raise ValueError(
+                f"Dataset '{dataset_name}' not found in scv.datasets. "
+                f"Available datasets: {[x for x in dir(scv.datasets) if not x.startswith('_')]}"
+            )
+        adata = dataset_func()
+        print(f"Loaded {adata.n_obs} cells, {adata.n_vars} genes")
+    elif adata_path is not None:
+        print(f"Loading data from {adata_path}...")
+        adata = sc.read_h5ad(adata_path)
+        print(f"Loaded {adata.n_obs} cells, {adata.n_vars} genes")
+    elif adata is not None:
+        print(f"Using provided AnnData: {adata.n_obs} cells, {adata.n_vars} genes")
+    else:
+        raise ValueError(
+            "Must provide one of: dataset_name, adata_path, or adata"
+        )
+    
+    # Check if already preprocessed
+    if skip_if_preprocessed:
+        has_moments = 'Mu' in adata.layers and 'Ms' in adata.layers
+        has_annotations = 'I' in adata.varm and 'terms' in adata.uns
+        has_neighbors = 'indices' in adata.uns
+        if has_moments and has_annotations and has_neighbors:
+            print("Data appears already preprocessed. Skipping preprocessing.")
+            return adata
+    
+    print("Starting preprocessing pipeline...")
+    
+    # Step 1: Set X and counts from unspliced/spliced layers
+    if 'unspliced' in adata.layers and 'spliced' in adata.layers:
+        print("Setting X and counts layers from unspliced/spliced...")
+        adata.X = adata.layers['unspliced'].copy() + adata.layers['spliced'].copy()
+        adata.layers['counts'] = adata.X.copy()
+    elif 'counts' not in adata.layers:
+        print("Warning: No 'unspliced'/'spliced' layers found. Using adata.X as counts.")
+        adata.layers['counts'] = adata.X.copy()
+    
+    # Step 2: Add annotations (if provided)
+    if annotation_file is not None:
+        # Convert single string to list
+        annotation_files = [annotation_file] if isinstance(annotation_file, str) else annotation_file
+        print(f"Adding annotations from {len(annotation_files)} file(s)...")
+        add_annotations(
+            adata,
+            files=annotation_files,
+            min_genes=min_genes_per_term,
+            varm_key='I',
+            uns_key='terms',
+            clean=True,
+            genes_use_upper=True
+        )
+        print(f"  Added {adata.varm['I'].shape[1]} annotation terms")
+        
+        # Filter genes to only those in at least one annotation
+        n_genes_before = adata.n_vars
+        adata._inplace_subset_var(adata.varm['I'].sum(1) > 0)
+        n_genes_after = adata.n_vars
+        print(f"  Filtered to {n_genes_after} genes present in annotations (from {n_genes_before})")
+    
+    # Step 3: Filter and normalize
+    print(f"Filtering and normalizing (min_shared_counts={min_shared_counts}, n_top_genes={n_top_genes})...")
+    n_genes_before = adata.n_vars
+    scv.pp.filter_and_normalize(
+        adata,
+        min_shared_counts=min_shared_counts,
+        n_top_genes=n_top_genes,
+        subset_highly_variable=True,
+        log=True
+    )
+    n_genes_after = adata.n_vars
+    print(f"  Filtered to {n_genes_after} highly variable genes (from {n_genes_before})")
+    
+    # Step 4: Filter annotation terms (if annotations were added)
+    if 'I' in adata.varm:
+        print(f"Filtering annotation terms (min_genes_per_term={min_genes_per_term})...")
+        n_terms_before = adata.varm['I'].shape[1]
+        select_terms = adata.varm['I'].sum(0) > min_genes_per_term
+        adata.uns['terms'] = np.array(adata.uns['terms'])[select_terms].tolist()
+        adata.varm['I'] = adata.varm['I'][:, select_terms]
+        n_terms_after = adata.varm['I'].shape[1]
+        print(f"  Retained {n_terms_after} terms (from {n_terms_before})")
+        
+        # Filter genes not in any retained term
+        n_genes_before = adata.n_vars
+        adata._inplace_subset_var(adata.varm['I'].sum(1) > 0)
+        n_genes_after = adata.n_vars
+        print(f"  Filtered to {n_genes_after} genes in retained terms (from {n_genes_before})")
+    
+    # Step 5: Compute moments and neighbors
+    print(f"Computing moments (n_pcs={n_pcs}, n_neighbors={n_neighbors})...")
+    scv.pp.moments(adata, n_pcs=n_pcs, n_neighbors=n_neighbors)
+    print("  Moments computed: 'Mu' and 'Ms' layers added")
+    
+    # Cluster cells
+    if cluster_key is None:
+        cluster_key = 'leiden'
+    print("Computing Leiden clustering...")
+    sc.tl.leiden(adata, key_added=cluster_key)
+    print(f"  Clustering stored in adata.obs['{cluster_key}']")
+    
+    # Extract neighbor indices for model
+    print(f"Extracting {K_neighbors} nearest neighbors...")
+    compute_nearest_neighbors(adata, K=K_neighbors, neighbors_key='neighbors', indices_key='indices')
+    print(f"  Neighbor indices stored in adata.uns['indices']")
+    
+    print(f"Preprocessing complete! Final data: {adata.n_obs} cells, {adata.n_vars} genes")
+    if 'I' in adata.varm:
+        print(f"  {adata.varm['I'].shape[1]} annotation terms")
+    
+    return adata
+
+
 def load_model(
     adata: sc.AnnData,
     model_path: str,
@@ -97,22 +305,90 @@ def load_model(
     """
     # Import here to avoid circular import
     from .api import LineageVI
+    import json
+    from pathlib import Path
     
-    # initialize a fresh instance
-    inst = LineageVI(adata, **kwargs)
-
-    # load weights
+    # Try to load saved configuration first
+    model_dir = Path(model_path).parent
+    config_path = model_dir / "model_config.json"
+    saved_config = None
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                saved_config = json.load(f)
+            print(f"Loaded model configuration from {config_path}")
+        except Exception as e:
+            print(f"Warning: Could not load config from {config_path}: {e}")
+    
+    # Use saved config to override defaults, but kwargs take precedence
+    if saved_config is not None:
+        # Map saved config keys to kwargs (only if not already in kwargs)
+        config_mapping = {
+            "n_hidden": "n_hidden",
+            "cluster_key": "cluster_key",
+            "cluster_embedding_dim": "cluster_embedding_dim",
+            "cls_encoding_key": "cls_encoding_key",
+            "cls_embedding_dim": "cls_embedding_dim",
+        }
+        for config_key, kwarg_key in config_mapping.items():
+            if config_key in saved_config and saved_config[config_key] is not None:
+                if kwarg_key not in kwargs:
+                    kwargs[kwarg_key] = saved_config[config_key]
+    
+    # Load state_dict to infer any remaining parameters
     state = torch.load(model_path, map_location=map_location)
-    report = inst.model.load_state_dict(state)
+    
+    # Infer cls_embedding_dim from state_dict if not in config/kwargs
+    if "cls_embedding_dim" not in kwargs and "cls_embedding.embeddings.weight" in state:
+        cls_embedding_dim = state["cls_embedding.embeddings.weight"].shape[1]
+        kwargs["cls_embedding_dim"] = cls_embedding_dim
+    
+    # Infer cluster_embedding_dim and cluster_key from state_dict if present
+    # Check for both old and new key formats
+    cluster_emb_key = None
+    if "cluster_embedding.embeddings.weight" in state:
+        cluster_emb_key = "cluster_embedding.embeddings.weight"
+    elif "cluster_embedding.weight" in state:
+        cluster_emb_key = "cluster_embedding.weight"
+    
+    if cluster_emb_key is not None:
+        if "cluster_embedding_dim" not in kwargs:
+            cluster_embedding_dim = state[cluster_emb_key].shape[1]
+            kwargs["cluster_embedding_dim"] = cluster_embedding_dim
+        
+        # If cluster_key not provided, try to infer from common keys
+        if "cluster_key" not in kwargs:
+            # Try common cluster key names
+            common_keys = ["leiden", "clusters", "cluster", "cell_type", "annotation"]
+            for key in common_keys:
+                if key in adata.obs.columns:
+                    kwargs["cluster_key"] = key
+                    break
+            # If still not found, raise an error
+            if "cluster_key" not in kwargs:
+                raise ValueError(
+                    f"Saved model has cluster embeddings but no cluster_key provided. "
+                    f"Please specify cluster_key. Available obs columns: {list(adata.obs.columns)}"
+                )
+    
+    # initialize a fresh instance with inferred parameters
+    inst = LineageVI(adata, **kwargs)
+    
+    # load weights with strict=False to handle architecture changes gracefully
+    report = inst.model.load_state_dict(state, strict=False)
     if len(report.missing_keys) or len(report.unexpected_keys):
-        print("Warning: Incompatible keys when loading:", report)
-
+        print("Warning: Incompatible keys when loading:")
+        if len(report.missing_keys) > 0:
+            print(f"  Missing keys: {report.missing_keys}")
+        if len(report.unexpected_keys) > 0:
+            print(f"  Unexpected keys: {report.unexpected_keys}")
+    
     # set mode
     if training:
         inst.model.train()
     else:
         inst.model.eval()
-
+    
     return inst
 
 def build_gp_adata(

@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scanpy as sc
 import pandas as pd
+import scipy.sparse as sp
 from joblib import Parallel, delayed
 from typing import Tuple, Optional, List
 
@@ -162,6 +163,10 @@ class LineageVIModel(nn.Module):
         G = int(adata.shape[1])
         n_input = G
         n_output = n_input
+        
+        # Store dimensions as attributes (needed for RL adapter)
+        self.n_latent = n_latent
+        self.n_genes = G
 
         # Cluster embeddings (optional)
         self.cluster_key = cluster_key
@@ -888,7 +893,11 @@ class LineageVIModel(nn.Module):
                     )
                 else:
                     # Get current state (spliced counts)
-                    current_state = torch.from_numpy(adata.layers[spliced_key].astype(np.float32)).to(vel_mean.device)  # (cells, genes)
+                    spliced_data = adata.layers[spliced_key]
+                    # Handle sparse matrices
+                    if sp.issparse(spliced_data):
+                        spliced_data = spliced_data.toarray()
+                    current_state = torch.from_numpy(np.asarray(spliced_data, dtype=np.float32)).to(vel_mean.device)  # (cells, genes)
                     
                     # Compute consistency scores for each cell
                     consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
@@ -2570,12 +2579,23 @@ class LineageVIModel(nn.Module):
                     f"Available keys: {list(adata.layers.keys())}"
                 )
             
-            velocities = torch.from_numpy(adata.layers[velocity_key][source_mask].astype(np.float32))  # (n_source, n_genes)
-            source_states = torch.from_numpy(adata.layers[state_key][source_mask].astype(np.float32))  # (n_source, n_genes)
+            # Handle sparse matrices
+            vel_data = adata.layers[velocity_key][source_mask]
+            if sp.issparse(vel_data):
+                vel_data = vel_data.toarray()
+            velocities = torch.from_numpy(np.asarray(vel_data, dtype=np.float32))  # (n_source, n_genes)
+            
+            state_data = adata.layers[state_key][source_mask]
+            if sp.issparse(state_data):
+                state_data = state_data.toarray()
+            source_states = torch.from_numpy(np.asarray(state_data, dtype=np.float32))  # (n_source, n_genes)
+            
             target_states = adata.layers[state_key][target_mask]  # (n_target, n_genes)
+            if sp.issparse(target_states):
+                target_states = target_states.toarray()
         
         # Compute target cluster centroid
-        target_centroid = torch.from_numpy(target_states.mean(axis=0).astype(np.float32))  # (n_features,)
+        target_centroid = torch.from_numpy(np.asarray(target_states.mean(axis=0), dtype=np.float32))  # (n_features,)
         
         # Compute direction vectors from each source cell to target centroid
         directions = target_centroid.unsqueeze(0) - source_states  # (n_source, n_features)

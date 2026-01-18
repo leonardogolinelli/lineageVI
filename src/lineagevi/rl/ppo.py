@@ -121,15 +121,15 @@ class PPOTrainer:
             # Step environment (env handles device internally)
             obs_next, reward, done, info_next = self.env.step((action, delta))
             
-            # Store (ensure all on CPU for consistency)
-            obs_list.append(obs_tensor.cpu())
-            action_list.append(action.cpu())
-            delta_list.append(delta.cpu())
-            raw_delta_list.append(raw_delta.cpu())
+            # Store (ensure all on CPU for consistency, detach gradients to avoid backward issues)
+            obs_list.append(obs_tensor.detach().cpu())
+            action_list.append(action.detach().cpu())
+            delta_list.append(delta.detach().cpu())
+            raw_delta_list.append(raw_delta.detach().cpu())
             reward_list.append(reward.detach().cpu() if torch.is_tensor(reward) else torch.from_numpy(reward))
             done_list.append(done.detach().cpu() if torch.is_tensor(done) else torch.from_numpy(done))
-            log_prob_list.append(log_prob.cpu())
-            value_list.append(value.cpu())
+            log_prob_list.append(log_prob.detach().cpu())
+            value_list.append(value.detach().cpu())
             
             # Update obs for next iteration
             obs = obs_next
@@ -270,12 +270,13 @@ class PPOTrainer:
         T, B = batch["obs"].shape[:2]
         N = T * B
         
-        obs_flat = batch["obs"].reshape(N, -1)  # (N, obs_dim)
-        action_flat = batch["action"].reshape(N)  # (N,)
-        delta_flat = batch["delta"].reshape(N)  # (N,)
-        raw_delta_flat = batch["raw_delta"].reshape(N)  # (N,)
-        log_prob_old_flat = batch["log_prob"].reshape(N)  # (N,)
-        value_old_flat = batch["value"].reshape(N)  # (N,)
+        # Detach all batch tensors to avoid gradient issues when reusing across epochs
+        obs_flat = batch["obs"].detach().reshape(N, -1)  # (N, obs_dim)
+        action_flat = batch["action"].detach().reshape(N)  # (N,)
+        delta_flat = batch["delta"].detach().reshape(N)  # (N,)
+        raw_delta_flat = batch["raw_delta"].detach().reshape(N)  # (N,)
+        log_prob_old_flat = batch["log_prob"].detach().reshape(N)  # (N,)
+        value_old_flat = batch["value"].detach().reshape(N)  # (N,)
         
         # Move to device
         obs_flat = obs_flat.to(self.device)
@@ -284,8 +285,8 @@ class PPOTrainer:
         raw_delta_flat = raw_delta_flat.to(self.device)
         log_prob_old_flat = log_prob_old_flat.to(self.device)
         value_old_flat = value_old_flat.to(self.device)
-        advantages = advantages.to(self.device)
-        returns = returns.to(self.device)
+        advantages = advantages.detach().to(self.device)
+        returns = returns.detach().to(self.device)
         
         # Training metrics
         metrics = {

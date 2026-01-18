@@ -3,11 +3,12 @@
 import argparse
 import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List
 import torch
 import numpy as np
 import scanpy as sc
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from ..utils import load_model
 from .adapter import VelocityVAEAdapter
@@ -19,6 +20,188 @@ from .utils import (
     set_seed,
     save_policy_checkpoint,
 )
+
+
+def plot_training_curves(
+    metrics_history: Dict[str, List[float]],
+    step_norms_history: Dict[str, List[float]],
+    output_dir: Path,
+):
+    """
+    Plot training curves for RL training metrics.
+    
+    Parameters
+    ----------
+    metrics_history : dict
+        Dictionary with metric names as keys and lists of values as values.
+    step_norms_history : dict
+        Dictionary with step norm names as keys and lists of values as values.
+    output_dir : Path
+        Directory to save plots.
+    """
+    plots_dir = output_dir / "training_plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Plot 1: Combined overview (3x2 grid for better organization)
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig.suptitle("RL Training Metrics", fontsize=16)
+    
+    # Policy loss (separate subplot)
+    ax = axes[0, 0]
+    if "policy_loss" in metrics_history:
+        ax.plot(metrics_history["policy_loss"], label="Policy Loss", alpha=0.7, color="blue", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Policy Loss")
+    ax.set_title("Policy Loss")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Value loss (separate subplot)
+    ax = axes[0, 1]
+    if "value_loss" in metrics_history:
+        ax.plot(metrics_history["value_loss"], label="Value Loss", alpha=0.7, color="red", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Value Loss")
+    ax.set_title("Value Loss")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Entropy
+    ax = axes[1, 0]
+    if "entropy" in metrics_history:
+        ax.plot(metrics_history["entropy"], label="Entropy", alpha=0.7, color="green", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Entropy")
+    ax.set_title("Policy Entropy")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # KL Divergence
+    ax = axes[1, 1]
+    if "kl" in metrics_history:
+        ax.plot(metrics_history["kl"], label="KL Divergence", alpha=0.7, color="orange", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("KL Divergence")
+    ax.set_title("KL Divergence")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    if "kl" in metrics_history:
+        ax.set_yscale("log")  # KL can be large
+    
+    # Clip fraction
+    ax = axes[2, 0]
+    if "clip_fraction" in metrics_history:
+        ax.plot(metrics_history["clip_fraction"], label="Clip Fraction", alpha=0.7, color="purple", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Fraction")
+    ax.set_title("PPO Clip Fraction")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([0, 1])
+    
+    # Step norms - velocity (separate)
+    ax = axes[2, 1]
+    if "velocity_magnitude" in step_norms_history:
+        ax.plot(step_norms_history["velocity_magnitude"], label="Velocity Norm", alpha=0.7, color="blue", linewidth=2)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Velocity Norm")
+    ax.set_title("Velocity Magnitude")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plot_path = plots_dir / "training_curves.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved training curves → {plot_path}")
+    
+    # Plot 2: Losses with dual y-axes (if both exist) or single axis (if only one)
+    if "policy_loss" in metrics_history or "value_loss" in metrics_history:
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        color1 = 'blue'
+        color2 = 'red'
+        lines = []
+        labels = []
+        
+        if "policy_loss" in metrics_history and "value_loss" in metrics_history:
+            # Both exist - use dual y-axes
+            ax1.set_xlabel("Iteration", fontsize=12)
+            ax1.set_ylabel("Policy Loss", color=color1, fontsize=12)
+            line1 = ax1.plot(metrics_history["policy_loss"], label="Policy Loss", color=color1, linewidth=2, alpha=0.8)
+            ax1.tick_params(axis='y', labelcolor=color1)
+            ax1.grid(True, alpha=0.3)
+            
+            ax2 = ax1.twinx()  # Create second y-axis
+            ax2.set_ylabel("Value Loss", color=color2, fontsize=12)
+            line2 = ax2.plot(metrics_history["value_loss"], label="Value Loss", color=color2, linewidth=2, alpha=0.8)
+            ax2.tick_params(axis='y', labelcolor=color2)
+            
+            lines = line1 + line2
+            labels = ["Policy Loss", "Value Loss"]
+            ax1.legend(lines, labels, loc='upper left', fontsize=11)
+        elif "policy_loss" in metrics_history:
+            # Only policy loss
+            ax1.plot(metrics_history["policy_loss"], label="Policy Loss", color=color1, linewidth=2, alpha=0.8)
+            ax1.set_xlabel("Iteration", fontsize=12)
+            ax1.set_ylabel("Policy Loss", fontsize=12)
+            ax1.legend(fontsize=11)
+            ax1.grid(True, alpha=0.3)
+        elif "value_loss" in metrics_history:
+            # Only value loss
+            ax1.plot(metrics_history["value_loss"], label="Value Loss", color=color2, linewidth=2, alpha=0.8)
+            ax1.set_xlabel("Iteration", fontsize=12)
+            ax1.set_ylabel("Value Loss", fontsize=12)
+            ax1.legend(fontsize=11)
+            ax1.grid(True, alpha=0.3)
+        
+        ax1.set_title("Training Losses", fontsize=14)
+        plt.tight_layout()
+        plot_path = plots_dir / "losses.png"
+        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved losses plot → {plot_path}")
+    
+    # Plot 3: Step norms (separate subplots for different scales)
+    if any(key in step_norms_history for key in ["velocity_magnitude", "perturbation_magnitude", "state_change"]):
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle("Step Norms", fontsize=14)
+        
+        # Velocity magnitude
+        ax = axes[0]
+        if "velocity_magnitude" in step_norms_history:
+            ax.plot(step_norms_history["velocity_magnitude"], label="Velocity Norm", alpha=0.7, color="blue", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Velocity Norm")
+        ax.set_title("Velocity Magnitude")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Perturbation magnitude
+        ax = axes[1]
+        if "perturbation_magnitude" in step_norms_history:
+            ax.plot(step_norms_history["perturbation_magnitude"], label="Perturbation Norm", alpha=0.7, color="red", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Perturbation Norm")
+        ax.set_title("Perturbation Magnitude")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # State change
+        ax = axes[2]
+        if "state_change" in step_norms_history:
+            ax.plot(step_norms_history["state_change"], label="State Change Norm", alpha=0.7, color="cyan", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("State Change Norm")
+        ax.set_title("State Change Magnitude")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_path = plots_dir / "step_norms.png"
+        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved step norms plot → {plot_path}")
 
 
 def load_config(config_path: Optional[str]) -> dict:
@@ -78,6 +261,12 @@ def main():
     parser.add_argument("--goal_exclude", type=str, nargs="*", default=None, help="Excluded goal labels")
     parser.add_argument("--goal_min_cells", type=int, default=1, help="Minimum cells per goal lineage")
     parser.add_argument("--fixed_goal", type=str, default=None, help="Fixed goal label for all episodes (optional)")
+    parser.add_argument("--n_iterations", type=int, default=None, help="Total training iterations (overrides config)")
+    parser.add_argument("--epochs", type=int, default=None, help="PPO inner epochs per iteration (overrides config)")
+    parser.add_argument("--batch_size", type=int, default=None, help="Environment batch size (overrides config)")
+    parser.add_argument("--T_rollout", type=int, default=None, help="Rollout horizon (overrides config)")
+    parser.add_argument("--minibatch_size", type=int, default=None, help="Minibatch size for PPO updates (overrides config)")
+    parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
     
     args = parser.parse_args()
     
@@ -162,7 +351,7 @@ def main():
     ], dtype=torch.long, device=device)
     
     # Create environment (cluster/process indices now passed per-reset, not in constructor)
-    batch_size = training_config.get("batch_size", 64)
+    batch_size = args.batch_size if args.batch_size is not None else training_config.get("batch_size", 64)
     dt = env_config.get("dt", 0.1)
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
@@ -244,14 +433,28 @@ def main():
         print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")
     
     # Training loop
-    n_iterations = training_config.get("n_iterations", 1000)
-    T_rollout = training_config.get("T_rollout", 50)
-    save_freq = training_config.get("save_freq", 100)
+    n_iterations = args.n_iterations if args.n_iterations is not None else training_config.get("n_iterations", 1000)
+    T_rollout = args.T_rollout if args.T_rollout is not None else training_config.get("T_rollout", 50)
+    save_freq = args.save_freq if args.save_freq is not None else training_config.get("save_freq", 100)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Starting training for {n_iterations} iterations...")
     print("Training uses uniform goal sampling. Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
+    
+    # Initialize metrics history
+    metrics_history = {
+        "policy_loss": [],
+        "value_loss": [],
+        "entropy": [],
+        "kl": [],
+        "clip_fraction": [],
+    }
+    step_norms_history = {
+        "velocity_magnitude": [],
+        "perturbation_magnitude": [],
+        "state_change": [],
+    }
     
     for iteration in tqdm(range(n_iterations), desc="Training"):
         # Sample goals first (uniform)
@@ -296,9 +499,25 @@ def main():
         # Update policy
         metrics = trainer.update(
             batch,
-            epochs=training_config.get("epochs", 10),
-            minibatch_size=training_config.get("minibatch_size", 64),
+            epochs=args.epochs if args.epochs is not None else training_config.get("epochs", 10),
+            minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
         )
+        
+        # Store metrics for plotting
+        for k in metrics_history.keys():
+            if k in metrics:
+                metrics_history[k].append(metrics[k])
+        
+        # Store step norms (average over last batch)
+        if env.step_norms["velocity_magnitude"]:
+            # Get averages from the last batch
+            recent_velocity = env.step_norms["velocity_magnitude"][-batch_size:] if len(env.step_norms["velocity_magnitude"]) >= batch_size else env.step_norms["velocity_magnitude"]
+            recent_perturb = env.step_norms["perturbation_magnitude"][-batch_size:] if len(env.step_norms["perturbation_magnitude"]) >= batch_size else env.step_norms["perturbation_magnitude"]
+            recent_state = env.step_norms["state_change"][-batch_size:] if len(env.step_norms["state_change"]) >= batch_size else env.step_norms["state_change"]
+            
+            step_norms_history["velocity_magnitude"].append(np.mean(recent_velocity) if len(recent_velocity) > 0 else 0.0)
+            step_norms_history["perturbation_magnitude"].append(np.mean(recent_perturb) if len(recent_perturb) > 0 else 0.0)
+            step_norms_history["state_change"].append(np.mean(recent_state) if len(recent_state) > 0 else 0.0)
         
         # Log metrics
         if iteration % 10 == 0:
@@ -330,6 +549,10 @@ def main():
             )
     
     print(f"\nTraining complete! Checkpoints saved to {output_dir}")
+    
+    # Plot training curves
+    print("Generating training plots...")
+    plot_training_curves(metrics_history, step_norms_history, output_dir)
 
 
 if __name__ == "__main__":

@@ -198,10 +198,39 @@ class _Trainer:
         r2_losses = self._train_regime2(loader2, lr=lr, epochs=epochs2, monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs)
         history["regime2_velocity_loss"] = r2_losses
 
-        # Save model weights only (no automatic annotation)
-        torch.save(self.model.state_dict(), f"{output_dir}/vae_velocity_model.pt")
+        # Save model weights and configuration
+        import json
+        from pathlib import Path
+        
+        # Save state dict
+        model_path = f"{output_dir}/vae_velocity_model.pt"
+        torch.save(self.model.state_dict(), model_path)
+        
+        # Save model configuration for easy loading later
+        # Infer n_hidden from encoder layer sizes
+        n_hidden = None
+        if hasattr(self.model.encoder, 'encoder') and len(self.model.encoder.encoder) > 0:
+            first_layer = self.model.encoder.encoder[0]
+            if isinstance(first_layer, torch.nn.Linear):
+                n_hidden = first_layer.out_features
+        
+        config = {
+            "n_hidden": n_hidden,
+            "mask_key": "I",  # Default, could be stored if made configurable
+            "cluster_key": self.model.cluster_key,
+            "cluster_embedding_dim": self.model.cluster_embedding_dim if self.model.cluster_embedding is not None else None,
+            "cls_encoding_key": getattr(self.model, 'cls_encoding_key', None),
+            "cls_embedding_dim": self.model.cls_embedding_dim,
+            "n_latent": self.model.n_latent,
+            "n_genes": self.model.n_genes,
+        }
+        config_path = f"{output_dir}/model_config.json"
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
         if self.verbose:
-            print(f"Saved model  → {output_dir}/vae_velocity_model.pt")
+            print(f"Saved model  → {model_path}")
+            print(f"Saved config → {config_path}")
             print("Note: Call model.get_model_outputs() to annotate adata with velocities")
 
         return history
