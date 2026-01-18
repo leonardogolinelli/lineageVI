@@ -1,1 +1,1 @@
-"""Tests for VeloVI (VAE) model training."""
+"""Tests for LineageVI (VAE) model training."""

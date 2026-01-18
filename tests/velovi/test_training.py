@@ -1,4 +1,4 @@
-"""Test script for VeloVI model training.
+"""Test script for LineageVI model training.
 
 This script tests the basic training workflow for the LineageVI VAE model.
 Run with:
@@ -18,7 +18,7 @@ import lineagevi as lvi
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test VeloVI model training")
+    parser = argparse.ArgumentParser(description="Test LineageVI model training")
     parser.add_argument("--adata_path", type=str, required=True, help="Path to AnnData file")
     parser.add_argument("--output_dir", type=str, default="./test_outputs/velovi", help="Output directory")
     parser.add_argument("--epochs1", type=int, default=10, help="Epochs for regime 1 (reconstruction)")

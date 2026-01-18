@@ -1,19 +1,19 @@
 # Test Scripts
 
-This directory contains test scripts for both VeloVI model training and RL agent training.
+This directory contains test scripts for both LineageVI model training and RL agent training.
 
 ## Structure
 
 ```
 tests/
-├── velovi/          # Tests for VeloVI (VAE) model training
+├── velovi/          # Tests for LineageVI (VAE) model training
 │   └── test_training.py
 ├── rl/              # Tests for RL agent (PPO) training
 │   └── test_training.py
 └── README.md        # This file
 ```
 
-## VeloVI Training Tests
+## LineageVI Training Tests
 
 Test the basic VAE model training workflow:
 
