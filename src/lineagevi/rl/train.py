@@ -77,9 +77,7 @@ def main():
     parser.add_argument("--goal_allowed", type=str, nargs="*", default=None, help="Allowed goal labels (default: all)")
     parser.add_argument("--goal_exclude", type=str, nargs="*", default=None, help="Excluded goal labels")
     parser.add_argument("--goal_min_cells", type=int, default=1, help="Minimum cells per goal lineage")
-    parser.add_argument("--goal_sampling", type=str, default="uniform", choices=["uniform", "balanced_batch"], help="Goal sampling strategy")
     parser.add_argument("--fixed_goal", type=str, default=None, help="Fixed goal label for all episodes (optional)")
-    parser.add_argument("--allow_same_as_origin", action="store_true", help="Allow goal to be same as origin lineage")
     
     args = parser.parse_args()
     
@@ -214,6 +212,46 @@ def main():
     z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)  # (n_cells, n_latent)
     n_cells = z_all.shape[0]
     
+    # Precompute origin labels for all cells
+    origin_labels_all = adata.obs[args.lineage_key].astype(str).values  # (n_cells,)
+    
+    # Precompute eligible cells for each goal (cells where origin != goal)
+    # This ensures goal != origin by construction
+    eligible_cells = {}
+    for g_idx, goal_label in enumerate(goal_labels):
+        eligible_mask = origin_labels_all != goal_label
+        eligible_cells[g_idx] = np.where(eligible_mask)[0]
+        
+        # Check that eligible cells exist
+        if len(eligible_cells[g_idx]) == 0:
+            raise ValueError(
+                f"No eligible start cells for goal '{goal_label}' "
+                f"because all cells have that origin. "
+                f"Adjust goal filters (--goal_allowed, --goal_exclude, --goal_min_cells) or dataset."
+            )
+    
+    # If fixed_goal is set, verify it has eligible cells
+    if fixed_goal_idx is not None:
+        if len(eligible_cells[fixed_goal_idx]) == 0:
+            raise ValueError(
+                f"Fixed goal '{args.fixed_goal}' has no eligible start cells. "
+                f"All cells have origin '{args.fixed_goal}'. "
+                f"Choose a different goal or adjust filters."
+            )
+    
+    # If fixed_goal is set, verify it has eligible cells
+    if fixed_goal_idx is not None:
+        if len(eligible_cells[fixed_goal_idx]) == 0:
+            raise ValueError(
+                f"Fixed goal '{args.fixed_goal}' has no eligible start cells. "
+                f"All cells have origin '{args.fixed_goal}'. "
+                f"Choose a different goal or adjust filters."
+            )
+    
+    print(f"Precomputed eligible cells for {n_goals} goals")
+    for g_idx, goal_label in enumerate(goal_labels):
+        print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")
+    
     # Training loop
     n_iterations = training_config.get("n_iterations", 1000)
     T_rollout = training_config.get("T_rollout", 50)
@@ -222,54 +260,26 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Starting training for {n_iterations} iterations...")
-    
-    # Get origin lineage labels for all cells
-    origin_labels = adata.obs[args.lineage_key].values  # (n_cells,)
+    print("Training uses uniform goal sampling. Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
     
     for iteration in tqdm(range(n_iterations), desc="Training"):
-        # Sample random initial states
-        cell_indices = np.random.choice(n_cells, size=batch_size, replace=True)
-        z0 = z_all[cell_indices]  # (B, n_latent)
-        
-        # Get origin lineage labels for sampled cells
-        origin_labels_batch = origin_labels[cell_indices]  # (B,)
-        
-        # Map origin labels to goal indices (if they exist in goal_labels)
-        origin_goal_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
-        for i, label in enumerate(origin_labels_batch):
-            origin_goal_idx[i] = label_to_goal_idx.get(str(label), -1)  # -1 if not in goal_labels
-        
-        # Sample goals (excluding origin unless allow_same_as_origin or fixed_goal)
+        # Sample goals first (uniform)
         if fixed_goal_idx is not None:
-            # Fixed goal for all
+            # Fixed goal for all batch elements
             goal_idx = torch.full((batch_size,), fixed_goal_idx, dtype=torch.long, device=device)
-            # If fixed goal equals origin and not allowed, resample those cells
-            if not args.allow_same_as_origin:
-                mask_same = (goal_idx == origin_goal_idx)
-                if mask_same.any():
-                    # Resample goals for those cells (excluding origin)
-                    for i in range(batch_size):
-                        if mask_same[i]:
-                            valid_goals = [g for g in range(n_goals) if g != origin_goal_idx[i]]
-                            if len(valid_goals) > 0:
-                                goal_idx[i] = np.random.choice(valid_goals)
         else:
-            # Uniform sampling excluding origin
-            goal_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
-            all_goal_indices = torch.arange(n_goals, device=device)
-            
-            for i in range(batch_size):
-                origin_idx = origin_goal_idx[i].item()
-                if args.allow_same_as_origin or origin_idx == -1:
-                    # Sample from all goals
-                    goal_idx[i] = torch.randint(0, n_goals, (1,), device=device)
-                else:
-                    # Sample from all goals except origin (vectorized)
-                    # Sample integer in [0, n_goals-2], then skip over origin
-                    sampled = torch.randint(0, n_goals - 1, (1,), device=device).item()
-                    if sampled >= origin_idx:
-                        sampled += 1
-                    goal_idx[i] = sampled
+            # Uniform sampling from all goals
+            goal_idx = torch.randint(0, n_goals, (batch_size,), device=device)
+        
+        # Sample start cells conditioned on goal (origin != goal)
+        cell_indices = np.zeros(batch_size, dtype=np.int64)
+        for i in range(batch_size):
+            g_i = goal_idx[i].item()
+            eligible = eligible_cells[g_i]
+            cell_indices[i] = np.random.choice(eligible)
+        
+        # Get latent states for sampled cells
+        z0 = z_all[cell_indices]  # (B, n_latent)
         
         # Get per-cell cluster/process indices for sampled cells
         cluster_idx_batch = None

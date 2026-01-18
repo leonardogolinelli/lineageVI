@@ -66,9 +66,9 @@ def main():
     
     # Compute lineage centroids
     print(f"Computing lineage centroids from '{args.lineage_key}'...")
-    centroids, lineage_names = compute_lineage_centroids(adata, args.lineage_key, z_key=args.z_key)
+    centroids, goal_labels = compute_lineage_centroids(adata, args.lineage_key, z_key=args.z_key)
     centroids = centroids.to(device)
-    print(f"Found {len(lineage_names)} lineages: {lineage_names}")
+    print(f"Found {len(goal_labels)} goal lineages: {goal_labels}")
     
     # Create adapter
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode="decode_x")
@@ -93,7 +93,7 @@ def main():
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
-        goal_names=lineage_names,
+        goal_names=goal_labels,
         batch_size=args.batch_size,
         dt=0.1,
         T_max=50,
@@ -105,7 +105,8 @@ def main():
     print(f"Created environment with batch_size={args.batch_size}")
     
     # Create policy
-    obs_dim = adapter.n_latent + len(lineage_names) + 1
+    n_goals = len(goal_labels)
+    obs_dim = adapter.n_latent + n_goals + 1
     n_latent = adapter.n_latent
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
@@ -135,17 +136,44 @@ def main():
     z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)
     n_cells = z_all.shape[0]
     
+    # Precompute origin labels and eligible cells (matching training logic)
+    import numpy as np
+    origin_labels_all = adata.obs[args.lineage_key].astype(str).values
+    
+    # Precompute eligible cells for each goal (cells where origin != goal)
+    eligible_cells = {}
+    for g_idx, goal_label in enumerate(goal_labels):
+        eligible_mask = origin_labels_all != goal_label
+        eligible_cells[g_idx] = np.where(eligible_mask)[0]
+        if len(eligible_cells[g_idx]) == 0:
+            raise ValueError(
+                f"No eligible start cells for goal '{goal_label}'. "
+                f"All cells have that origin. Adjust dataset or goal filters."
+            )
+    
+    print(f"Precomputed eligible cells for {n_goals} goals")
+    for g_idx, goal_label in enumerate(goal_labels):
+        print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")
+    
     # Training loop (short for testing)
     print(f"Starting training for {args.n_iterations} iterations...")
+    print("Training uses uniform goal sampling. Goals are sampled first, then start cells from eligible origins.")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     for iteration in range(args.n_iterations):
-        # Sample random initial states and goals
-        import numpy as np
-        cell_indices = np.random.choice(n_cells, size=args.batch_size, replace=True)
+        # Sample goals first (uniform)
+        goal_idx = torch.randint(0, n_goals, (args.batch_size,), device=device)
+        
+        # Sample start cells conditioned on goal (origin != goal)
+        cell_indices = np.zeros(args.batch_size, dtype=np.int64)
+        for i in range(args.batch_size):
+            g_i = goal_idx[i].item()
+            eligible = eligible_cells[g_i]
+            cell_indices[i] = np.random.choice(eligible)
+        
+        # Get latent states for sampled cells
         z0 = z_all[cell_indices]
-        goal_idx = torch.randint(0, len(lineage_names), (args.batch_size,), device=device)
         
         # Get per-cell indices
         cluster_idx_batch = None
@@ -182,7 +210,7 @@ def main():
         "delta_max": 1.0,
     }
     save_policy_checkpoint(
-        policy, centroids, lineage_names, save_config, output_dir, iteration=None
+        policy, centroids, goal_labels, save_config, output_dir, iteration=None
     )
     print(f"\nPolicy checkpoint saved to {checkpoint_path}")
     print("RL training test completed successfully!")
