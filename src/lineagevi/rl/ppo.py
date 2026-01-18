@@ -347,8 +347,8 @@ class PPOTrainer:
                 
                 # Compute metrics
                 with torch.no_grad():
-                    # Approximate KL
-                    kl = (mb_log_prob_old - mb_log_prob_new).mean()
+                    # Approximate KL (use absolute value for non-negative metric)
+                    kl = (mb_log_prob_old - mb_log_prob_new).mean().abs()
                     
                     # Clip fraction
                     clip_fraction = ((ratio < 1 - self.clip_eps) | (ratio > 1 + self.clip_eps)).float().mean()
@@ -359,8 +359,9 @@ class PPOTrainer:
                 metrics["kl"].append(kl.item())
                 metrics["clip_fraction"].append(clip_fraction.item())
             
-            # Check KL early stopping
-            avg_kl = np.mean(metrics["kl"][-N // minibatch_size:])
+            # Check KL early stopping (fix edge case when minibatch_size > N)
+            n_mb = max(1, int(np.ceil(N / minibatch_size)))
+            avg_kl = float(np.mean(metrics["kl"][-n_mb:]))
             if avg_kl > self.target_kl:
                 break
         

@@ -79,14 +79,15 @@ def plot_training_curves(
     # KL Divergence
     ax = axes[1, 1]
     if "kl" in metrics_history:
-        ax.plot(metrics_history["kl"], label="KL Divergence", alpha=0.7, color="orange", linewidth=2)
+        # Use max with epsilon to avoid log(0) issues (KL is now non-negative)
+        kl_plot = np.maximum(np.array(metrics_history["kl"]), 1e-12)
+        ax.plot(kl_plot, label="KL Divergence", alpha=0.7, color="orange", linewidth=2)
+        ax.set_yscale("log")  # KL is now always non-negative, safe for log scale
     ax.set_xlabel("Iteration")
     ax.set_ylabel("KL Divergence")
     ax.set_title("KL Divergence")
     ax.legend()
     ax.grid(True, alpha=0.3)
-    if "kl" in metrics_history:
-        ax.set_yscale("log")  # KL can be large
     
     # Clip fraction
     ax = axes[2, 0]
