@@ -239,15 +239,6 @@ def main():
                 f"Choose a different goal or adjust filters."
             )
     
-    # If fixed_goal is set, verify it has eligible cells
-    if fixed_goal_idx is not None:
-        if len(eligible_cells[fixed_goal_idx]) == 0:
-            raise ValueError(
-                f"Fixed goal '{args.fixed_goal}' has no eligible start cells. "
-                f"All cells have origin '{args.fixed_goal}'. "
-                f"Choose a different goal or adjust filters."
-            )
-    
     print(f"Precomputed eligible cells for {n_goals} goals")
     for g_idx, goal_label in enumerate(goal_labels):
         print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")

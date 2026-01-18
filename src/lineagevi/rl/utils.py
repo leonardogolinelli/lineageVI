@@ -52,7 +52,7 @@ def compute_lineage_centroids(
         raise ValueError(f"Key '{lineage_key}' not found in adata.obs. Available keys: {list(adata.obs.keys())}")
     
     z = adata.obsm[z_key]  # (n_cells, n_latent)
-    lineage_labels = adata.obs[lineage_key]
+    lineage_labels = adata.obs[lineage_key].astype(str)  # Ensure string type for consistent comparisons
     
     # Get unique lineages
     unique_lineages = lineage_labels.unique().tolist()
