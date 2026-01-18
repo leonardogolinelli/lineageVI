@@ -12,13 +12,21 @@ import matplotlib.pyplot as plt
 
 from ..utils import load_model
 from .adapter import VelocityVAEAdapter
-from .envs import VectorizedLatentVelocityEnv
+from .envs import VectorizedLatentVelocityEnv, LatentVelocityEnv
 from .policies import ActorCriticPolicy
 from .ppo import PPOTrainer
 from .utils import (
     compute_lineage_centroids,
     set_seed,
     save_policy_checkpoint,
+)
+from .viz import (
+    build_embedding,
+    rollout_baseline,
+    rollout_agent,
+    plot_trajectory_overlay,
+    plot_distance_curves,
+    plot_interventions,
 )
 
 
@@ -309,6 +317,205 @@ def plot_training_curves(
         print(f"Saved task metrics plot → {plot_path}")
 
 
+def generate_example_visualizations(
+    policy: ActorCriticPolicy,
+    adapter: VelocityVAEAdapter,
+    env_config: dict,
+    centroids: torch.Tensor,
+    goal_labels: list,
+    z_all: torch.Tensor,
+    adata: sc.AnnData,
+    lineage_key: str,
+    output_dir: Path,
+    cluster_indices: Optional[torch.Tensor],
+    process_indices: Optional[torch.Tensor],
+    n_examples: int = 3,
+    embedding_method: str = "pca",
+    T_rollout: int = 50,
+    lambda_progress: float = 1.0,
+    lambda_act: float = 0.01,
+    lambda_mag: float = 0.1,
+    R_succ: float = 10.0,
+    use_negative_velocity: bool = False,
+):
+    """
+    Generate example trajectory visualizations after training.
+    
+    Parameters
+    ----------
+    policy : ActorCriticPolicy
+        Trained policy.
+    adapter : VelocityVAEAdapter
+        VAE adapter.
+    env_config : dict
+        Environment configuration.
+    centroids : torch.Tensor
+        Goal centroids.
+    goal_labels : list
+        Goal labels.
+    z_all : torch.Tensor
+        All latent states.
+    adata : sc.AnnData
+        AnnData object.
+    lineage_key : str
+        Key in adata.obs for lineage labels.
+    output_dir : Path
+        Output directory.
+    cluster_indices : torch.Tensor, optional
+        Cluster indices.
+    process_indices : torch.Tensor, optional
+        Process indices.
+    n_examples : int
+        Number of example trajectories to visualize.
+    embedding_method : str
+        Embedding method ('pca' or 'umap').
+    lambda_progress : float
+        Progress reward scaling.
+    lambda_act : float
+        Action penalty coefficient.
+    lambda_mag : float
+        Magnitude penalty coefficient.
+    R_succ : float
+        Success reward bonus.
+    use_negative_velocity : bool
+        Whether to use negative velocity.
+    """
+    device = next(policy.parameters()).device
+    n_cells = z_all.shape[0]
+    n_goals = len(goal_labels)
+    
+    # Create visualization output directory
+    viz_dir = output_dir / "trajectory_viz"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Build embedding from all cells
+    print(f"Building {embedding_method.upper()} embedding...")
+    Z_all = z_all.cpu().numpy()
+    embedding, transformer = build_embedding(Z_all, method=embedding_method)
+    print(f"Embedding shape: {embedding.shape}")
+    
+    # Create single environment for visualization
+    single_env = LatentVelocityEnv(
+        adapter=adapter,
+        centroids=centroids,
+        goal_names=goal_labels,
+        dt=env_config.get("dt", 0.1),
+        T_max=env_config.get("T_max", 100),
+        eps_success=env_config.get("eps_success", 0.1),
+        lambda_progress=lambda_progress,
+        lambda_act=lambda_act,
+        lambda_mag=lambda_mag,
+        R_succ=R_succ,
+        use_negative_velocity=use_negative_velocity,
+    )
+    
+    # Sample example trajectories
+    for example_idx in range(n_examples):
+        print(f"\nGenerating visualization {example_idx + 1}/{n_examples}...")
+        
+        # Sample random start cell
+        start_cell_idx = np.random.randint(0, n_cells)
+        z0 = z_all[start_cell_idx]
+        start_lineage = adata.obs[lineage_key].iloc[start_cell_idx]
+        
+        # Sample random goal (different from start if possible)
+        goal_idx = np.random.randint(0, n_goals)
+        goal_label = goal_labels[goal_idx]
+        z_goal = centroids[goal_idx].to(device)
+        
+        # Get cluster/process indices for start cell
+        cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
+        process_idx = process_indices[start_cell_idx] if process_indices is not None else None
+        
+        # Get initial x if needed
+        x0 = None
+        if adapter.velocity_mode == "fixed_x":
+            unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+            spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+            u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][start_cell_idx])).float().to(device)
+            s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx])).float().to(device)
+            x0 = torch.cat([u, s], dim=0)
+        
+        # Roll out baseline trajectory
+        z_baseline, distances_baseline = rollout_baseline(
+            single_env, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx, process_idx
+        )
+        
+        # Roll out agent trajectory
+        z_agent, distances_agent, actions, deltas = rollout_agent(
+            single_env, policy, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx, process_idx,
+            deterministic=True
+        )
+        
+        # Compute metrics
+        n_interventions = np.sum(actions != 0)
+        total_magnitude = np.sum(np.abs(deltas))
+        final_distance = distances_agent[-1]
+        success = final_distance < single_env.eps_success
+        
+        # Get lineage labels for coloring
+        lineage_labels = None
+        if lineage_key in adata.obs:
+            lineage_labels = adata.obs[lineage_key].values
+        
+        # Create visualizations
+        example_prefix = f"example_{example_idx + 1}"
+        
+        # Plot A: Trajectory overlay
+        plot_trajectory_overlay(
+            embedding,
+            z_baseline,
+            z_agent,
+            z_goal.cpu().numpy(),
+            transformer,
+            str(start_lineage),
+            goal_label,
+            success,
+            n_interventions,
+            total_magnitude,
+            viz_dir / f"{example_prefix}_trajectory_overlay.png",
+            lineage_key=lineage_key,
+            lineage_labels=lineage_labels,
+        )
+        
+        # Plot B: Distance curves
+        plot_distance_curves(
+            distances_baseline,
+            distances_agent,
+            viz_dir / f"{example_prefix}_distance_curves.png",
+        )
+        
+        # Plot C: Intervention schedule
+        plot_interventions(
+            actions,
+            deltas,
+            adapter.n_latent,
+            viz_dir / f"{example_prefix}_interventions.png",
+            method="heatmap",
+        )
+        
+        # Save raw arrays
+        np.savez(
+            viz_dir / f"{example_prefix}_trajectory.npz",
+            z_baseline=z_baseline,
+            z_agent=z_agent,
+            z_goal=z_goal.cpu().numpy(),
+            distances_baseline=distances_baseline,
+            distances_agent=distances_agent,
+            actions=actions,
+            deltas=deltas,
+            embedding=embedding,
+            start_cell_idx=start_cell_idx,
+            goal_idx=goal_idx,
+            start_lineage=str(start_lineage),
+            goal_lineage=goal_label,
+        )
+        
+        print(f"  Saved visualizations for example {example_idx + 1}: start='{start_lineage}', goal='{goal_label}'")
+    
+    print(f"\nExample trajectory visualizations saved to {viz_dir}")
+
+
 def load_config(config_path: Optional[str]) -> dict:
     """Load config from YAML file or return defaults."""
     if config_path is not None and Path(config_path).exists():
@@ -321,6 +528,7 @@ def load_config(config_path: Optional[str]) -> dict:
                 "dt": 0.1,
                 "T_max": 100,
                 "eps_success": 0.1,
+                "lambda_progress": 1.0,
                 "lambda_act": 0.01,
                 "lambda_mag": 0.1,
                 "R_succ": 10.0,
@@ -374,6 +582,14 @@ def main():
     parser.add_argument("--minibatch_size", type=int, default=None, help="Minibatch size for PPO updates (overrides config)")
     parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
+    parser.add_argument("--dt", type=float, default=None, help="Time step size (overrides config)")
+    parser.add_argument("--lambda_progress", type=float, default=None, help="Progress reward scaling factor (overrides config)")
+    parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
+    parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
+    parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
+    parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
+    parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
+    parser.add_argument("--skip_viz", action="store_true", help="Skip trajectory visualization after training")
     
     args = parser.parse_args()
     
@@ -459,9 +675,14 @@ def main():
     
     # Create environment (cluster/process indices now passed per-reset, not in constructor)
     batch_size = args.batch_size if args.batch_size is not None else training_config.get("batch_size", 64)
-    dt = env_config.get("dt", 0.1)
+    dt = args.dt if args.dt is not None else env_config.get("dt", 0.1)
     # Get use_negative_velocity from CLI or config
     use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
+    # Get reward parameters from CLI or config
+    lambda_progress = args.lambda_progress if args.lambda_progress is not None else env_config.get("lambda_progress", 1.0)
+    lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
+    lambda_mag = args.lambda_mag if args.lambda_mag is not None else env_config.get("lambda_mag", 0.1)
+    R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
@@ -471,12 +692,14 @@ def main():
         dt=dt,
         T_max=env_config.get("T_max", 100),
         eps_success=env_config.get("eps_success", 0.1),
-        lambda_act=env_config.get("lambda_act", 0.01),
-        lambda_mag=env_config.get("lambda_mag", 0.1),
-        R_succ=env_config.get("R_succ", 10.0),
+        lambda_progress=lambda_progress,
+        lambda_act=lambda_act,
+        lambda_mag=lambda_mag,
+        R_succ=R_succ,
         use_negative_velocity=use_negative_velocity,
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
+    print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}")
     
     # Create policy
     obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
@@ -686,6 +909,31 @@ def main():
     # Plot training curves
     print("Generating training plots...")
     plot_training_curves(metrics_history, step_norms_history, output_dir)
+    
+    # Generate example trajectory visualizations
+    if not args.skip_viz:
+        print("\nGenerating example trajectory visualizations...")
+        generate_example_visualizations(
+            policy=policy,
+            adapter=adapter,
+            env_config=env_config,
+            centroids=centroids,
+            goal_labels=goal_labels,
+            z_all=z_all,
+            adata=adata,
+            lineage_key=args.lineage_key,
+            output_dir=output_dir,
+            cluster_indices=cluster_indices,
+            process_indices=process_indices,
+            n_examples=args.n_viz_trajectories,
+            embedding_method=args.viz_embedding,
+            T_rollout=T_rollout,
+            lambda_progress=lambda_progress,
+            lambda_act=lambda_act,
+            lambda_mag=lambda_mag,
+            R_succ=R_succ,
+            use_negative_velocity=use_negative_velocity,
+        )
 
 
 if __name__ == "__main__":

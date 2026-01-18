@@ -185,6 +185,7 @@ def main():
         dt=env_config.get("dt", 0.1),
         T_max=env_config.get("T_max", 100),
         eps_success=env_config.get("eps_success", 0.1),
+        lambda_progress=env_config.get("lambda_progress", 1.0),
         lambda_act=env_config.get("lambda_act", 0.01),
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),

@@ -23,6 +23,14 @@ BATCH_SIZE="128"
 T_ROLLOUT="64"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
+DT="" # default is 0.1
+LAMBDA_PROGRESS="3.0" # default is 1.0
+LAMBDA_ACT="" # default is 0.02
+LAMBDA_MAG="" # default is 0.15
+R_SUCC="" # default is 20.0
+N_VIZ_TRAJECTORIES="3"
+VIZ_EMBEDDING="pca"
+SKIP_VIZ=""
 
 
 # Parse command-line arguments
@@ -110,6 +118,38 @@ while [[ $# -gt 0 ]]; do
             USE_NEGATIVE_VELOCITY="--use_negative_velocity"
             shift
             ;;
+        --dt)
+            DT="$2"
+            shift 2
+            ;;
+        --lambda_progress)
+            LAMBDA_PROGRESS="$2"
+            shift 2
+            ;;
+        --lambda_act)
+            LAMBDA_ACT="$2"
+            shift 2
+            ;;
+        --lambda_mag)
+            LAMBDA_MAG="$2"
+            shift 2
+            ;;
+        --R_succ)
+            R_SUCC="$2"
+            shift 2
+            ;;
+        --n_viz_trajectories)
+            N_VIZ_TRAJECTORIES="$2"
+            shift 2
+            ;;
+        --viz_embedding)
+            VIZ_EMBEDDING="$2"
+            shift 2
+            ;;
+        --skip_viz)
+            SKIP_VIZ="--skip_viz"
+            shift
+            ;;
         --conda_env)
             CONDA_ENV="$2"
             shift 2
@@ -133,6 +173,18 @@ while [[ $# -gt 0 ]]; do
             echo "  --goal_min_cells N         Minimum cells per goal lineage (default: 1)"
             echo "  --fixed_goal LABEL         Fixed goal label for all episodes (optional)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
+            echo ""
+            echo "ENVIRONMENT PARAMETERS (override config):"
+            echo "  --dt FLOAT                Time step size (overrides config)"
+            echo "  --lambda_progress FLOAT   Progress reward scaling factor (overrides config, default: 1.0)"
+            echo "  --lambda_act FLOAT        Action penalty coefficient (overrides config)"
+            echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
+            echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
+            echo ""
+            echo "VISUALIZATION PARAMETERS:"
+            echo "  --n_viz_trajectories N     Number of example trajectories to visualize (default: 3)"
+            echo "  --viz_embedding METHOD     Embedding method: 'pca' or 'umap' (default: pca)"
+            echo "  --skip_viz                Skip trajectory visualization after training"
             echo ""
             echo "TRAINING PARAMETERS (override config):"
             echo "  --n_iterations N         Total training iterations (overrides config)"
@@ -292,6 +344,30 @@ if [[ -n "$SAVE_FREQ" ]]; then
 fi
 if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
     PYTHON_ARGS+=(--use_negative_velocity)
+fi
+if [[ -n "$DT" ]]; then
+    PYTHON_ARGS+=(--dt "$DT")
+fi
+if [[ -n "$LAMBDA_PROGRESS" ]]; then
+    PYTHON_ARGS+=(--lambda_progress "$LAMBDA_PROGRESS")
+fi
+if [[ -n "$LAMBDA_ACT" ]]; then
+    PYTHON_ARGS+=(--lambda_act "$LAMBDA_ACT")
+fi
+if [[ -n "$LAMBDA_MAG" ]]; then
+    PYTHON_ARGS+=(--lambda_mag "$LAMBDA_MAG")
+fi
+if [[ -n "$R_SUCC" ]]; then
+    PYTHON_ARGS+=(--R_succ "$R_SUCC")
+fi
+if [[ -n "$N_VIZ_TRAJECTORIES" ]]; then
+    PYTHON_ARGS+=(--n_viz_trajectories "$N_VIZ_TRAJECTORIES")
+fi
+if [[ -n "$VIZ_EMBEDDING" ]]; then
+    PYTHON_ARGS+=(--viz_embedding "$VIZ_EMBEDDING")
+fi
+if [[ -n "$SKIP_VIZ" ]]; then
+    PYTHON_ARGS+=(--skip_viz)
 fi
 
 # Run the RL training script

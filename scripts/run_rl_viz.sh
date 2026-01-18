@@ -5,7 +5,7 @@ set -e  # Exit on error
 
 # Default values
 CONDA_ENV="test3"
-RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260117_221228"
+RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260117_225037"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
 LINEAGE_KEY="leiden"
 CHECKPOINT=""

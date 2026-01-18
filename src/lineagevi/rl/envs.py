@@ -16,7 +16,7 @@ class LatentVelocityEnv:
     State: (z_t, goal_embedding, t_normalized)
     Action: (a_t ∈ {0,...,d}, Δ_t ∈ R)
     Transition: z_tilde = z + u, v = velocity_decoder(z_tilde, x), z_next = z_tilde + dt * v
-    Reward: (d_t - d_{t+1}) - λ_act*I[a≠0] - λ_mag*|Δ| + R_succ*I[success]
+    Reward: λ_progress*(d_t - d_{t+1}) - λ_act*I[a≠0] - λ_mag*|Δ| + R_succ*I[success]
     Termination: ||z - centroid[g]|| < eps_success OR t >= T_max
     
     Success is terminal/absorbing: when success is reached, done=True immediately,
@@ -31,6 +31,7 @@ class LatentVelocityEnv:
         dt: float = 0.1,
         T_max: int = 100,
         eps_success: float = 0.1,
+        lambda_progress: float = 1.0,
         lambda_act: float = 0.01,
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
@@ -47,6 +48,7 @@ class LatentVelocityEnv:
         self.dt = dt
         self.T_max = T_max
         self.eps_success = eps_success
+        self.lambda_progress = lambda_progress
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
@@ -217,7 +219,7 @@ class LatentVelocityEnv:
         timeout = self.t >= self.T_max
         
         # Compute reward
-        progress = (d_t - d_tp1).item()
+        progress = self.lambda_progress * (d_t - d_tp1).item()
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
         success_bonus = self.R_succ if success else 0.0
@@ -263,6 +265,7 @@ class VectorizedLatentVelocityEnv:
         dt: float = 0.1,
         T_max: int = 100,
         eps_success: float = 0.1,
+        lambda_progress: float = 1.0,
         lambda_act: float = 0.01,
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
@@ -280,6 +283,7 @@ class VectorizedLatentVelocityEnv:
         self.dt = dt
         self.T_max = T_max
         self.eps_success = eps_success
+        self.lambda_progress = lambda_progress
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
@@ -463,7 +467,7 @@ class VectorizedLatentVelocityEnv:
         timeout = self.t >= self.T_max
         
         # Compute rewards
-        progress = (d_t - d_tp1) * active_mask.float()
+        progress = self.lambda_progress * (d_t - d_tp1) * active_mask.float()
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
         success_bonus = self.R_succ * success.float()
