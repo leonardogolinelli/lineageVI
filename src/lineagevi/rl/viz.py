@@ -2,7 +2,7 @@
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple, Literal, List
 import torch
 import numpy as np
 import scanpy as sc
@@ -479,13 +479,110 @@ def plot_interventions(
     print(f"Saved intervention schedule → {output_path}")
 
 
+def plot_intervention_summary(
+    actions: np.ndarray,
+    deltas: np.ndarray,
+    n_latent: int,
+    output_path: Path,
+    gp_names: Optional[List[str]] = None,
+):
+    """
+    Plot summary of interventions by gene program name.
+    
+    Parameters
+    ----------
+    actions : np.ndarray
+        Actions of shape (T,).
+    deltas : np.ndarray
+        Perturbation magnitudes of shape (T,).
+    n_latent : int
+        Number of latent dimensions.
+    output_path : Path
+        Output file path.
+    gp_names : list of str, optional
+        Gene program names. If None, uses GP_0, GP_1, etc.
+    """
+    # Count interventions per dimension
+    intervention_counts = np.zeros(n_latent)
+    intervention_magnitudes = np.zeros(n_latent)
+    
+    for t in range(len(actions)):
+        if actions[t] > 0:
+            dim = actions[t] - 1  # action 1 -> dim 0
+            intervention_counts[dim] += 1
+            intervention_magnitudes[dim] += abs(deltas[t])
+    
+    # Get indices of programs that were actually targeted
+    targeted_dims = np.where(intervention_counts > 0)[0]
+    
+    if len(targeted_dims) == 0:
+        # No interventions occurred
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.text(0.5, 0.5, 'No interventions occurred', 
+                ha='center', va='center', fontsize=14)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved intervention summary → {output_path}")
+        return
+    
+    # Create labels
+    if gp_names is not None and len(gp_names) == n_latent:
+        labels = [gp_names[dim] for dim in targeted_dims]
+    else:
+        labels = [f"GP_{dim}" for dim in targeted_dims]
+    
+    # Sort by frequency (descending)
+    sort_idx = np.argsort(intervention_counts[targeted_dims])[::-1]
+    targeted_dims_sorted = targeted_dims[sort_idx]
+    labels_sorted = [labels[i] for i in sort_idx]
+    counts_sorted = intervention_counts[targeted_dims_sorted]
+    magnitudes_sorted = intervention_magnitudes[targeted_dims_sorted]
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, max(6, len(targeted_dims) * 0.4)))
+    
+    # Plot 1: Intervention frequency
+    y_pos = np.arange(len(targeted_dims_sorted))
+    ax1.barh(y_pos, counts_sorted, color='steelblue', alpha=0.7)
+    ax1.set_yticks(y_pos)
+    ax1.set_yticklabels(labels_sorted, fontsize=10)
+    ax1.set_xlabel('Number of Interventions', fontsize=12)
+    ax1.set_title('Intervention Frequency by Gene Program', fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3, axis='x')
+    
+    # Add value labels on bars
+    for i, count in enumerate(counts_sorted):
+        ax1.text(count + 0.1, i, f'{int(count)}', va='center', fontsize=9)
+    
+    # Plot 2: Total magnitude
+    ax2.barh(y_pos, magnitudes_sorted, color='coral', alpha=0.7)
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels(labels_sorted, fontsize=10)
+    ax2.set_xlabel('Total Intervention Magnitude', fontsize=12)
+    ax2.set_title('Total Intervention Magnitude by Gene Program', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='x')
+    
+    # Add value labels on bars
+    for i, mag in enumerate(magnitudes_sorted):
+        ax2.text(mag + 0.01, i, f'{mag:.2f}', va='center', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved intervention summary → {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize RL agent trajectories")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to policy checkpoint")
     parser.add_argument("--model_path", type=str, required=True, help="Path to pretrained VAE model")
     parser.add_argument("--adata_path", type=str, required=True, help="Path to AnnData file")
     parser.add_argument("--lineage_key", type=str, required=True, help="Key in adata.obs for lineage labels")
-    parser.add_argument("--start_cell_idx", type=int, default=None, help="Start cell index (default: random)")
+    parser.add_argument("--start_cell_idx", type=int, default=None, help="Start cell index (mutually exclusive with --start_lineage)")
+    parser.add_argument("--start_lineage", type=str, default=None, help="Start lineage label (mutually exclusive with --start_cell_idx, default: random)")
     parser.add_argument("--target_goal", type=str, required=True, help="Target goal label")
     parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
                         help="Goal mode: 'centroid' or 'goal_cell'")
@@ -502,6 +599,10 @@ def main():
                         help="Intervention visualization method")
     
     args = parser.parse_args()
+    
+    # Validate mutually exclusive arguments
+    if args.start_cell_idx is not None and args.start_lineage is not None:
+        raise ValueError("--start_cell_idx and --start_lineage are mutually exclusive")
     
     # Set seed
     set_seed(args.seed)
@@ -576,13 +677,24 @@ def main():
         start_cell_idx = args.start_cell_idx
         if start_cell_idx >= n_cells:
             raise ValueError(f"start_cell_idx {start_cell_idx} >= n_cells {n_cells}")
+        start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
+        print(f"Using specified start cell: index {start_cell_idx}, lineage '{start_lineage}'")
+    elif args.start_lineage is not None:
+        # Sample random cell from specified lineage
+        start_mask = adata.obs[args.lineage_key] == args.start_lineage
+        start_indices = np.where(start_mask)[0]
+        if len(start_indices) == 0:
+            raise ValueError(f"No cells found with lineage '{args.start_lineage}'")
+        start_cell_idx = np.random.choice(start_indices)
+        start_lineage = args.start_lineage
+        print(f"Randomly selected start cell from lineage '{args.start_lineage}': index {start_cell_idx}")
     else:
+        # Random cell from any lineage
         start_cell_idx = np.random.randint(0, n_cells)
-        print(f"Randomly selected start cell index: {start_cell_idx}")
+        start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
+        print(f"Randomly selected start cell: index {start_cell_idx}, lineage '{start_lineage}'")
     
     z0 = z_all[start_cell_idx]  # (n_latent,)
-    start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
-    print(f"Start cell: index {start_cell_idx}, lineage '{start_lineage}'")
     
     # Get goal
     if args.goal_mode == "centroid":
@@ -604,13 +716,18 @@ def main():
     embedding, transformer = build_embedding(Z_all, method=args.embedding)
     print(f"Embedding shape: {embedding.shape}")
     
+    # Get T_max from config (should match training)
+    T_max_viz = env_config.get("T_max", 100)
+    # Ensure T_max is at least as large as requested rollout horizon
+    T_max_viz = max(T_max_viz, args.T)
+    
     # Create environment
     env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
         goal_names=goal_labels,
         dt=env_config.get("dt", 0.1),
-        T_max=env_config.get("T_max", 100),
+        T_max=T_max_viz,
         eps_success=env_config.get("eps_success", 0.1),
         lambda_progress=env_config.get("lambda_progress", 1.0),
         lambda_act=env_config.get("lambda_act", 0.01),
@@ -699,6 +816,22 @@ def main():
         adapter.n_latent,
         outdir / "interventions.png",
         method=args.intervention_method,
+    )
+    
+    # Plot D: Intervention summary with gene program names
+    gp_names = None
+    if "terms" in adata.uns and len(adata.uns["terms"]) == adapter.n_latent:
+        gp_names = adata.uns["terms"]
+        print(f"Found gene program names in adata.uns['terms']")
+    else:
+        print(f"Gene program names not found in adata.uns['terms'], using GP_0, GP_1, etc.")
+    
+    plot_intervention_summary(
+        actions,
+        deltas,
+        adapter.n_latent,
+        outdir / "intervention_summary.png",
+        gp_names=gp_names,
     )
     
     # Save raw arrays

@@ -27,6 +27,7 @@ from .viz import (
     plot_trajectory_overlay,
     plot_distance_curves,
     plot_interventions,
+    plot_intervention_summary,
 )
 
 
@@ -394,13 +395,18 @@ def generate_example_visualizations(
     embedding, transformer = build_embedding(Z_all, method=embedding_method)
     print(f"Embedding shape: {embedding.shape}")
     
+    # Get T_max from env_config (should match training)
+    T_max_viz = env_config.get("T_max", 100)
+    # Ensure T_max is at least as large as T_rollout
+    T_max_viz = max(T_max_viz, T_rollout)
+    
     # Create single environment for visualization
     single_env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
         goal_names=goal_labels,
         dt=env_config.get("dt", 0.1),
-        T_max=env_config.get("T_max", 100),
+        T_max=T_max_viz,
         eps_success=env_config.get("eps_success", 0.1),
         lambda_progress=lambda_progress,
         lambda_act=lambda_act,
@@ -494,6 +500,19 @@ def generate_example_visualizations(
             method="heatmap",
         )
         
+        # Plot D: Intervention summary with gene program names
+        gp_names = None
+        if "terms" in adata.uns and len(adata.uns["terms"]) == adapter.n_latent:
+            gp_names = adata.uns["terms"]
+        
+        plot_intervention_summary(
+            actions,
+            deltas,
+            adapter.n_latent,
+            viz_dir / f"{example_prefix}_intervention_summary.png",
+            gp_names=gp_names,
+        )
+        
         # Save raw arrays
         np.savez(
             viz_dir / f"{example_prefix}_trajectory.npz",
@@ -579,6 +598,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=None, help="PPO inner epochs per iteration (overrides config)")
     parser.add_argument("--batch_size", type=int, default=None, help="Environment batch size (overrides config)")
     parser.add_argument("--T_rollout", type=int, default=None, help="Rollout horizon (overrides config)")
+    parser.add_argument("--T_max", type=int, default=None, help="Maximum episode length (overrides config, should be >= T_rollout)")
     parser.add_argument("--minibatch_size", type=int, default=None, help="Minibatch size for PPO updates (overrides config)")
     parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
@@ -587,6 +607,7 @@ def main():
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
     parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
+    parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
     parser.add_argument("--skip_viz", action="store_true", help="Skip trajectory visualization after training")
@@ -684,13 +705,18 @@ def main():
     lambda_mag = args.lambda_mag if args.lambda_mag is not None else env_config.get("lambda_mag", 0.1)
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     
+    # Get T_max and T_rollout, ensure T_max >= T_rollout
+    T_rollout_for_env = args.T_rollout if args.T_rollout is not None else training_config.get("T_rollout", 50)
+    T_max_env = args.T_max if args.T_max is not None else env_config.get("T_max", 100)
+    T_max_env = max(T_max_env, T_rollout_for_env)  # Ensure T_max is at least as large as T_rollout
+    
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
         goal_names=goal_labels,
         batch_size=batch_size,
         dt=dt,
-        T_max=env_config.get("T_max", 100),
+        T_max=T_max_env,
         eps_success=env_config.get("eps_success", 0.1),
         lambda_progress=lambda_progress,
         lambda_act=lambda_act,
@@ -715,11 +741,14 @@ def main():
     ).to(device)
     print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}")
     
+    # Get PPO hyperparameters (CLI overrides config)
+    gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)
+    
     # Create trainer
     trainer = PPOTrainer(
         policy=policy,
         env=env,
-        gamma=ppo_config.get("gamma", 0.99),
+        gamma=gamma,
         gae_lambda=ppo_config.get("gae_lambda", 0.95),
         clip_eps=ppo_config.get("clip_eps", 0.2),
         target_kl=ppo_config.get("target_kl", 0.01),
@@ -769,6 +798,9 @@ def main():
     # Training loop
     n_iterations = args.n_iterations if args.n_iterations is not None else training_config.get("n_iterations", 1000)
     T_rollout = args.T_rollout if args.T_rollout is not None else training_config.get("T_rollout", 50)
+    T_max = args.T_max if args.T_max is not None else env_config.get("T_max", 100)
+    # Ensure T_max is at least as large as T_rollout
+    T_max = max(T_max, T_rollout)
     save_freq = args.save_freq if args.save_freq is not None else training_config.get("save_freq", 100)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -888,12 +920,18 @@ def main():
         
         # Save checkpoint
         if (iteration + 1) % save_freq == 0 or iteration == n_iterations - 1:
+            # Update env config with actual T_max used
+            config_copy = config.copy()
+            if "env" not in config_copy:
+                config_copy["env"] = {}
+            config_copy["env"]["T_max"] = T_max_env
+            
             save_config = {
                 "obs_dim": obs_dim,
                 "n_latent": n_latent,
                 "hidden_sizes": hidden_sizes,
                 "delta_max": delta_max,
-                **config,
+                **config_copy,
             }
             save_policy_checkpoint(
                 policy,

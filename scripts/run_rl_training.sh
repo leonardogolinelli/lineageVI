@@ -20,14 +20,16 @@ USE_NEGATIVE_VELOCITY=""
 N_ITERATIONS="200"
 EPOCHS="3"
 BATCH_SIZE="128"
-T_ROLLOUT="64"
-MINIBATCH_SIZE="2048"
+T_ROLLOUT="256"
+T_MAX="256"
+MINIBATCH_SIZE="4096"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="3.0" # default is 1.0
+LAMBDA_PROGRESS="2.0" # default is 1.0
 LAMBDA_ACT="" # default is 0.02
 LAMBDA_MAG="" # default is 0.15
 R_SUCC="" # default is 20.0
+GAMMA="" # default is 0.99
 N_VIZ_TRAJECTORIES="3"
 VIZ_EMBEDDING="pca"
 SKIP_VIZ=""
@@ -106,6 +108,10 @@ while [[ $# -gt 0 ]]; do
             T_ROLLOUT="$2"
             shift 2
             ;;
+        --T_max)
+            T_MAX="$2"
+            shift 2
+            ;;
         --minibatch_size)
             MINIBATCH_SIZE="$2"
             shift 2
@@ -180,6 +186,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --lambda_act FLOAT        Action penalty coefficient (overrides config)"
             echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
+            echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo ""
             echo "VISUALIZATION PARAMETERS:"
             echo "  --n_viz_trajectories N     Number of example trajectories to visualize (default: 3)"
@@ -336,6 +343,9 @@ fi
 if [[ -n "$T_ROLLOUT" ]]; then
     PYTHON_ARGS+=(--T_rollout "$T_ROLLOUT")
 fi
+if [[ -n "$T_MAX" ]]; then
+    PYTHON_ARGS+=(--T_max "$T_MAX")
+fi
 if [[ -n "$MINIBATCH_SIZE" ]]; then
     PYTHON_ARGS+=(--minibatch_size "$MINIBATCH_SIZE")
 fi
@@ -359,6 +369,9 @@ if [[ -n "$LAMBDA_MAG" ]]; then
 fi
 if [[ -n "$R_SUCC" ]]; then
     PYTHON_ARGS+=(--R_succ "$R_SUCC")
+fi
+if [[ -n "$GAMMA" ]]; then
+    PYTHON_ARGS+=(--gamma "$GAMMA")
 fi
 if [[ -n "$N_VIZ_TRAJECTORIES" ]]; then
     PYTHON_ARGS+=(--n_viz_trajectories "$N_VIZ_TRAJECTORIES")
