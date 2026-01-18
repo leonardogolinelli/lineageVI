@@ -16,6 +16,7 @@ GOAL_ALLOWED=()
 GOAL_EXCLUDE=()
 GOAL_MIN_CELLS=1
 FIXED_GOAL=""
+USE_NEGATIVE_VELOCITY=""
 N_ITERATIONS="200"
 EPOCHS="3"
 BATCH_SIZE="128"
@@ -105,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             SAVE_FREQ="$2"
             shift 2
             ;;
+        --use_negative_velocity)
+            USE_NEGATIVE_VELOCITY="--use_negative_velocity"
+            shift
+            ;;
         --conda_env)
             CONDA_ENV="$2"
             shift 2
@@ -127,6 +132,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --goal_exclude LABEL ...   Excluded goal labels"
             echo "  --goal_min_cells N         Minimum cells per goal lineage (default: 1)"
             echo "  --fixed_goal LABEL         Fixed goal label for all episodes (optional)"
+            echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo ""
             echo "TRAINING PARAMETERS (override config):"
             echo "  --n_iterations N         Total training iterations (overrides config)"
@@ -283,6 +289,9 @@ if [[ -n "$MINIBATCH_SIZE" ]]; then
 fi
 if [[ -n "$SAVE_FREQ" ]]; then
     PYTHON_ARGS+=(--save_freq "$SAVE_FREQ")
+fi
+if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
+    PYTHON_ARGS+=(--use_negative_velocity)
 fi
 
 # Run the RL training script

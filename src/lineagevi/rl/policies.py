@@ -59,6 +59,35 @@ class ActorCriticPolicy(nn.Module):
         
         # Value head
         self.value_head = nn.Linear(trunk_output_dim, 1)
+        
+        # Log-std clamping constants
+        self.LOG_STD_MIN = -5.0
+        self.LOG_STD_MAX = 2.0
+    
+    def _get_magnitude_params(
+        self,
+        obs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Shared helper to get clamped magnitude parameters.
+        
+        Parameters
+        ----------
+        obs : torch.Tensor
+            Observations of shape (batch_size, obs_dim).
+        
+        Returns
+        -------
+        magnitude_mu : torch.Tensor
+            Magnitude means of shape (batch_size, n_latent).
+        magnitude_std : torch.Tensor
+            Magnitude stddevs (from clamped log_std) of shape (batch_size, n_latent).
+        """
+        _, magnitude_mu, magnitude_logstd, _ = self.forward(obs)
+        # Clamp log_std to prevent sigma collapse and KL blowups
+        magnitude_logstd_clamped = torch.clamp(magnitude_logstd, self.LOG_STD_MIN, self.LOG_STD_MAX)
+        magnitude_std = torch.exp(magnitude_logstd_clamped)
+        return magnitude_mu, magnitude_std
     
     def forward(
         self,
@@ -127,8 +156,8 @@ class ActorCriticPolicy(nn.Module):
             action_dist = dist.Categorical(logits=action_logits)
             action = action_dist.sample()  # (B,)
         
-        # Sample magnitude (only used if action > 0)
-        magnitude_std = torch.exp(magnitude_logstd.clamp(min=-10, max=2))  # (B, n_latent)
+        # Sample magnitude (only used if action > 0) - use clamped params
+        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
         magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
         raw_delta = magnitude_dist.sample()  # (B, n_latent)
         
@@ -188,10 +217,10 @@ class ActorCriticPolicy(nn.Module):
         action_mask = (action > 0).float()  # (B,)
         action_indices = (action - 1).clamp(min=0, max=self.n_latent - 1)  # (B,)
         
-        # Get μ and σ for chosen action
+        # Get μ and σ for chosen action - use clamped params
+        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
         mu_selected = magnitude_mu[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
-        logstd_selected = magnitude_logstd[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
-        std_selected = torch.exp(logstd_selected.clamp(min=-10, max=2))  # (B,)
+        std_selected = magnitude_std[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
         
         # Gaussian log prob of raw_delta
         magnitude_dist = dist.Normal(mu_selected, std_selected)
@@ -201,7 +230,7 @@ class ActorCriticPolicy(nn.Module):
         # delta = delta_max * tanh(raw_delta)
         # d/delta_max * tanh = delta_max * (1 - tanh^2)
         tanh_raw = torch.tanh(raw_delta)
-        log_det_jacobian = torch.log(self.delta_max * (1 - tanh_raw**2) + 1e-8)  # (B,)
+        log_det_jacobian = torch.log(self.delta_max * (1 - tanh_raw**2) + 1e-6)  # (B,) - epsilon for numerical stability
         
         log_prob_mag = log_prob_mag_raw - log_det_jacobian  # (B,) - correct change of variables
         
@@ -230,8 +259,8 @@ class ActorCriticPolicy(nn.Module):
         action_dist = dist.Categorical(logits=action_logits)
         entropy_cat = action_dist.entropy()  # (B,)
         
-        # Magnitude entropy (weighted by action probs)
-        magnitude_std = torch.exp(magnitude_logstd.clamp(min=-10, max=2))  # (B, n_latent)
+        # Magnitude entropy (weighted by action probs) - use clamped params
+        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
         magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
         entropy_mag_per_dim = magnitude_dist.entropy()  # (B, n_latent)
         

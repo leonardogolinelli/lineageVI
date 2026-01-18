@@ -171,6 +171,12 @@ class PPOTrainer:
                 next_value_t = next_value * (~done_t).float()
             next_value_batch[t] = next_value_t
         
+        # Extract z_t from obs for task metrics
+        # obs shape: (T, B, obs_dim) where obs_dim = n_latent + goal_emb_dim + 1
+        # z_t is the first n_latent dimensions
+        n_latent = self.env.n_latent
+        z_batch = obs_batch[:, :, :n_latent]  # (T, B, n_latent)
+        
         batch = {
             "obs": obs_batch,
             "action": action_batch,
@@ -181,9 +187,121 @@ class PPOTrainer:
             "log_prob": log_prob_batch,
             "value": value_batch,
             "next_value": next_value_batch,
+            "z": z_batch,  # (T, B, n_latent) - latent states for task metrics
+            "goal_idx": goal_idx,  # (B,) - goal indices for each episode
         }
         
         return batch
+    
+    def compute_task_metrics(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> Dict[str, float]:
+        """
+        Compute task-level evaluation metrics from rollout batch.
+        
+        Metrics:
+        - success_rate: fraction of episodes that reach distance < eps_success at any step
+        - mean_final_distance: mean distance at last timestep
+        - mean_best_distance: mean of minimum distance achieved per episode
+        - mean_distance_improvement: E[d_0 - d_T] (expected improvement from start to end)
+        - best_improvement: E[d_0 - min_t d_t] (expected improvement from start to best)
+        - L0_interventions: mean number of timesteps with action != 0 per episode
+        - L1_magnitude: mean sum of abs(delta) per episode
+        - noop_fraction: fraction of all steps with action == 0
+        - mean_episode_return: mean sum of rewards per episode
+        
+        Parameters
+        ----------
+        batch : dict
+            Batch from collect_rollouts, must contain:
+            - z: (T, B, n_latent) latent states
+            - goal_idx: (B,) goal indices
+            - action: (T, B) discrete actions
+            - delta: (T, B) continuous magnitudes
+            - reward: (T, B) rewards
+            - done: (T, B) done flags
+        
+        Returns
+        -------
+        metrics : dict
+            Dictionary of task metrics.
+        """
+        z = batch["z"]  # (T, B, n_latent)
+        goal_idx = batch["goal_idx"]  # (B,)
+        action = batch["action"]  # (T, B)
+        delta = batch["delta"]  # (T, B)
+        reward = batch["reward"]  # (T, B)
+        done = batch["done"]  # (T, B)
+        
+        T, B = z.shape[:2]
+        centroids = self.env.centroids  # (n_goals, n_latent)
+        eps_success = self.env.eps_success
+        
+        # Get centroids for each batch element: (B, n_latent)
+        centroids_batch = centroids[goal_idx]  # (B, n_latent)
+        
+        # Compute distances: ||z[t,b] - centroid[goal_idx[b]]||_2
+        # z: (T, B, n_latent), centroids_batch: (B, n_latent)
+        # Expand centroids_batch to (T, B, n_latent) for broadcasting
+        centroids_expanded = centroids_batch.unsqueeze(0).expand(T, -1, -1)  # (T, B, n_latent)
+        distances = torch.norm(z - centroids_expanded, p=2, dim=2)  # (T, B)
+        
+        # success[t,b] = dist[t,b] < eps_success
+        success = distances < eps_success  # (T, B)
+        
+        # success_rate: fraction of episodes that reach success at any step
+        success_per_episode = success.any(dim=0)  # (B,) - True if episode succeeded at any step
+        success_rate = success_per_episode.float().mean().item()
+        
+        # Initial distances (d_0)
+        initial_distances = distances[0]  # (B,)
+        
+        # mean_final_distance: mean distance at last timestep
+        final_distances = distances[-1]  # (B,)
+        mean_final_distance = final_distances.mean().item()
+        
+        # mean_best_distance: mean of minimum distance achieved per episode
+        best_distances = distances.min(dim=0)[0]  # (B,) - min over time for each episode
+        mean_best_distance = best_distances.mean().item()
+        
+        # mean_distance_improvement: E[d_0 - d_T] (expected improvement from start to end)
+        distance_improvements = initial_distances - final_distances  # (B,)
+        mean_distance_improvement = distance_improvements.mean().item()
+        
+        # best_improvement: E[d_0 - min_t d_t] (expected improvement from start to best)
+        best_improvements = initial_distances - best_distances  # (B,)
+        best_improvement = best_improvements.mean().item()
+        
+        # L0_interventions: mean number of timesteps with action != 0 per episode
+        interventions = (action != 0).long()  # (T, B) - 1 if intervention, 0 if no-op
+        L0_per_episode = interventions.sum(dim=0).float()  # (B,) - count per episode
+        L0_interventions = L0_per_episode.mean().item()
+        
+        # L1_magnitude: mean sum of abs(delta) per episode
+        L1_per_episode = delta.abs().sum(dim=0)  # (B,) - sum of |delta| per episode
+        L1_magnitude = L1_per_episode.mean().item()
+        
+        # noop_fraction: fraction of all steps with action == 0
+        noop_count = (action == 0).long().sum().item()  # Total no-op steps
+        total_steps = T * B
+        noop_fraction = noop_count / total_steps if total_steps > 0 else 0.0
+        
+        # mean_episode_return: mean sum of rewards per episode
+        episode_returns = reward.sum(dim=0)  # (B,) - sum of rewards per episode
+        mean_episode_return = episode_returns.mean().item()
+        
+        return {
+            "success_rate": success_rate,
+            "mean_final_distance": mean_final_distance,
+            "mean_best_distance": mean_best_distance,
+            "mean_distance_improvement": mean_distance_improvement,
+            "best_improvement": best_improvement,
+            "L0_interventions": L0_interventions,
+            "L1_magnitude": L1_magnitude,
+            "noop_fraction": noop_fraction,
+            "mean_episode_return": mean_episode_return,
+        }
     
     def compute_gae(
         self,

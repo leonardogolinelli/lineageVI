@@ -203,6 +203,110 @@ def plot_training_curves(
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         plt.close()
         print(f"Saved step norms plot → {plot_path}")
+    
+    # Plot 4: Task metrics
+    task_metric_keys = ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return"]
+    if any(key in metrics_history for key in task_metric_keys):
+        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+        fig.suptitle("Task-Level Evaluation Metrics", fontsize=16)
+        
+        # Success rate
+        ax = axes[0, 0]
+        if "success_rate" in metrics_history:
+            ax.plot(metrics_history["success_rate"], label="Success Rate", alpha=0.7, color="green", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Success Rate")
+        ax.set_title("Success Rate")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 1])
+        
+        # Mean final distance
+        ax = axes[0, 1]
+        if "mean_final_distance" in metrics_history:
+            ax.plot(metrics_history["mean_final_distance"], label="Final Distance", alpha=0.7, color="blue", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Distance")
+        ax.set_title("Mean Final Distance")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Mean best distance
+        ax = axes[0, 2]
+        if "mean_best_distance" in metrics_history:
+            ax.plot(metrics_history["mean_best_distance"], label="Best Distance", alpha=0.7, color="cyan", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Distance")
+        ax.set_title("Mean Best Distance")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Mean distance improvement
+        ax = axes[1, 0]
+        if "mean_distance_improvement" in metrics_history:
+            ax.plot(metrics_history["mean_distance_improvement"], label="Distance Improvement", alpha=0.7, color="teal", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Improvement")
+        ax.set_title("Mean Distance Improvement\nE[d₀ - d_T]")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Best improvement
+        ax = axes[1, 1]
+        if "best_improvement" in metrics_history:
+            ax.plot(metrics_history["best_improvement"], label="Best Improvement", alpha=0.7, color="darkgreen", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Improvement")
+        ax.set_title("Best Improvement\nE[d₀ - min_t d_t]")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # L0 interventions
+        ax = axes[1, 2]
+        if "L0_interventions" in metrics_history:
+            ax.plot(metrics_history["L0_interventions"], label="L0 Interventions", alpha=0.7, color="orange", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Count")
+        ax.set_title("L0 Interventions (per episode)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # L1 magnitude
+        ax = axes[2, 0]
+        if "L1_magnitude" in metrics_history:
+            ax.plot(metrics_history["L1_magnitude"], label="L1 Magnitude", alpha=0.7, color="red", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Magnitude")
+        ax.set_title("L1 Magnitude (per episode)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # No-op fraction
+        ax = axes[2, 1]
+        if "noop_fraction" in metrics_history:
+            ax.plot(metrics_history["noop_fraction"], label="No-Op Fraction", alpha=0.7, color="purple", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Fraction")
+        ax.set_title("No-Op Fraction")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 1])
+        
+        # Mean episode return
+        ax = axes[2, 2]
+        if "mean_episode_return" in metrics_history:
+            ax.plot(metrics_history["mean_episode_return"], label="Episode Return", alpha=0.7, color="brown", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Return")
+        ax.set_title("Mean Episode Return")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_path = plots_dir / "task_metrics.png"
+        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved task metrics plot → {plot_path}")
 
 
 def load_config(config_path: Optional[str]) -> dict:
@@ -221,6 +325,7 @@ def load_config(config_path: Optional[str]) -> dict:
                 "lambda_mag": 0.1,
                 "R_succ": 10.0,
                 "velocity_mode": "decode_x",
+                "use_negative_velocity": False,
             },
             "ppo": {
                 "gamma": 0.99,
@@ -229,7 +334,7 @@ def load_config(config_path: Optional[str]) -> dict:
                 "target_kl": 0.01,
                 "vf_coef": 0.5,
                 "ent_coef": 0.01,
-                "lr": 3e-4,
+                "lr": 3e-4,  # Learning rate. If KL spikes persist, consider reducing to 1e-4 or lower.
                 "max_grad_norm": 0.5,
             },
             "policy": {
@@ -268,6 +373,7 @@ def main():
     parser.add_argument("--T_rollout", type=int, default=None, help="Rollout horizon (overrides config)")
     parser.add_argument("--minibatch_size", type=int, default=None, help="Minibatch size for PPO updates (overrides config)")
     parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
+    parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
     
     args = parser.parse_args()
     
@@ -354,6 +460,9 @@ def main():
     # Create environment (cluster/process indices now passed per-reset, not in constructor)
     batch_size = args.batch_size if args.batch_size is not None else training_config.get("batch_size", 64)
     dt = env_config.get("dt", 0.1)
+    # Get use_negative_velocity from CLI or config
+    use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
+    
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -365,8 +474,9 @@ def main():
         lambda_act=env_config.get("lambda_act", 0.01),
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),
+        use_negative_velocity=use_negative_velocity,
     )
-    print(f"Created environment with batch_size={batch_size}, dt={dt}")
+    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
     
     # Create policy
     obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
@@ -450,6 +560,16 @@ def main():
         "entropy": [],
         "kl": [],
         "clip_fraction": [],
+        # Task metrics
+        "success_rate": [],
+        "mean_final_distance": [],
+        "mean_best_distance": [],
+        "mean_distance_improvement": [],
+        "best_improvement": [],
+        "L0_interventions": [],
+        "L1_magnitude": [],
+        "noop_fraction": [],
+        "mean_episode_return": [],
     }
     step_norms_history = {
         "velocity_magnitude": [],
@@ -497,6 +617,9 @@ def main():
         # Collect rollouts
         batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch)
         
+        # Compute task metrics
+        task_metrics = trainer.compute_task_metrics(batch)
+        
         # Update policy
         metrics = trainer.update(
             batch,
@@ -504,10 +627,13 @@ def main():
             minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
         )
         
+        # Merge PPO metrics and task metrics
+        all_metrics = {**metrics, **task_metrics}
+        
         # Store metrics for plotting
         for k in metrics_history.keys():
-            if k in metrics:
-                metrics_history[k].append(metrics[k])
+            if k in all_metrics:
+                metrics_history[k].append(all_metrics[k])
         
         # Store step norms (average over last batch)
         if env.step_norms["velocity_magnitude"]:
@@ -523,8 +649,14 @@ def main():
         # Log metrics
         if iteration % 10 == 0:
             print(f"\nIteration {iteration} (dt={dt}):")
-            for k, v in metrics.items():
-                print(f"  {k}: {v:.4f}")
+            print("  PPO metrics:")
+            for k in ["policy_loss", "value_loss", "entropy", "kl", "clip_fraction"]:
+                if k in all_metrics:
+                    print(f"    {k}: {all_metrics[k]:.4f}")
+            print("  Task metrics:")
+            for k in ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return"]:
+                if k in all_metrics:
+                    print(f"    {k}: {all_metrics[k]:.4f}")
             # Log step norms from environment
             if env.step_norms["velocity_magnitude"]:
                 print(f"  avg_velocity_norm: {np.mean(env.step_norms['velocity_magnitude'][-10:]):.4f}")

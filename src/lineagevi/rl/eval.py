@@ -113,6 +113,7 @@ def main():
     parser.add_argument("--max_steps", type=int, default=200, help="Maximum steps per episode")
     parser.add_argument("--target_goal", type=str, default=None, help="Single target goal label (optional)")
     parser.add_argument("--target_goals", type=str, nargs="*", default=None, help="Multiple target goal labels (optional)")
+    parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity (overrides config)")
     
     args = parser.parse_args()
     
@@ -155,6 +156,9 @@ def main():
     env_config = config.get("env", {})
     velocity_mode = env_config.get("velocity_mode", "decode_x")
     
+    # Get use_negative_velocity from CLI or config
+    use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
+    
     # Create adapter
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode=velocity_mode)
     
@@ -184,7 +188,9 @@ def main():
         lambda_act=env_config.get("lambda_act", 0.01),
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),
+        use_negative_velocity=use_negative_velocity,
     )
+    print(f"Created environment with use_negative_velocity={use_negative_velocity}")
     
     # Get latent states
     z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)  # (n_cells, n_latent)

@@ -37,6 +37,7 @@ class LatentVelocityEnv:
         goal_emb_dim: Optional[int] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
+        use_negative_velocity: bool = False,
     ):
         self.adapter = adapter
         self.centroids = centroids.to(adapter.device)  # (n_goals, n_latent)
@@ -49,6 +50,7 @@ class LatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.use_negative_velocity = use_negative_velocity
         
         # Goal encoding: one-hot if goal_emb_dim is None, else learned embedding
         self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
@@ -192,6 +194,10 @@ class LatentVelocityEnv:
             process_indices=self.process_indices,
         ).squeeze(0)  # (n_latent,)
         
+        # Apply negative velocity if requested
+        if self.use_negative_velocity:
+            v = -v
+        
         # Update state: z_next = z_tilde + dt * v
         z_old = self.z  # Save before update for state_change logging
         z_next = z_tilde + self.dt * v
@@ -263,6 +269,7 @@ class VectorizedLatentVelocityEnv:
         goal_emb_dim: Optional[int] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
+        use_negative_velocity: bool = False,
     ):
         self.adapter = adapter
         self.centroids = centroids.to(adapter.device)
@@ -276,6 +283,7 @@ class VectorizedLatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.use_negative_velocity = use_negative_velocity
         
         self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
         self.use_learned_goal_emb = goal_emb_dim is not None
@@ -430,6 +438,10 @@ class VectorizedLatentVelocityEnv:
             cluster_indices=self.cluster_idx,
             process_indices=self.process_idx,
         )  # (B, n_latent)
+        
+        # Apply negative velocity if requested
+        if self.use_negative_velocity:
+            v = -v
         
         # Update states: z_next = z_tilde + dt * v
         z_next = z_tilde + self.dt * v
