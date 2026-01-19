@@ -292,6 +292,11 @@ def rollout_agent(
                     delta = magnitude_mu[0].item()  # Use mean directly (deterministic)
                 else:
                     delta = 0.0
+                
+                # Clip magnitude if configured
+                delta_clip = getattr(policy, "delta_clip", None)
+                if delta_clip is not None:
+                    delta = float(np.clip(delta, -delta_clip, delta_clip))
             else:
                 action, delta_tensor, _, _ = policy.sample(obs_tensor.unsqueeze(0), deterministic=False)
                 action = action.item()

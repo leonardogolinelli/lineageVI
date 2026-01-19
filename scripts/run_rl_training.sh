@@ -3,6 +3,12 @@
 
 set -e  # Exit on error
 
+
+# Architecture parameters
+HIDDEN_SIZES="128, 128" # default is 128,128
+ACTIVATION="" # default is relu
+DELTA_CLIP="" # default is none
+
 # Default values
 CONDA_ENV="test3"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
@@ -12,33 +18,35 @@ CONFIG_FILE=""
 SEED=42
 DEVICE="auto"
 Z_KEY="mean"
-SOURCE_LINEAGE="5"
+SOURCE_LINEAGE="1"
 TARGET_LINEAGE="1"
 SOURCE_MODE="centroid"  # "centroid" or "sample"
 TARGET_MODE="centroid"  # "centroid" or "goal_cell"
 USE_NEGATIVE_VELOCITY=""
 DETERMINISTIC=""
+DEACTIVATE_VELOCITY=""
 N_ITERATIONS="200"
 EPOCHS="2"
 BATCH_SIZE="256"
-T_ROLLOUT="32"
-T_MAX="32"
+T_ROLLOUT="100"
+T_MAX="100"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="100.0" # default is 1.0
+LAMBDA_PROGRESS="0.1" # default is 1.0
 LAMBDA_ACT="0" # default is 0.02
 LAMBDA_MAG="0" # default is 0.15
 R_SUCC="1000" # default is 20.0
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
-GAMMA="0" # default is 0.99
-ENT_COEF="100.0" # default is 0.01
+GAMMA="0.99" # default is 0.99
+ENT_COEF="1"
 GMM_PATH=""
 GMM_COMPONENTS="32"
 LAMBDA_OFF="0"
 N_VIZ_TRAJECTORIES="10"
 VIZ_EMBEDDING="pca"
 SKIP_VIZ=""
+
 
 
 # Parse command-line arguments
@@ -124,6 +132,10 @@ while [[ $# -gt 0 ]]; do
             DETERMINISTIC="--deterministic"
             shift
             ;;
+        --deactivate_velocity)
+            DEACTIVATE_VELOCITY="--deactivate_velocity"
+            shift
+            ;;
         --dt)
             DT="$2"
             shift 2
@@ -164,6 +176,18 @@ while [[ $# -gt 0 ]]; do
             SKIP_VIZ="--skip_viz"
             shift
             ;;
+        --hidden_sizes)
+            HIDDEN_SIZES="$2"
+            shift 2
+            ;;
+        --activation)
+            ACTIVATION="$2"
+            shift 2
+            ;;
+        --delta_clip)
+            DELTA_CLIP="$2"
+            shift 2
+            ;;
         --conda_env)
             CONDA_ENV="$2"
             shift 2
@@ -188,6 +212,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --target_mode MODE         Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
+            echo "  --deactivate_velocity       Deactivate velocity effect on next state (default: velocity affects state)"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
             echo "  --dt FLOAT                Time step size (overrides config)"
@@ -208,6 +233,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --n_viz_trajectories N     Number of example trajectories to visualize (default: 3)"
             echo "  --viz_embedding METHOD     Embedding method: 'pca' or 'umap' (default: pca)"
             echo "  --skip_viz                Skip trajectory visualization after training"
+            echo ""
+            echo "ARCHITECTURE PARAMETERS:"
+            echo "  --hidden_sizes LIST        Comma-separated hidden sizes (default: 128,128)"
+            echo "  --activation NAME          Activation function: relu or tanh (default: relu)"
+            echo "  --delta_clip FLOAT         Clip magnitude to [-x, x] (default: none)"
             echo ""
             echo "TRAINING PARAMETERS (override config):"
             echo "  --n_iterations N         Total training iterations (overrides config)"
@@ -348,6 +378,9 @@ fi
 if [[ -n "$DETERMINISTIC" ]]; then
     PYTHON_ARGS+=("$DETERMINISTIC")
 fi
+if [[ -n "$DEACTIVATE_VELOCITY" ]]; then
+    PYTHON_ARGS+=("$DEACTIVATE_VELOCITY")
+fi
 
 # Add training parameters (override config if provided)
 if [[ -n "$N_ITERATIONS" ]]; then
@@ -416,6 +449,15 @@ fi
 if [[ -n "$SKIP_VIZ" ]]; then
     PYTHON_ARGS+=(--skip_viz)
 fi
+if [[ -n "$HIDDEN_SIZES" ]]; then
+    PYTHON_ARGS+=(--hidden_sizes "$HIDDEN_SIZES")
+fi
+if [[ -n "$ACTIVATION" ]]; then
+    PYTHON_ARGS+=(--activation "$ACTIVATION")
+fi
+if [[ -n "$DELTA_CLIP" ]]; then
+    PYTHON_ARGS+=(--delta_clip "$DELTA_CLIP")
+fi
 
 # Run the RL training script
 echo "Running RL training script..."
@@ -424,5 +466,5 @@ python -m lineagevi.rl.train "${PYTHON_ARGS[@]}"
 echo ""
 echo "=========================================="
 echo "RL training completed successfully!"
-echo "Output directory: $OUTPUT_DIR"
+echo "Output directory: ${OUTPUT_DIR}"
 echo "=========================================="

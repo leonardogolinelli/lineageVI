@@ -41,6 +41,7 @@ class LatentVelocityEnv:
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
+        deactivate_velocity: bool = False,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -58,6 +59,7 @@ class LatentVelocityEnv:
         self.R_succ = R_succ
         self.alpha_stay = alpha_stay
         self.use_negative_velocity = use_negative_velocity
+        self.deactivate_velocity = deactivate_velocity
         self.lambda_off = lambda_off
         
         # Initialize GMM scorer if lambda_off > 0
@@ -210,20 +212,26 @@ class LatentVelocityEnv:
         
         z_tilde = self.z + u
         
-        # Compute velocity
-        v = self.adapter.velocity(
-            z_tilde.unsqueeze(0),
-            cluster_indices=self.cluster_indices,
-            process_indices=self.process_indices,
-        ).squeeze(0)  # (n_latent,)
+        # Compute velocity only if not deactivated
+        if self.deactivate_velocity:
+            v = torch.zeros(self.n_latent, device=self.adapter.device)
+        else:
+            v = self.adapter.velocity(
+                z_tilde.unsqueeze(0),
+                cluster_indices=self.cluster_indices,
+                process_indices=self.process_indices,
+            ).squeeze(0)  # (n_latent,)
+            
+            # Apply negative velocity if requested
+            if self.use_negative_velocity:
+                v = -v
         
-        # Apply negative velocity if requested
-        if self.use_negative_velocity:
-            v = -v
-        
-        # Update state: z_next = z_tilde + dt * v
+        # Update state: z_next = z_tilde + dt * v (or just z_tilde if velocity is deactivated)
         z_old = self.z  # Save before update for state_change logging
-        z_next = z_tilde + self.dt * v
+        if self.deactivate_velocity:
+            z_next = z_tilde  # Skip velocity update
+        else:
+            z_next = z_tilde + self.dt * v
         
         # Compute distances (linear, not squared)
         if self.goal_state is not None:
@@ -318,6 +326,7 @@ class VectorizedLatentVelocityEnv:
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
+        deactivate_velocity: bool = False,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -336,6 +345,7 @@ class VectorizedLatentVelocityEnv:
         self.R_succ = R_succ
         self.alpha_stay = alpha_stay
         self.use_negative_velocity = use_negative_velocity
+        self.deactivate_velocity = deactivate_velocity
         self.lambda_off = lambda_off
         
         # Initialize GMM scorer if lambda_off > 0
@@ -498,19 +508,25 @@ class VectorizedLatentVelocityEnv:
         
         z_tilde = self.z + u
         
-        # Compute velocities (batched) using stored per-batch indices
-        v = self.adapter.velocity(
-            z_tilde,
-            cluster_indices=self.cluster_idx,
-            process_indices=self.process_idx,
-        )  # (B, n_latent)
+        # Compute velocities (batched) only if not deactivated
+        if self.deactivate_velocity:
+            v = torch.zeros(B, self.n_latent, device=self.adapter.device)
+        else:
+            v = self.adapter.velocity(
+                z_tilde,
+                cluster_indices=self.cluster_idx,
+                process_indices=self.process_idx,
+            )  # (B, n_latent)
+            
+            # Apply negative velocity if requested
+            if self.use_negative_velocity:
+                v = -v
         
-        # Apply negative velocity if requested
-        if self.use_negative_velocity:
-            v = -v
-        
-        # Update states: z_next = z_tilde + dt * v
-        z_next = z_tilde + self.dt * v
+        # Update states: z_next = z_tilde + dt * v (or just z_tilde if velocity is deactivated)
+        if self.deactivate_velocity:
+            z_next = z_tilde  # Skip velocity update
+        else:
+            z_next = z_tilde + self.dt * v
         
         # Compute distances (linear, not squared) before update
         if self.goal_states is not None:

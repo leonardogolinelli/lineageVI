@@ -31,10 +31,12 @@ class ActorCriticPolicy(nn.Module):
         n_latent: int,
         hidden_sizes: list = [128, 128],
         activation: str = "relu",
+        delta_clip: Optional[float] = None,
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.n_latent = n_latent
+        self.delta_clip = delta_clip
         
         # Build shared trunk
         layers = []
@@ -199,6 +201,10 @@ class ActorCriticPolicy(nn.Module):
         # Sample magnitude directly from normal distribution (only if action > 0)
         magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
         delta = magnitude_dist.sample()  # (B,)
+        
+        # Clip magnitude if configured
+        if self.delta_clip is not None:
+            delta = torch.clamp(delta, -self.delta_clip, self.delta_clip)
         
         # Zero out magnitude for no-op actions
         delta = delta * action_mask

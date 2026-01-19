@@ -375,6 +375,7 @@ def generate_example_visualizations(
     R_succ: float = 10.0,
     alpha_stay: float = 0.0,
     use_negative_velocity: bool = False,
+    deactivate_velocity: bool = False,
     target_mode: str = "centroid",
     seed: int = 42,
     deterministic: bool = False,
@@ -476,6 +477,7 @@ def generate_example_visualizations(
         R_succ=R_succ,
         alpha_stay=alpha_stay,
         use_negative_velocity=use_negative_velocity,
+        deactivate_velocity=deactivate_velocity,
         gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
         lambda_off=lambda_off_viz,
     )
@@ -727,6 +729,8 @@ def load_config(config_path: Optional[str]) -> dict:
             },
             "policy": {
                 "hidden_sizes": [128, 128],
+                "activation": "relu",
+                "delta_clip": None,
                 "delta_max": 1.0,
             },
             "training": {
@@ -765,6 +769,7 @@ def main():
     parser.add_argument("--minibatch_size", type=int, default=None, help="Minibatch size for PPO updates (overrides config)")
     parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
+    parser.add_argument("--deactivate_velocity", action="store_true", help="Deactivate velocity effect on next state (default: velocity affects state)")
     parser.add_argument("--dt", type=float, default=None, help="Time step size (overrides config)")
     parser.add_argument("--lambda_progress", type=float, default=None, help="Progress reward scaling factor (overrides config)")
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
@@ -783,6 +788,25 @@ def main():
     parser.add_argument("--gmm_path", type=str, default=None, help="Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically")
     parser.add_argument("--gmm_components", type=int, default=32, help="Number of GMM components (default: 32)")
     parser.add_argument("--lambda_off", type=float, default=0.0, help="Off-manifold penalty coefficient (default: 0.0, disabled)")
+    parser.add_argument(
+        "--hidden_sizes",
+        type=str,
+        default=None,
+        help="Comma-separated hidden layer sizes for policy MLP (overrides config, default: 128,128)",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        choices=["relu", "tanh"],
+        default=None,
+        help="Activation function for policy MLP (overrides config, default: relu)",
+    )
+    parser.add_argument(
+        "--delta_clip",
+        type=float,
+        default=None,
+        help="Clip magnitude to [-x, x] if set (overrides config, default: none)",
+    )
     
     args = parser.parse_args()
     
@@ -802,6 +826,22 @@ def main():
     ppo_config = config.get("ppo", {})
     policy_config = config.get("policy", {})
     training_config = config.get("training", {})
+
+    # Apply architecture overrides
+    if args.hidden_sizes is not None:
+        try:
+            hidden_sizes_cli = [int(size.strip()) for size in args.hidden_sizes.split(",") if size.strip()]
+        except ValueError as exc:
+            raise ValueError(f"Invalid --hidden_sizes '{args.hidden_sizes}'. Use comma-separated integers.") from exc
+        if len(hidden_sizes_cli) == 0:
+            raise ValueError("Invalid --hidden_sizes: must provide at least one integer.")
+        policy_config["hidden_sizes"] = hidden_sizes_cli
+    if args.activation is not None:
+        policy_config["activation"] = args.activation
+    if args.delta_clip is not None:
+        if args.delta_clip <= 0:
+            raise ValueError("--delta_clip must be positive.")
+        policy_config["delta_clip"] = args.delta_clip
     
     # Load AnnData
     print(f"Loading AnnData from {args.adata_path}...")
@@ -855,8 +895,6 @@ def main():
     if target_lineage is not None:
         if target_lineage not in goal_labels:
             raise ValueError(f"Target lineage '{target_lineage}' not in goal_labels: {goal_labels}")
-        if source_lineage is not None and source_lineage == target_lineage:
-            raise ValueError(f"Source lineage '{source_lineage}' cannot be the same as target lineage '{target_lineage}'")
         print(f"Using target lineage: {target_lineage}")
     
     # Handle target_lineage as fixed goal
@@ -891,6 +929,8 @@ def main():
     dt = args.dt if args.dt is not None else env_config.get("dt", 0.1)
     # Get use_negative_velocity from CLI or config
     use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
+    # Get deactivate_velocity from CLI or config
+    deactivate_velocity = args.deactivate_velocity if args.deactivate_velocity else env_config.get("deactivate_velocity", False)
     # Get reward parameters from CLI or config
     lambda_progress = args.lambda_progress if args.lambda_progress is not None else env_config.get("lambda_progress", 1.0)
     lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
@@ -952,10 +992,11 @@ def main():
         R_succ=R_succ,
         alpha_stay=alpha_stay,
         use_negative_velocity=use_negative_velocity,
+        deactivate_velocity=deactivate_velocity,
         gmm_path=gmm_path,
         lambda_off=lambda_off,
     )
-    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
+    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
     print(f"Source mode: {source_mode}, Target mode: {target_mode}")
     
@@ -1016,11 +1057,15 @@ def main():
     obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
     n_latent = adapter.n_latent
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
+    activation = policy_config.get("activation", "relu")
+    delta_clip = policy_config.get("delta_clip", None)
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
         n_latent=n_latent,
         hidden_sizes=hidden_sizes,
+        activation=activation,
+        delta_clip=delta_clip,
     ).to(device)
     print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}")
     
@@ -1058,11 +1103,15 @@ def main():
         
         # Check that eligible cells exist
         if len(eligible_cells[g_idx]) == 0:
-            raise ValueError(
-                f"No eligible start cells for goal '{goal_label}' "
-                f"because all cells have that origin. "
-                f"Choose a different goal or dataset."
-            )
+            if target_lineage is not None and source_lineage is not None and target_lineage == source_lineage and goal_label == target_lineage:
+                # Allow same source/target lineage by permitting origin == goal for this goal
+                eligible_cells[g_idx] = np.where(origin_labels_all == goal_label)[0]
+            else:
+                raise ValueError(
+                    f"No eligible start cells for goal '{goal_label}' "
+                    f"because all cells have that origin. "
+                    f"Choose a different goal or dataset."
+                )
     
     # If source_lineage is specified, filter eligible cells to only those from source_lineage
     source_cell_indices = None
@@ -1074,19 +1123,24 @@ def main():
         
         # If target_lineage is also specified, verify source != target
         if target_lineage is not None:
-            if source_lineage == target_lineage:
-                raise ValueError(f"Source lineage '{source_lineage}' cannot be the same as target lineage '{target_lineage}'")
-            
-            # Verify that source cells are eligible for target goal
             target_goal_idx = label_to_goal_idx[target_lineage]
-            source_eligible_for_target = np.intersect1d(source_cell_indices, eligible_cells[target_goal_idx])
-            if len(source_eligible_for_target) == 0:
-                raise ValueError(
-                    f"No eligible start cells from source lineage '{source_lineage}' for target lineage '{target_lineage}'. "
-                    f"This may happen if all cells from source lineage have origin '{target_lineage}'. "
-                    f"Choose different source/target lineages."
+            if source_lineage == target_lineage:
+                # Allow starts from the same lineage as the goal
+                eligible_cells[target_goal_idx] = source_cell_indices
+                print(
+                    f"Source lineage '{source_lineage}' matches target lineage '{target_lineage}'. "
+                    f"Allowing starts from the same lineage ({len(source_cell_indices)} cells)."
                 )
-            print(f"Source lineage '{source_lineage}' has {len(source_eligible_for_target)} cells eligible for target '{target_lineage}'")
+            else:
+                # Verify that source cells are eligible for target goal
+                source_eligible_for_target = np.intersect1d(source_cell_indices, eligible_cells[target_goal_idx])
+                if len(source_eligible_for_target) == 0:
+                    raise ValueError(
+                        f"No eligible start cells from source lineage '{source_lineage}' for target lineage '{target_lineage}'. "
+                        f"This may happen if all cells from source lineage have origin '{target_lineage}'. "
+                        f"Choose different source/target lineages."
+                    )
+                print(f"Source lineage '{source_lineage}' has {len(source_eligible_for_target)} cells eligible for target '{target_lineage}'")
     
     # If fixed_goal is set, verify it has eligible cells
     if fixed_goal_idx is not None:
@@ -1392,6 +1446,7 @@ def main():
             R_succ=R_succ,
             alpha_stay=alpha_stay,
             use_negative_velocity=use_negative_velocity,
+            deactivate_velocity=deactivate_velocity,
             target_mode=target_mode,  # Use same target_mode as training
             seed=args.seed,
             gmm_path=gmm_path,
