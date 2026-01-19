@@ -287,11 +287,12 @@ def main():
     parser.add_argument("--model_path", type=str, required=True, help="Path to pretrained VAE model")
     parser.add_argument("--adata_path", type=str, required=True, help="Path to AnnData file")
     parser.add_argument("--lineage_key", type=str, required=True, help="Key in adata.obs for lineage labels")
-    parser.add_argument("--start_cell_idx", type=int, default=None, help="Start cell index (mutually exclusive with --start_lineage)")
-    parser.add_argument("--start_lineage", type=str, default=None, help="Start lineage label (mutually exclusive with --start_cell_idx, default: random)")
-    parser.add_argument("--target_goal", type=str, required=True, help="Target goal label")
-    parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--source_lineage", type=str, default=None, help="Source lineage label (default: random)")
+    parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
+                        help="Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)")
+    parser.add_argument("--target_lineage", type=str, required=True, help="Target lineage label")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
     parser.add_argument("--T", type=int, default=256, help="Rollout horizon (default: 256)")
     parser.add_argument("--T_max", type=int, default=None, help="Maximum episode length (default: same as T)")
     parser.add_argument("--embedding", type=str, default="pca", choices=["pca", "umap"],
@@ -304,10 +305,6 @@ def main():
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
     
     args = parser.parse_args()
-    
-    # Validate mutually exclusive arguments
-    if args.start_cell_idx is not None and args.start_lineage is not None:
-        raise ValueError("--start_cell_idx and --start_lineage are mutually exclusive")
     
     # Set seed
     set_seed(args.seed)
@@ -356,9 +353,10 @@ def main():
     # Create mapping from goal label to index
     label_to_goal_idx = {label: idx for idx, label in enumerate(goal_labels)}
     
-    if args.target_goal not in label_to_goal_idx:
-        raise ValueError(f"Target goal '{args.target_goal}' not in goal_labels: {goal_labels}")
-    goal_idx = label_to_goal_idx[args.target_goal]
+    target_goal_label = args.target_lineage
+    if target_goal_label not in label_to_goal_idx:
+        raise ValueError(f"Target lineage '{target_goal_label}' not in goal_labels: {goal_labels}")
+    goal_idx = label_to_goal_idx[target_goal_label]
     
     # Create adapter
     velocity_mode = "decode_x"  # Default, could be made configurable
@@ -380,45 +378,50 @@ def main():
         vae.model.process_to_idx.get(str(label), 0) for label in process_labels
     ], dtype=torch.long, device=device)
     
-    # Select start cell
-    if args.start_cell_idx is not None:
-        start_cell_idx = args.start_cell_idx
-        if start_cell_idx >= n_cells:
-            raise ValueError(f"start_cell_idx {start_cell_idx} >= n_cells {n_cells}")
-        start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
-        print(f"Using specified start cell: index {start_cell_idx}, lineage '{start_lineage}'")
-    elif args.start_lineage is not None:
-        # Sample random cell from specified lineage
-        start_mask = adata.obs[args.lineage_key] == args.start_lineage
-        start_indices = np.where(start_mask)[0]
-        if len(start_indices) == 0:
-            raise ValueError(f"No cells found with lineage '{args.start_lineage}'")
-        start_cell_idx = np.random.choice(start_indices)
-        start_lineage = args.start_lineage
-        print(f"Randomly selected start cell from lineage '{args.start_lineage}': index {start_cell_idx}")
+    # Select start cell based on source_lineage and source_mode
+    rng = np.random.RandomState(args.seed)
+    if args.source_lineage is not None:
+        if args.source_mode == "centroid":
+            # Use source lineage centroid
+            source_mask = adata.obs[args.lineage_key] == args.source_lineage
+            z0 = z_all[source_mask].mean(dim=0)  # (n_latent,)
+            start_lineage = args.source_lineage
+            start_cell_idx = None
+            start_cell_idx_for_cluster = None
+            print(f"Using source centroid for '{args.source_lineage}'")
+        else:  # source_mode == "sample"
+            # Sample random cell from specified lineage
+            start_mask = adata.obs[args.lineage_key] == args.source_lineage
+            start_indices = np.where(start_mask)[0]
+            if len(start_indices) == 0:
+                raise ValueError(f"No cells found with lineage '{args.source_lineage}'")
+            start_cell_idx = rng.choice(start_indices)
+            z0 = z_all[start_cell_idx]
+            start_lineage = args.source_lineage
+            start_cell_idx_for_cluster = start_cell_idx
+            print(f"Randomly selected start cell from lineage '{args.source_lineage}': index {start_cell_idx}")
     else:
         # Random cell from any lineage
-        start_cell_idx = np.random.randint(0, n_cells)
+        start_cell_idx = rng.randint(0, n_cells)
+        z0 = z_all[start_cell_idx]
         start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
+        start_cell_idx_for_cluster = start_cell_idx
         print(f"Randomly selected start cell: index {start_cell_idx}, lineage '{start_lineage}'")
     
-    z0 = z_all[start_cell_idx]  # (n_latent,)
-    
     # Get goal
-    if args.goal_mode == "centroid":
+    target_goal_label = args.target_lineage
+    if args.target_mode == "centroid":
         z_goal = centroids[goal_idx].to(device)  # (n_latent,)
-        print(f"Goal: centroid for '{args.target_goal}'")
-    else:  # goal_cell (default)
+        print(f"Target: centroid for '{target_goal_label}'")
+    else:  # target_mode == "goal_cell"
         # Sample one cell from target lineage (seed ensures reproducibility)
-        target_mask = adata.obs[args.lineage_key] == args.target_goal
+        target_mask = adata.obs[args.lineage_key] == target_goal_label
         target_indices = np.where(target_mask)[0]
         if len(target_indices) == 0:
-            raise ValueError(f"No cells found with lineage '{args.target_goal}'")
-        # Use seed for reproducible sampling
-        rng = np.random.RandomState(args.seed)
+            raise ValueError(f"No cells found with lineage '{target_goal_label}'")
         goal_cell_idx = rng.choice(target_indices)
         z_goal = z_all[goal_cell_idx].to(device)  # (n_latent,)
-        print(f"Goal: cell {goal_cell_idx} from lineage '{args.target_goal}' (sampled with seed={args.seed})")
+        print(f"Goal: cell {goal_cell_idx} from lineage '{target_goal_label}' (sampled with seed={args.seed})")
     
     # Build embedding
     print(f"Building {args.embedding.upper()} embedding...")
@@ -481,7 +484,7 @@ def main():
         z_goal.cpu().numpy(),
         transformer,
         str(start_lineage),
-        args.target_goal,
+        target_goal_label,
         outdir / "trajectory_overlay.png",
         lineage_key=args.lineage_key,
         lineage_labels=lineage_labels,
@@ -503,7 +506,7 @@ def main():
         start_cell_idx=start_cell_idx,
         goal_idx=goal_idx,
         start_lineage=str(start_lineage),
-        goal_lineage=args.target_goal,
+        goal_lineage=target_goal_label,
     )
     print(f"Saved raw arrays → {outdir / 'trajectory.npz'}")
     

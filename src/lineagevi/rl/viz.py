@@ -125,6 +125,80 @@ def rollout_baseline(
     return np.array(z_trajectory), np.array(distances)
 
 
+def inspect_policy(
+    policy,
+    obs: torch.Tensor,
+    n_samples: int = 100,
+) -> dict:
+    """
+    Inspect policy behavior: action probabilities, magnitude distributions, entropy.
+    
+    Parameters
+    ----------
+    policy
+        Trained policy.
+    obs : torch.Tensor
+        Observation of shape (obs_dim,).
+    n_samples : int
+        Number of samples to draw for statistics.
+    
+    Returns
+    -------
+    info : dict
+        Dictionary with policy inspection results.
+    """
+    device = next(policy.parameters()).device
+    obs_batch = obs.unsqueeze(0).to(device).float()  # (1, obs_dim)
+    
+    with torch.no_grad():
+        # Get policy outputs
+        action_logits, magnitude_mu, magnitude_logstd, value = policy.forward(obs_batch)
+        
+        # Convert logits to probabilities
+        action_probs = torch.softmax(action_logits, dim=1).squeeze(0)  # (n_latent + 1,)
+        
+        # Get clamped magnitude std
+        magnitude_logstd_clamped = torch.clamp(magnitude_logstd, policy.LOG_STD_MIN, policy.LOG_STD_MAX)
+        magnitude_std = torch.exp(magnitude_logstd_clamped).squeeze(0)  # (n_latent,)
+        magnitude_mu = magnitude_mu.squeeze(0)  # (n_latent,)
+        
+        # Compute entropy of action distribution
+        action_dist = torch.distributions.Categorical(logits=action_logits)
+        action_entropy = action_dist.entropy().item()
+        
+        # Sample multiple times to see variation
+        actions_sampled = []
+        deltas_sampled = []
+        for _ in range(n_samples):
+            action, delta, _, _ = policy.sample(obs_batch, deterministic=False)
+            actions_sampled.append(action.item())
+            deltas_sampled.append(delta.item())
+        
+        actions_sampled = np.array(actions_sampled)
+        deltas_sampled = np.array(deltas_sampled)
+        
+        # Statistics
+        action_counts = np.bincount(actions_sampled, minlength=policy.n_latent + 1)
+        action_freq = action_counts / n_samples
+        
+        info = {
+            "action_logits": action_logits.squeeze(0).cpu().numpy(),
+            "action_probs": action_probs.cpu().numpy(),
+            "action_entropy": action_entropy,
+            "magnitude_mu": magnitude_mu.cpu().numpy(),
+            "magnitude_logstd": magnitude_logstd.squeeze(0).cpu().numpy(),
+            "magnitude_logstd_clamped": magnitude_logstd_clamped.squeeze(0).cpu().numpy(),
+            "magnitude_std": magnitude_std.cpu().numpy(),
+            "action_freq": action_freq,
+            "action_samples": actions_sampled,
+            "delta_samples": deltas_sampled,
+            "delta_mean": np.mean(deltas_sampled),
+            "delta_std": np.std(deltas_sampled),
+        }
+        
+        return info
+
+
 def rollout_agent(
     env: LatentVelocityEnv,
     policy,
@@ -204,7 +278,7 @@ def rollout_agent(
                 else:
                     delta = 0.0
             else:
-                action, delta_tensor, _, _ = policy.sample(obs_tensor.unsqueeze(0), deterministic=True)
+                action, delta_tensor, _, _ = policy.sample(obs_tensor.unsqueeze(0), deterministic=False)
                 action = action.item()
                 delta = delta_tensor.item()
         
@@ -581,11 +655,12 @@ def main():
     parser.add_argument("--model_path", type=str, required=True, help="Path to pretrained VAE model")
     parser.add_argument("--adata_path", type=str, required=True, help="Path to AnnData file")
     parser.add_argument("--lineage_key", type=str, required=True, help="Key in adata.obs for lineage labels")
-    parser.add_argument("--start_cell_idx", type=int, default=None, help="Start cell index (mutually exclusive with --start_lineage)")
-    parser.add_argument("--start_lineage", type=str, default=None, help="Start lineage label (mutually exclusive with --start_cell_idx, default: random)")
-    parser.add_argument("--target_goal", type=str, required=True, help="Target goal label")
-    parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--source_lineage", type=str, default=None, help="Source lineage label (default: random)")
+    parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
+                        help="Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)")
+    parser.add_argument("--target_lineage", type=str, required=True, help="Target lineage label")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
     parser.add_argument("--T", type=int, default=64, help="Rollout horizon")
     parser.add_argument("--embedding", type=str, default="pca", choices=["pca", "umap"],
                         help="Embedding method: 'pca' or 'umap'")
@@ -593,16 +668,16 @@ def main():
     parser.add_argument("--outdir", type=str, default="./viz_results", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda)")
-    parser.add_argument("--deterministic", action="store_true", default=True,
-                        help="Use deterministic policy (default: True)")
+    parser.add_argument("--deterministic", action="store_true", default=False,
+                        help="Use deterministic policy (default: False, uses stochastic sampling)")
     parser.add_argument("--intervention_method", type=str, default="heatmap", choices=["stem", "heatmap"],
                         help="Intervention visualization method")
+    parser.add_argument("--use_negative_velocity", action="store_true",
+                        help="Use negative velocity instead of normal velocity")
+    parser.add_argument("--n_viz_trajectories", type=int, default=1,
+                        help="Number of trajectory visualizations to generate (default: 1)")
     
     args = parser.parse_args()
-    
-    # Validate mutually exclusive arguments
-    if args.start_cell_idx is not None and args.start_lineage is not None:
-        raise ValueError("--start_cell_idx and --start_lineage are mutually exclusive")
     
     # Set seed
     set_seed(args.seed)
@@ -626,9 +701,10 @@ def main():
     # Create mapping from goal label to index
     label_to_goal_idx = {label: idx for idx, label in enumerate(goal_labels)}
     
-    if args.target_goal not in label_to_goal_idx:
-        raise ValueError(f"Target goal '{args.target_goal}' not in goal_labels: {goal_labels}")
-    goal_idx = label_to_goal_idx[args.target_goal]
+    target_goal_label = args.target_lineage
+    if target_goal_label not in label_to_goal_idx:
+        raise ValueError(f"Target lineage '{target_goal_label}' not in goal_labels: {goal_labels}")
+    goal_idx = label_to_goal_idx[target_goal_label]
     
     # Load AnnData
     print(f"Loading AnnData from {args.adata_path}...")
@@ -652,7 +728,8 @@ def main():
     # Get environment config
     env_config = config.get("env", {})
     velocity_mode = env_config.get("velocity_mode", "decode_x")
-    use_negative_velocity = env_config.get("use_negative_velocity", False)
+    # CLI argument overrides config
+    use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
     
     # Create adapter
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode=velocity_mode)
@@ -672,47 +749,7 @@ def main():
         vae.model.process_to_idx.get(str(label), 0) for label in process_labels
     ], dtype=torch.long, device=device)
     
-    # Select start cell
-    if args.start_cell_idx is not None:
-        start_cell_idx = args.start_cell_idx
-        if start_cell_idx >= n_cells:
-            raise ValueError(f"start_cell_idx {start_cell_idx} >= n_cells {n_cells}")
-        start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
-        print(f"Using specified start cell: index {start_cell_idx}, lineage '{start_lineage}'")
-    elif args.start_lineage is not None:
-        # Sample random cell from specified lineage
-        start_mask = adata.obs[args.lineage_key] == args.start_lineage
-        start_indices = np.where(start_mask)[0]
-        if len(start_indices) == 0:
-            raise ValueError(f"No cells found with lineage '{args.start_lineage}'")
-        start_cell_idx = np.random.choice(start_indices)
-        start_lineage = args.start_lineage
-        print(f"Randomly selected start cell from lineage '{args.start_lineage}': index {start_cell_idx}")
-    else:
-        # Random cell from any lineage
-        start_cell_idx = np.random.randint(0, n_cells)
-        start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
-        print(f"Randomly selected start cell: index {start_cell_idx}, lineage '{start_lineage}'")
-    
-    z0 = z_all[start_cell_idx]  # (n_latent,)
-    
-    # Get goal
-    if args.goal_mode == "centroid":
-        z_goal = centroids[goal_idx].to(device)  # (n_latent,)
-        print(f"Goal: centroid for '{args.target_goal}'")
-    else:  # goal_cell (default)
-        # Sample one cell from target lineage (seed ensures reproducibility)
-        target_mask = adata.obs[args.lineage_key] == args.target_goal
-        target_indices = np.where(target_mask)[0]
-        if len(target_indices) == 0:
-            raise ValueError(f"No cells found with lineage '{args.target_goal}'")
-        # Use seed for reproducible sampling
-        rng = np.random.RandomState(args.seed)
-        goal_cell_idx = rng.choice(target_indices)
-        z_goal = z_all[goal_cell_idx].to(device)  # (n_latent,)
-        print(f"Goal: cell {goal_cell_idx} from lineage '{args.target_goal}' (sampled with seed={args.seed})")
-    
-    # Build embedding
+    # Build embedding (shared across all experiments)
     print(f"Building {args.embedding.upper()} embedding...")
     Z_all = z_all.cpu().numpy()
     embedding, transformer = build_embedding(Z_all, method=args.embedding)
@@ -723,7 +760,7 @@ def main():
     # Ensure T_max is at least as large as requested rollout horizon
     T_max_viz = max(T_max_viz, args.T)
     
-    # Create environment
+    # Create environment (shared across all experiments)
     env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -738,89 +775,12 @@ def main():
         use_negative_velocity=use_negative_velocity,
     )
     
-    # Get initial x if needed
-    x0 = None
-    if velocity_mode == "fixed_x":
-        unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
-        spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
-        u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][start_cell_idx])).float().to(device)
-        s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx])).float().to(device)
-        x0 = torch.cat([u, s], dim=0)  # (2*n_genes,)
-    
-    # Get cluster/process indices for start cell
-    cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
-    process_idx = process_indices[start_cell_idx] if process_indices is not None else None
-    
-    # Roll out baseline trajectory
-    print("Rolling out baseline trajectory...")
-    z_baseline, distances_baseline = rollout_baseline(
-        env, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx
-    )
-    
-    # Roll out agent trajectory
-    print("Rolling out agent trajectory...")
-    z_agent, distances_agent, actions, deltas = rollout_agent(
-        env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx,
-        deterministic=args.deterministic
-    )
-    
-    # Compute metrics
-    n_interventions = np.sum(actions != 0)
-    total_magnitude = np.sum(np.abs(deltas))
-    final_distance = distances_agent[-1]
-    initial_distance = distances_agent[0]
-    # Use environment's success threshold for consistency
-    success = final_distance < env.eps_success
-    
-    print(f"\nTrajectory metrics:")
-    print(f"  Initial distance: {initial_distance:.4f}")
-    print(f"  Final distance: {final_distance:.4f}")
-    print(f"  Success: {success}")
-    print(f"  Interventions (L0): {n_interventions}")
-    print(f"  Total magnitude (L1): {total_magnitude:.4f}")
-    
-    # Get lineage labels for coloring
+    # Get lineage labels for coloring (shared across all experiments)
     lineage_labels = None
     if args.lineage_key in adata.obs:
         lineage_labels = adata.obs[args.lineage_key].values
     
-    # Create visualizations
-    print("\nCreating visualizations...")
-    
-    # Plot A: Trajectory overlay
-    plot_trajectory_overlay(
-        embedding,
-        z_baseline,
-        z_agent,
-        z_goal.cpu().numpy(),
-        transformer,
-        str(start_lineage),
-        args.target_goal,
-        success,
-        n_interventions,
-        total_magnitude,
-        outdir / "trajectory_overlay.png",
-        lineage_key=args.lineage_key,
-        lineage_labels=lineage_labels,
-    )
-    
-    # Plot B: Distance curves
-    plot_distance_curves(
-        distances_baseline,
-        distances_agent,
-        outdir / "distance_curves.png",
-    )
-    
-    # Plot C: Intervention schedule
-    plot_interventions(
-        actions,
-        deltas,
-        adapter.n_latent,
-        outdir / "interventions.png",
-        method=args.intervention_method,
-    )
-    
-    # Plot D: Intervention summary with gene program names
+    # Get gene program names (shared across all experiments)
     gp_names = None
     if "terms" in adata.uns and len(adata.uns["terms"]) == adapter.n_latent:
         gp_names = adata.uns["terms"]
@@ -828,33 +788,263 @@ def main():
     else:
         print(f"Gene program names not found in adata.uns['terms'], using GP_0, GP_1, etc.")
     
-    plot_intervention_summary(
-        actions,
-        deltas,
-        adapter.n_latent,
-        outdir / "intervention_summary.png",
-        gp_names=gp_names,
-    )
+    # Run multiple experiments
+    for example_idx in range(args.n_viz_trajectories):
+        print(f"\n{'='*60}")
+        print(f"Experiment {example_idx + 1}/{args.n_viz_trajectories}")
+        print(f"{'='*60}")
+        
+        # Use different seed for each experiment for reproducibility
+        experiment_seed = args.seed + example_idx
+        rng = np.random.RandomState(experiment_seed)
+        
+        # Set PyTorch seed for this experiment to ensure stochastic policy sampling varies
+        if not args.deterministic:
+            torch.manual_seed(experiment_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(experiment_seed)
+        
+        # Select start cell based on source_lineage and source_mode
+        if args.source_lineage is not None:
+            if args.source_mode == "centroid":
+                # Use source lineage centroid
+                source_mask = adata.obs[args.lineage_key] == args.source_lineage
+                z0 = z_all[source_mask].mean(dim=0)  # (n_latent,)
+                start_lineage = args.source_lineage
+                start_cell_idx = None
+                start_cell_idx_for_cluster = None
+                print(f"Using source centroid for '{args.source_lineage}'")
+            else:  # source_mode == "sample"
+                # Sample random cell from specified lineage
+                start_mask = adata.obs[args.lineage_key] == args.source_lineage
+                start_indices = np.where(start_mask)[0]
+                if len(start_indices) == 0:
+                    raise ValueError(f"No cells found with lineage '{args.source_lineage}'")
+                start_cell_idx = rng.choice(start_indices)
+                z0 = z_all[start_cell_idx]
+                start_lineage = args.source_lineage
+                start_cell_idx_for_cluster = start_cell_idx
+                print(f"Randomly selected start cell from lineage '{args.source_lineage}': index {start_cell_idx}")
+        else:
+            # Random cell from any lineage
+            start_cell_idx = rng.randint(0, n_cells)
+            z0 = z_all[start_cell_idx]
+            start_lineage = adata.obs[args.lineage_key].iloc[start_cell_idx]
+            start_cell_idx_for_cluster = start_cell_idx
+            print(f"Randomly selected start cell: index {start_cell_idx}, lineage '{start_lineage}'")
     
-    # Save raw arrays
-    np.savez(
-        outdir / "trajectory.npz",
-        z_baseline=z_baseline,
-        z_agent=z_agent,
-        z_goal=z_goal.cpu().numpy(),
-        distances_baseline=distances_baseline,
-        distances_agent=distances_agent,
-        actions=actions,
-        deltas=deltas,
-        embedding=embedding,
-        start_cell_idx=start_cell_idx,
-        goal_idx=goal_idx,
-        start_lineage=str(start_lineage),
-        goal_lineage=args.target_goal,
-    )
-    print(f"Saved raw arrays → {outdir / 'trajectory.npz'}")
+        # Get goal
+        target_goal_label = args.target_lineage
+        if args.target_mode == "centroid":
+            z_goal = centroids[goal_idx].to(device)  # (n_latent,)
+            print(f"Target: centroid for '{target_goal_label}'")
+        else:  # target_mode == "goal_cell"
+            # Sample one cell from target lineage (seed ensures reproducibility)
+            target_mask = adata.obs[args.lineage_key] == target_goal_label
+            target_indices = np.where(target_mask)[0]
+            if len(target_indices) == 0:
+                raise ValueError(f"No cells found with lineage '{target_goal_label}'")
+            goal_cell_idx = rng.choice(target_indices)
+            z_goal = z_all[goal_cell_idx].to(device)  # (n_latent,)
+            print(f"Goal: cell {goal_cell_idx} from lineage '{target_goal_label}' (sampled with seed={experiment_seed})")
     
-    print(f"\nVisualization complete! Outputs saved to {outdir}")
+        # Get initial x if needed
+        x0 = None
+        if velocity_mode == "fixed_x":
+            if start_cell_idx_for_cluster is not None:
+                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][start_cell_idx_for_cluster])).float().to(device)
+                s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx_for_cluster])).float().to(device)
+                x0 = torch.cat([u, s], dim=0)  # (2*n_genes,)
+            else:
+                # When using centroid, compute mean gene expression from source lineage
+                if args.source_lineage is not None:
+                    source_mask = adata.obs[args.lineage_key] == args.source_lineage
+                    unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                    spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                    u_mean = np.asarray(adata.layers[unspliced_key][source_mask]).mean(axis=0)
+                    s_mean = np.asarray(adata.layers[spliced_key][source_mask]).mean(axis=0)
+                    u = torch.from_numpy(u_mean).float().to(device)
+                    s = torch.from_numpy(s_mean).float().to(device)
+                    x0 = torch.cat([u, s], dim=0)
+        
+        # Get cluster/process indices for start cell
+        if start_cell_idx is not None:
+            cluster_idx_val = cluster_indices[start_cell_idx].item() if cluster_indices is not None else None
+            process_idx_val = process_indices[start_cell_idx].item() if process_indices is not None else None
+        else:
+            # When using centroid mode, compute mode of cluster/process indices from source lineage
+            if args.source_lineage is not None:
+                source_mask = (adata.obs[args.lineage_key] == args.source_lineage).values
+                if cluster_indices is not None:
+                    source_cluster_indices = cluster_indices[source_mask].cpu().numpy()
+                    if len(source_cluster_indices) > 0:
+                        cluster_idx_val = int(np.bincount(source_cluster_indices).argmax())
+                    else:
+                        cluster_idx_val = None
+                else:
+                    cluster_idx_val = None
+                if process_indices is not None:
+                    source_process_indices = process_indices[source_mask].cpu().numpy()
+                    if len(source_process_indices) > 0:
+                        process_idx_val = int(np.bincount(source_process_indices).argmax())
+                    else:
+                        process_idx_val = None
+                else:
+                    process_idx_val = None
+            else:
+                cluster_idx_val = None
+                process_idx_val = None
+        
+        # Convert to scalar tensors for rollout functions (model expects tensors, handles 0-dim by unsqueezing)
+        cluster_idx = torch.tensor(cluster_idx_val, dtype=torch.long, device=device) if cluster_idx_val is not None else None
+        process_idx = torch.tensor(process_idx_val, dtype=torch.long, device=device) if process_idx_val is not None else None
+        
+        # Roll out baseline trajectory
+        print("Rolling out baseline trajectory...")
+        z_baseline, distances_baseline = rollout_baseline(
+            env, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx
+        )
+        
+        # Inspect policy at initial state (first experiment only)
+        if example_idx == 0:
+            print("\nInspecting policy at initial state...")
+            obs_init, _ = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
+            obs_init_tensor = torch.from_numpy(obs_init) if isinstance(obs_init, np.ndarray) else obs_init
+            obs_init_tensor = obs_init_tensor.to(device).float()
+            
+            policy_info = inspect_policy(policy, obs_init_tensor, n_samples=1000)
+            
+            print(f"  Action entropy: {policy_info['action_entropy']:.4f} (max: {np.log(policy.n_latent + 1):.4f})")
+            print(f"  Top 5 action probabilities:")
+            top5_idx = np.argsort(policy_info['action_probs'])[-5:][::-1]
+            for idx in top5_idx:
+                prob = policy_info['action_probs'][idx]
+                freq = policy_info['action_freq'][idx]
+                action_name = "no-op" if idx == 0 else f"dim_{idx-1}"
+                print(f"    {action_name}: prob={prob:.4f}, sampled_freq={freq:.4f}")
+            
+            print(f"  Magnitude statistics (for non-zero actions):")
+            print(f"    Mean log_std (clamped): {np.mean(policy_info['magnitude_logstd_clamped']):.4f}")
+            print(f"    Min log_std (clamped): {np.min(policy_info['magnitude_logstd_clamped']):.4f}")
+            print(f"    Max log_std (clamped): {np.max(policy_info['magnitude_logstd_clamped']):.4f}")
+            print(f"    Mean std: {np.mean(policy_info['magnitude_std']):.4f}")
+            print(f"    Min std: {np.min(policy_info['magnitude_std']):.4f}")
+            print(f"    Max std: {np.max(policy_info['magnitude_std']):.4f}")
+            
+            # Save policy inspection to file
+            import json
+            policy_info_save = {
+                "action_entropy": float(policy_info['action_entropy']),
+                "action_probs": policy_info['action_probs'].tolist(),
+                "magnitude_logstd_clamped": policy_info['magnitude_logstd_clamped'].tolist(),
+                "magnitude_std": policy_info['magnitude_std'].tolist(),
+                "magnitude_mu": policy_info['magnitude_mu'].tolist(),
+                "action_freq": policy_info['action_freq'].tolist(),
+                "delta_mean": float(policy_info['delta_mean']),
+                "delta_std": float(policy_info['delta_std']),
+            }
+            with open(outdir / "policy_inspection.json", "w") as f:
+                json.dump(policy_info_save, f, indent=2)
+            print(f"  Policy inspection saved to {outdir / 'policy_inspection.json'}")
+        
+        # Roll out agent trajectory
+        print(f"\nRolling out agent trajectory (deterministic={args.deterministic})...")
+        z_agent, distances_agent, actions, deltas = rollout_agent(
+            env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx,
+            deterministic=args.deterministic
+        )
+        
+        # Compute metrics
+        n_interventions = np.sum(actions != 0)
+        total_magnitude = np.sum(np.abs(deltas))
+        final_distance = distances_agent[-1]
+        initial_distance = distances_agent[0]
+        # Use environment's success threshold for consistency
+        success = final_distance < env.eps_success
+        
+        print(f"\nTrajectory metrics:")
+        print(f"  Initial distance: {initial_distance:.4f}")
+        print(f"  Final distance: {final_distance:.4f}")
+        print(f"  Success: {success}")
+        print(f"  Interventions (L0): {n_interventions}")
+        print(f"  Total magnitude (L1): {total_magnitude:.4f}")
+        
+        # Create output file prefix for this experiment
+        if args.n_viz_trajectories > 1:
+            prefix = f"example_{example_idx}_"
+        else:
+            prefix = ""
+        
+        # Create visualizations
+        print("\nCreating visualizations...")
+        
+        # Plot A: Trajectory overlay
+        plot_trajectory_overlay(
+            embedding,
+            z_baseline,
+            z_agent,
+            z_goal.cpu().numpy(),
+            transformer,
+            str(start_lineage),
+            args.target_lineage,
+            success,
+            n_interventions,
+            total_magnitude,
+            outdir / f"{prefix}trajectory_overlay.png",
+            lineage_key=args.lineage_key,
+            lineage_labels=lineage_labels,
+        )
+        
+        # Plot B: Distance curves
+        plot_distance_curves(
+            distances_baseline,
+            distances_agent,
+            outdir / f"{prefix}distance_curves.png",
+        )
+        
+        # Plot C: Intervention schedule
+        plot_interventions(
+            actions,
+            deltas,
+            adapter.n_latent,
+            outdir / f"{prefix}interventions.png",
+            method=args.intervention_method,
+        )
+        
+        # Plot D: Intervention summary with gene program names
+        plot_intervention_summary(
+            actions,
+            deltas,
+            adapter.n_latent,
+            outdir / f"{prefix}intervention_summary.png",
+            gp_names=gp_names,
+        )
+        
+        # Save raw arrays
+        np.savez(
+            outdir / f"{prefix}trajectory.npz",
+            z_baseline=z_baseline,
+            z_agent=z_agent,
+            z_goal=z_goal.cpu().numpy(),
+            distances_baseline=distances_baseline,
+            distances_agent=distances_agent,
+            actions=actions,
+            deltas=deltas,
+            embedding=embedding,
+            start_cell_idx=start_cell_idx,
+            goal_idx=goal_idx,
+            start_lineage=str(start_lineage),
+            goal_lineage=args.target_lineage,
+        )
+        print(f"Saved raw arrays → {outdir / f'{prefix}trajectory.npz'}")
+        
+        print(f"\nExperiment {example_idx + 1} complete! Outputs saved to {outdir}")
+    
+    print(f"\n{'='*60}")
+    print(f"All {args.n_viz_trajectories} experiments complete! Outputs saved to {outdir}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

@@ -12,28 +12,29 @@ CONFIG_FILE=""
 SEED=42
 DEVICE="auto"
 Z_KEY="mean"
-GOAL_ALLOWED=()
-GOAL_EXCLUDE=()
-GOAL_MIN_CELLS=1
-FIXED_GOAL="1"
-GOAL_MODE="centroid"  # "centroid" or "goal_cell"
+SOURCE_LINEAGE="5"
+TARGET_LINEAGE="1"
+SOURCE_MODE="centroid"  # "centroid" or "sample"
+TARGET_MODE="centroid"  # "centroid" or "goal_cell"
 USE_NEGATIVE_VELOCITY=""
+DETERMINISTIC=""
 N_ITERATIONS="200"
 EPOCHS="3"
 BATCH_SIZE="128"
-T_ROLLOUT="64"
-T_MAX="64"
+T_ROLLOUT="128"
+T_MAX="128"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
 LAMBDA_PROGRESS="1.0" # default is 1.0
-LAMBDA_ACT="" # default is 0.02
-LAMBDA_MAG="" # default is 0.15
+LAMBDA_ACT="0" # default is 0.02
+LAMBDA_MAG="0" # default is 0.15
 R_SUCC="1000" # default is 20.0
 ALPHA_STAY="100.0" # default is 0.0 (state cost for staying near goal)
 DELTA_MAX="" # default: auto-calibrate from velocity field
 DELTA_MAX_SCALE="0.5" # default is 0.5 (scale factor for auto-calibrated delta_max)
 GAMMA="0.99" # default is 0.99
+ENT_COEF="100.0" # default is 0.01
 GMM_PATH=""
 GMM_COMPONENTS="32"
 LAMBDA_OFF="1"
@@ -73,30 +74,20 @@ while [[ $# -gt 0 ]]; do
             Z_KEY="$2"
             shift 2
             ;;
-        --goal_allowed)
-            # Collect all allowed goals
-            GOAL_ALLOWED=()
-            shift
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                GOAL_ALLOWED+=("$1")
-                shift
-            done
-            ;;
-        --goal_exclude)
-            # Collect all excluded goals
-            GOAL_EXCLUDE=()
-            shift
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                GOAL_EXCLUDE+=("$1")
-                shift
-            done
-            ;;
-        --goal_min_cells)
-            GOAL_MIN_CELLS="$2"
+        --source_lineage)
+            SOURCE_LINEAGE="$2"
             shift 2
             ;;
-        --fixed_goal)
-            FIXED_GOAL="$2"
+        --target_lineage)
+            TARGET_LINEAGE="$2"
+            shift 2
+            ;;
+        --source_mode)
+            SOURCE_MODE="$2"
+            shift 2
+            ;;
+        --target_mode)
+            TARGET_MODE="$2"
             shift 2
             ;;
         --n_iterations)
@@ -129,6 +120,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --use_negative_velocity)
             USE_NEGATIVE_VELOCITY="--use_negative_velocity"
+            shift
+            ;;
+        --deterministic)
+            DETERMINISTIC="--deterministic"
             shift
             ;;
         --dt)
@@ -167,6 +162,10 @@ while [[ $# -gt 0 ]]; do
             N_VIZ_TRAJECTORIES="$2"
             shift 2
             ;;
+        --ent_coef)
+            ENT_COEF="$2"
+            shift 2
+            ;;
         --viz_embedding)
             VIZ_EMBEDDING="$2"
             shift 2
@@ -193,12 +192,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --seed N                   Random seed (default: 42)"
             echo "  --device DEV               Device: auto, cpu, or cuda (default: auto)"
             echo "  --z_key KEY                Key in adata.obsm for latent states (default: mean)"
-            echo "  --goal_allowed LABEL ...   Allowed goal labels (default: all)"
-            echo "  --goal_exclude LABEL ...   Excluded goal labels"
-            echo "  --goal_min_cells N         Minimum cells per goal lineage (default: 1)"
-            echo "  --fixed_goal LABEL         Fixed goal label for all episodes (optional)"
-            echo "  --goal_mode MODE           Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --source_lineage LABEL     Source lineage label (cells will be sampled from this lineage as starting points)"
+            echo "  --target_lineage LABEL     Target lineage label (goal for all episodes)"
+            echo "  --source_mode MODE         Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
+            echo "  --target_mode MODE         Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
+            echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
             echo "  --dt FLOAT                Time step size (overrides config)"
@@ -210,6 +209,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --delta_max FLOAT         Maximum action magnitude (overrides config and auto-calibration)"
             echo "  --delta_max_scale FLOAT   Scale factor for auto-calibrated delta_max (default: 0.5)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
+            echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
             echo ""
             echo "OFF-MANIFOLD PENALTY PARAMETERS:"
             echo "  --gmm_path PATH           Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically"
@@ -344,18 +344,21 @@ if [[ -n "$CONFIG_FILE" ]]; then
 fi
 
 # Add goal filtering arguments
-if [[ ${#GOAL_ALLOWED[@]} -gt 0 ]]; then
-    PYTHON_ARGS+=(--goal_allowed "${GOAL_ALLOWED[@]}")
+if [[ -n "$SOURCE_LINEAGE" ]]; then
+    PYTHON_ARGS+=(--source_lineage "$SOURCE_LINEAGE")
+fi
+if [[ -n "$TARGET_LINEAGE" ]]; then
+    PYTHON_ARGS+=(--target_lineage "$TARGET_LINEAGE")
+fi
+if [[ -n "$SOURCE_MODE" ]]; then
+    PYTHON_ARGS+=(--source_mode "$SOURCE_MODE")
+fi
+if [[ -n "$TARGET_MODE" ]]; then
+    PYTHON_ARGS+=(--target_mode "$TARGET_MODE")
 fi
 
-if [[ ${#GOAL_EXCLUDE[@]} -gt 0 ]]; then
-    PYTHON_ARGS+=(--goal_exclude "${GOAL_EXCLUDE[@]}")
-fi
-
-PYTHON_ARGS+=(--goal_min_cells "$GOAL_MIN_CELLS")
-
-if [[ -n "$FIXED_GOAL" ]]; then
-    PYTHON_ARGS+=(--fixed_goal "$FIXED_GOAL")
+if [[ -n "$DETERMINISTIC" ]]; then
+    PYTHON_ARGS+=("$DETERMINISTIC")
 fi
 
 # Add training parameters (override config if provided)
@@ -409,6 +412,9 @@ if [[ -n "$DELTA_MAX_SCALE" ]]; then
 fi
 if [[ -n "$GAMMA" ]]; then
     PYTHON_ARGS+=(--gamma "$GAMMA")
+fi
+if [[ -n "$ENT_COEF" ]]; then
+    PYTHON_ARGS+=(--ent_coef "$ENT_COEF")
 fi
 if [[ -n "$GMM_PATH" ]]; then
     PYTHON_ARGS+=(--gmm_path "$GMM_PATH")

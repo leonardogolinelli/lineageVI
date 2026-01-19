@@ -375,11 +375,15 @@ def generate_example_visualizations(
     R_succ: float = 10.0,
     alpha_stay: float = 0.0,
     use_negative_velocity: bool = False,
-    goal_mode: str = "centroid",
+    target_mode: str = "centroid",
     seed: int = 42,
+    deterministic: bool = False,
     gmm_path: Optional[str] = None,
     lambda_off: float = 0.0,
     fixed_goal_idx: Optional[int] = None,
+    source_lineage: Optional[str] = None,
+    target_lineage: Optional[str] = None,
+    source_mode: str = "sample",
 ):
     """
     Generate example trajectory visualizations after training.
@@ -476,27 +480,67 @@ def generate_example_visualizations(
         lambda_off=lambda_off_viz,
     )
     
+    # Precompute source centroid if using centroid mode
+    source_centroid_viz = None
+    if source_lineage is not None and source_mode == "centroid":
+        source_mask = adata.obs[lineage_key] == source_lineage
+        source_centroid_viz = z_all[source_mask].mean(dim=0)  # (n_latent,)
+        print(f"Using source centroid for visualization: '{source_lineage}'")
+    
+    # Determine target goal index if target_lineage is specified
+    label_to_goal_idx_viz = {label: idx for idx, label in enumerate(goal_labels)}
+    target_goal_idx_viz = None
+    if target_lineage is not None:
+        if target_lineage not in label_to_goal_idx_viz:
+            print(f"Warning: Target lineage '{target_lineage}' not in goal_labels, using fixed_goal_idx or random")
+        else:
+            target_goal_idx_viz = label_to_goal_idx_viz[target_lineage]
+            print(f"Using target lineage for visualization: '{target_lineage}' (index {target_goal_idx_viz})")
+    
     # Sample example trajectories
     for example_idx in range(n_examples):
         print(f"\nGenerating visualization {example_idx + 1}/{n_examples}...")
         
-        # Sample random start cell
-        start_cell_idx = np.random.randint(0, n_cells)
-        z0 = z_all[start_cell_idx]
-        start_lineage = adata.obs[lineage_key].iloc[start_cell_idx]
-        
-        # Sample goal (use fixed goal if provided, otherwise random)
         rng = np.random.RandomState(seed + example_idx)  # Use seed + example_idx for reproducibility
-        if fixed_goal_idx is not None:
-            goal_idx = fixed_goal_idx
+        
+        # Select start cell based on source_lineage and source_mode
+        if source_lineage is not None:
+            if source_mode == "centroid":
+                # Use source centroid
+                z0 = source_centroid_viz.clone()
+                start_lineage = source_lineage
+                start_cell_idx = None  # Not used when using centroid
+            else:  # source_mode == "sample"
+                # Sample a cell from source lineage
+                source_mask = adata.obs[lineage_key] == source_lineage
+                source_indices = np.where(source_mask)[0]
+                if len(source_indices) == 0:
+                    raise ValueError(f"No cells found with source lineage '{source_lineage}'")
+                start_cell_idx = rng.choice(source_indices)
+                z0 = z_all[start_cell_idx]
+                start_lineage = source_lineage
         else:
+            # Original behavior: sample random start cell
+            start_cell_idx = rng.randint(0, n_cells)
+            z0 = z_all[start_cell_idx]
+            start_lineage = adata.obs[lineage_key].iloc[start_cell_idx]
+        
+        # Select goal based on target_lineage or fixed_goal_idx
+        if target_goal_idx_viz is not None:
+            goal_idx = target_goal_idx_viz
+            goal_label = target_lineage
+        elif fixed_goal_idx is not None:
+            goal_idx = fixed_goal_idx
+            goal_label = goal_labels[goal_idx]
+        else:
+            # Random goal
             goal_idx = rng.randint(0, n_goals)
-        goal_label = goal_labels[goal_idx]
+            goal_label = goal_labels[goal_idx]
         
         # Get goal: sample a cell from target lineage or use centroid
-        if goal_mode == "centroid":
+        if target_mode == "centroid":
             z_goal = centroids[goal_idx].to(device)
-        else:  # goal_cell (default)
+        else:  # target_mode == "goal_cell"
             # Sample one cell from target lineage
             target_mask = adata.obs[lineage_key] == goal_label
             target_indices = np.where(target_mask)[0]
@@ -508,17 +552,56 @@ def generate_example_visualizations(
                 z_goal = centroids[goal_idx].to(device)
         
         # Get cluster/process indices for start cell
-        cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
-        process_idx = process_indices[start_cell_idx] if process_indices is not None else None
+        if start_cell_idx is not None:
+            cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
+            process_idx = process_indices[start_cell_idx] if process_indices is not None else None
+        else:
+            # When using centroid, use representative cluster/process indices from source lineage
+            if source_lineage is not None:
+                source_mask = adata.obs[lineage_key] == source_lineage
+                source_cell_idx_array = np.where(source_mask)[0]
+                
+                if cluster_indices is not None:
+                    # Use the most common cluster index from source lineage
+                    source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
+                    unique, counts = np.unique(source_cluster_values, return_counts=True)
+                    mode_cluster = unique[np.argmax(counts)]
+                    cluster_idx = torch.tensor(int(mode_cluster), dtype=torch.long, device=device)
+                else:
+                    cluster_idx = None
+                
+                if process_indices is not None:
+                    # Use the most common process index from source lineage
+                    source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
+                    unique, counts = np.unique(source_process_values, return_counts=True)
+                    mode_process = unique[np.argmax(counts)]
+                    process_idx = torch.tensor(int(mode_process), dtype=torch.long, device=device)
+                else:
+                    process_idx = None
+            else:
+                # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
+                cluster_idx = cluster_indices[0] if cluster_indices is not None else None
+                process_idx = process_indices[0] if process_indices is not None else None
         
         # Get initial x if needed
         x0 = None
         if adapter.velocity_mode == "fixed_x":
-            unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
-            spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
-            u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][start_cell_idx])).float().to(device)
-            s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx])).float().to(device)
-            x0 = torch.cat([u, s], dim=0)
+            if start_cell_idx is not None:
+                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][start_cell_idx])).float().to(device)
+                s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx])).float().to(device)
+                x0 = torch.cat([u, s], dim=0)
+            else:
+                # When using centroid, compute mean gene expression from source lineage
+                source_mask = adata.obs[lineage_key] == source_lineage
+                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                u_mean = np.asarray(adata.layers[unspliced_key][source_mask]).mean(axis=0)
+                s_mean = np.asarray(adata.layers[spliced_key][source_mask]).mean(axis=0)
+                u = torch.from_numpy(u_mean).float().to(device)
+                s = torch.from_numpy(s_mean).float().to(device)
+                x0 = torch.cat([u, s], dim=0)
         
         # Roll out baseline trajectory
         z_baseline, distances_baseline = rollout_baseline(
@@ -528,7 +611,7 @@ def generate_example_visualizations(
         # Roll out agent trajectory
         z_agent, distances_agent, actions, deltas = rollout_agent(
             single_env, policy, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx, process_idx,
-            deterministic=True
+            deterministic=deterministic
         )
         
         # Compute metrics
@@ -668,12 +751,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda)")
     parser.add_argument("--z_key", type=str, default="mean", help="Key in adata.obsm for latent states")
-    parser.add_argument("--goal_allowed", type=str, nargs="*", default=None, help="Allowed goal labels (default: all)")
-    parser.add_argument("--goal_exclude", type=str, nargs="*", default=None, help="Excluded goal labels")
-    parser.add_argument("--goal_min_cells", type=int, default=1, help="Minimum cells per goal lineage")
-    parser.add_argument("--fixed_goal", type=str, default=None, help="Fixed goal label for all episodes (optional)")
-    parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--source_lineage", type=str, default=None, help="Source lineage label (cells will be sampled from this lineage as starting points)")
+    parser.add_argument("--target_lineage", type=str, default=None, help="Target lineage label (goal for all episodes)")
+    parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
+                        help="Source mode: 'centroid' (use source lineage centroid as starting point) or 'sample' (sample a cell from source lineage, default)")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
     parser.add_argument("--n_iterations", type=int, default=None, help="Total training iterations (overrides config)")
     parser.add_argument("--epochs", type=int, default=None, help="PPO inner epochs per iteration (overrides config)")
     parser.add_argument("--batch_size", type=int, default=None, help="Environment batch size (overrides config)")
@@ -691,9 +774,12 @@ def main():
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
     parser.add_argument("--delta_max_scale", type=float, default=0.5, help="Scale factor for auto-calibrated delta_max (default: 0.5)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
+    parser.add_argument("--ent_coef", type=float, default=None, help="Entropy coefficient for exploration bonus (overrides config, default: 0.01)")
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
     parser.add_argument("--skip_viz", action="store_true", help="Skip trajectory visualization after training")
+    parser.add_argument("--deterministic", action="store_true", default=False,
+                        help="Use deterministic policy for visualization (default: False, uses stochastic sampling)")
     parser.add_argument("--gmm_path", type=str, default=None, help="Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically")
     parser.add_argument("--gmm_components", type=int, default=32, help="Number of GMM components (default: 32)")
     parser.add_argument("--lambda_off", type=float, default=0.0, help="Off-manifold penalty coefficient (default: 0.0, disabled)")
@@ -741,9 +827,9 @@ def main():
         adata, 
         args.lineage_key, 
         z_key=args.z_key,
-        allowed=args.goal_allowed,
-        exclude=args.goal_exclude,
-        min_cells=args.goal_min_cells,
+        allowed=None,
+        exclude=None,
+        min_cells=1,
     )
     centroids = centroids.to(device)
     print(f"Found {len(goal_labels)} goal lineages: {goal_labels}")
@@ -752,13 +838,33 @@ def main():
     label_to_goal_idx = {label: idx for idx, label in enumerate(goal_labels)}
     n_goals = len(goal_labels)
     
-    # Handle fixed_goal
+    # Handle source_lineage and target_lineage
+    source_lineage = args.source_lineage
+    target_lineage = args.target_lineage
+    
+    # Validate source and target lineages if provided
+    if source_lineage is not None:
+        if source_lineage not in adata.obs[args.lineage_key].values:
+            raise ValueError(f"Source lineage '{source_lineage}' not found in adata.obs['{args.lineage_key}']")
+        source_mask = adata.obs[args.lineage_key] == source_lineage
+        n_source_cells = source_mask.sum()
+        if n_source_cells == 0:
+            raise ValueError(f"Source lineage '{source_lineage}' has no cells")
+        print(f"Using source lineage: {source_lineage} ({n_source_cells} cells)")
+    
+    if target_lineage is not None:
+        if target_lineage not in goal_labels:
+            raise ValueError(f"Target lineage '{target_lineage}' not in goal_labels: {goal_labels}")
+        if source_lineage is not None and source_lineage == target_lineage:
+            raise ValueError(f"Source lineage '{source_lineage}' cannot be the same as target lineage '{target_lineage}'")
+        print(f"Using target lineage: {target_lineage}")
+    
+    # Handle target_lineage as fixed goal
     fixed_goal_idx = None
-    if args.fixed_goal is not None:
-        if args.fixed_goal not in label_to_goal_idx:
-            raise ValueError(f"Fixed goal '{args.fixed_goal}' not in goal_labels: {goal_labels}")
-        fixed_goal_idx = label_to_goal_idx[args.fixed_goal]
-        print(f"Using fixed goal: {args.fixed_goal} (index {fixed_goal_idx})")
+    if target_lineage is not None:
+        # Use target_lineage as fixed goal
+        fixed_goal_idx = label_to_goal_idx[target_lineage]
+        print(f"Target lineage '{target_lineage}' set as fixed goal (index {fixed_goal_idx})")
     
     # Create adapter
     velocity_mode = env_config.get("velocity_mode", "decode_x")
@@ -792,8 +898,15 @@ def main():
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
     
-    # Get goal_mode from CLI or config
-    goal_mode = args.goal_mode if args.goal_mode is not None else env_config.get("goal_mode", "centroid")
+    # Get source_mode and target_mode from CLI or config
+    source_mode = args.source_mode if args.source_mode is not None else env_config.get("source_mode", "sample")
+    target_mode = args.target_mode if args.target_mode is not None else env_config.get("target_mode", "centroid")
+    
+    # Validate source_mode if source_lineage is specified
+    if source_lineage is not None:
+        if source_mode not in ["centroid", "sample"]:
+            raise ValueError(f"source_mode must be 'centroid' or 'sample', got '{source_mode}'")
+        print(f"Source mode: {source_mode}")
     
     # Get T_max and T_rollout, ensure T_max >= T_rollout
     T_rollout_for_env = args.T_rollout if args.T_rollout is not None else training_config.get("T_rollout", 50)
@@ -844,7 +957,7 @@ def main():
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
-    print(f"Goal mode: {goal_mode}")
+    print(f"Source mode: {source_mode}, Target mode: {target_mode}")
     
     # Auto-calibrate delta_max based on velocity field drift norms
     z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)  # (n_cells, n_latent)
@@ -924,7 +1037,7 @@ def main():
         clip_eps=ppo_config.get("clip_eps", 0.2),
         target_kl=ppo_config.get("target_kl", 0.01),
         vf_coef=ppo_config.get("vf_coef", 0.5),
-        ent_coef=ppo_config.get("ent_coef", 0.01),
+        ent_coef=args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01),
         lr=ppo_config.get("lr", 3e-4),
         max_grad_norm=ppo_config.get("max_grad_norm", 0.5),
         device=device,
@@ -949,21 +1062,60 @@ def main():
             raise ValueError(
                 f"No eligible start cells for goal '{goal_label}' "
                 f"because all cells have that origin. "
-                f"Adjust goal filters (--goal_allowed, --goal_exclude, --goal_min_cells) or dataset."
+                f"Choose a different goal or dataset."
             )
+    
+    # If source_lineage is specified, filter eligible cells to only those from source_lineage
+    source_cell_indices = None
+    if source_lineage is not None:
+        source_mask = adata.obs[args.lineage_key] == source_lineage
+        source_cell_indices = np.where(source_mask)[0]
+        if len(source_cell_indices) == 0:
+            raise ValueError(f"Source lineage '{source_lineage}' has no cells")
+        
+        # If target_lineage is also specified, verify source != target
+        if target_lineage is not None:
+            if source_lineage == target_lineage:
+                raise ValueError(f"Source lineage '{source_lineage}' cannot be the same as target lineage '{target_lineage}'")
+            
+            # Verify that source cells are eligible for target goal
+            target_goal_idx = label_to_goal_idx[target_lineage]
+            source_eligible_for_target = np.intersect1d(source_cell_indices, eligible_cells[target_goal_idx])
+            if len(source_eligible_for_target) == 0:
+                raise ValueError(
+                    f"No eligible start cells from source lineage '{source_lineage}' for target lineage '{target_lineage}'. "
+                    f"This may happen if all cells from source lineage have origin '{target_lineage}'. "
+                    f"Choose different source/target lineages."
+                )
+            print(f"Source lineage '{source_lineage}' has {len(source_eligible_for_target)} cells eligible for target '{target_lineage}'")
     
     # If fixed_goal is set, verify it has eligible cells
     if fixed_goal_idx is not None:
-        if len(eligible_cells[fixed_goal_idx]) == 0:
-            raise ValueError(
-                f"Fixed goal '{args.fixed_goal}' has no eligible start cells. "
-                f"All cells have origin '{args.fixed_goal}'. "
-                f"Choose a different goal or adjust filters."
-            )
+        if source_lineage is not None:
+            # Check if source cells are eligible for fixed goal
+            source_eligible = np.intersect1d(source_cell_indices, eligible_cells[fixed_goal_idx])
+            if len(source_eligible) == 0:
+                raise ValueError(
+                    f"No eligible start cells from source lineage '{source_lineage}' for target goal (index {fixed_goal_idx}). "
+                    f"All cells from source lineage have origin matching the target goal. "
+                    f"Choose different source/target lineages."
+                )
+        else:
+            if len(eligible_cells[fixed_goal_idx]) == 0:
+                raise ValueError(
+                    f"Target goal '{target_lineage}' has no eligible start cells. "
+                    f"All cells have origin matching the goal. "
+                    f"Choose a different goal or adjust filters."
+                )
     
     print(f"Precomputed eligible cells for {n_goals} goals")
     for g_idx, goal_label in enumerate(goal_labels):
-        print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")
+        if source_lineage is not None and fixed_goal_idx == g_idx:
+            # Show intersection with source cells
+            source_eligible = np.intersect1d(source_cell_indices, eligible_cells[g_idx])
+            print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells (from source '{source_lineage}': {len(source_eligible)})")
+        else:
+            print(f"  Goal '{goal_label}': {len(eligible_cells[g_idx])} eligible start cells")
     
     # Training loop
     n_iterations = args.n_iterations if args.n_iterations is not None else training_config.get("n_iterations", 1000)
@@ -975,8 +1127,22 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Precompute source centroid if using centroid mode
+    source_centroid = None
+    if source_lineage is not None and source_mode == "centroid":
+        source_mask = adata.obs[args.lineage_key] == source_lineage
+        source_centroid = z_all[source_mask].mean(dim=0)  # (n_latent,)
+        print(f"Computed source centroid for '{source_lineage}': shape {source_centroid.shape}")
+    
     print(f"Starting training for {n_iterations} iterations...")
-    print(f"Training uses uniform goal sampling (goal_mode={goal_mode}). Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
+    if source_lineage is not None and target_lineage is not None:
+        print(f"Training with fixed source='{source_lineage}' (mode={source_mode}) and target='{target_lineage}' (mode={target_mode})")
+    elif source_lineage is not None:
+        print(f"Training with fixed source='{source_lineage}' (mode={source_mode}), goals sampled uniformly (target_mode={target_mode})")
+    elif target_lineage is not None:
+        print(f"Training with fixed target='{target_lineage}' (mode={target_mode}), start cells sampled from eligible origins")
+    else:
+        print(f"Training uses uniform goal sampling (target_mode={target_mode}). Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
     
     # Initialize metrics history
     metrics_history = {
@@ -1013,18 +1179,35 @@ def main():
             goal_idx = torch.randint(0, n_goals, (batch_size,), device=device)
         
         # Sample start cells conditioned on goal (origin != goal)
-        cell_indices = np.zeros(batch_size, dtype=np.int64)
-        for i in range(batch_size):
-            g_i = goal_idx[i].item()
-            eligible = eligible_cells[g_i]
-            cell_indices[i] = np.random.choice(eligible)
+        if source_lineage is not None and source_mode == "centroid":
+            # Use source lineage centroid as starting point for all episodes
+            z0 = source_centroid.unsqueeze(0).repeat(batch_size, 1)  # (B, n_latent) - same starting point for all
+            cell_indices = None  # Not used when using centroid
+        else:
+            # Sample cells (either from source lineage or all eligible)
+            cell_indices = np.zeros(batch_size, dtype=np.int64)
+            for i in range(batch_size):
+                g_i = goal_idx[i].item()
+                if source_lineage is not None:
+                    # Sample only from source lineage cells that are eligible for this goal
+                    source_eligible = np.intersect1d(source_cell_indices, eligible_cells[g_i])
+                    if len(source_eligible) == 0:
+                        raise ValueError(
+                            f"No eligible cells from source lineage '{source_lineage}' for goal index {g_i}. "
+                            f"This should have been caught during validation."
+                        )
+                    cell_indices[i] = np.random.choice(source_eligible)
+                else:
+                    # Original behavior: sample from all eligible cells
+                    eligible = eligible_cells[g_i]
+                    cell_indices[i] = np.random.choice(eligible)
+            
+            # Get latent states for sampled cells
+            z0 = z_all[cell_indices]  # (B, n_latent)
         
-        # Get latent states for sampled cells
-        z0 = z_all[cell_indices]  # (B, n_latent)
-        
-        # Sample goal states if goal_mode == "goal_cell"
+        # Sample goal states if target_mode == "goal_cell"
         goal_states = None
-        if goal_mode == "goal_cell":
+        if target_mode == "goal_cell":
             goal_states = torch.zeros(batch_size, n_latent, device=device)
             for i in range(batch_size):
                 g_i = goal_idx[i].item()
@@ -1042,20 +1225,59 @@ def main():
         # Get per-cell cluster/process indices for sampled cells
         cluster_idx_batch = None
         process_idx_batch = None
-        if cluster_indices is not None:
-            cluster_idx_batch = cluster_indices[cell_indices]
-        if process_indices is not None:
-            process_idx_batch = process_indices[cell_indices]
+        if cell_indices is not None:
+            if cluster_indices is not None:
+                cluster_idx_batch = cluster_indices[cell_indices]
+            if process_indices is not None:
+                process_idx_batch = process_indices[cell_indices]
+        else:
+            # When using centroid, use representative cluster/process indices from source lineage
+            if source_lineage is not None:
+                source_mask = adata.obs[args.lineage_key] == source_lineage
+                source_cell_idx_array = np.where(source_mask)[0]
+                
+                if cluster_indices is not None:
+                    # Use the most common cluster index from source lineage
+                    source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
+                    # Compute mode manually
+                    unique, counts = np.unique(source_cluster_values, return_counts=True)
+                    mode_cluster = unique[np.argmax(counts)]
+                    cluster_idx_batch = torch.full((batch_size,), int(mode_cluster), dtype=torch.long, device=device)
+                
+                if process_indices is not None:
+                    # Use the most common process index from source lineage
+                    source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
+                    # Compute mode manually
+                    unique, counts = np.unique(source_process_values, return_counts=True)
+                    mode_process = unique[np.argmax(counts)]
+                    process_idx_batch = torch.full((batch_size,), int(mode_process), dtype=torch.long, device=device)
+            else:
+                # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
+                if cluster_indices is not None:
+                    cluster_idx_batch = torch.full((batch_size,), cluster_indices[0].item(), dtype=torch.long, device=device)
+                if process_indices is not None:
+                    process_idx_batch = torch.full((batch_size,), process_indices[0].item(), dtype=torch.long, device=device)
         
         # Get initial x if needed for fixed_x mode
         x0 = None
         if velocity_mode == "fixed_x":
-            # Get gene expression for sampled cells
-            unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
-            spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
-            u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][cell_indices])).float().to(device)
-            s = torch.from_numpy(np.asarray(adata.layers[spliced_key][cell_indices])).float().to(device)
-            x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
+            if cell_indices is not None:
+                # Get gene expression for sampled cells
+                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][cell_indices])).float().to(device)
+                s = torch.from_numpy(np.asarray(adata.layers[spliced_key][cell_indices])).float().to(device)
+                x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
+            else:
+                # When using centroid, compute mean gene expression from source lineage
+                source_mask = adata.obs[args.lineage_key] == source_lineage
+                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                u_mean = np.asarray(adata.layers[unspliced_key][source_mask]).mean(axis=0)
+                s_mean = np.asarray(adata.layers[spliced_key][source_mask]).mean(axis=0)
+                u = torch.from_numpy(u_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
+                s = torch.from_numpy(s_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
+                x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
         
         # Collect rollouts
         batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch, goal_states=goal_states)
@@ -1129,7 +1351,7 @@ def main():
                     "delta_max_scale": args.delta_max_scale if args.delta_max is None else "N/A",
                     "dt": dt,
                 },
-                "goal_mode": goal_mode,
+                "target_mode": target_mode,
                 **config_copy,
             }
             save_policy_checkpoint(
@@ -1171,11 +1393,15 @@ def main():
             R_succ=R_succ,
             alpha_stay=alpha_stay,
             use_negative_velocity=use_negative_velocity,
-            goal_mode=goal_mode,  # Use same goal_mode as training
+            target_mode=target_mode,  # Use same target_mode as training
             seed=args.seed,
             gmm_path=gmm_path,
             lambda_off=lambda_off,
             fixed_goal_idx=fixed_goal_idx,
+            source_lineage=source_lineage,  # Pass source_lineage from training
+            target_lineage=target_lineage,  # Pass target_lineage from training
+            source_mode=source_mode,  # Pass source_mode from training
+            deterministic=args.deterministic,
         )
 
 

@@ -373,7 +373,7 @@ def load_model(
     
     # initialize a fresh instance with inferred parameters
     inst = LineageVI(adata, **kwargs)
-    
+
     # load weights with strict=False to handle architecture changes gracefully
     report = inst.model.load_state_dict(state, strict=False)
     if len(report.missing_keys) or len(report.unexpected_keys):
@@ -382,13 +382,13 @@ def load_model(
             print(f"  Missing keys: {report.missing_keys}")
         if len(report.unexpected_keys) > 0:
             print(f"  Unexpected keys: {report.unexpected_keys}")
-    
+
     # set mode
     if training:
         inst.model.train()
     else:
         inst.model.eval()
-    
+
     return inst
 
 def build_gp_adata(

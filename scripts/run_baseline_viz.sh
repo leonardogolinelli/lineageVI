@@ -7,10 +7,10 @@ set -e  # Exit on error
 CONDA_ENV="test3"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
 LINEAGE_KEY="leiden"
-TARGET_GOAL="1"
-START_CELL_IDX=""
-START_LINEAGE=""
-GOAL_MODE="centroid"
+TARGET_LINEAGE="1"
+SOURCE_LINEAGE=""
+SOURCE_MODE="sample"  # "centroid" or "sample"
+TARGET_MODE="centroid"  # "centroid" or "goal_cell"
 T="512"
 T_MAX="512"
 EMBEDDING="pca"
@@ -36,20 +36,20 @@ while [[ $# -gt 0 ]]; do
             LINEAGE_KEY="$2"
             shift 2
             ;;
-        --target_goal)
-            TARGET_GOAL="$2"
+        --target_lineage)
+            TARGET_LINEAGE="$2"
             shift 2
             ;;
-        --start_cell_idx)
-            START_CELL_IDX="$2"
+        --source_lineage)
+            SOURCE_LINEAGE="$2"
             shift 2
             ;;
-        --start_lineage)
-            START_LINEAGE="$2"
+        --source_mode)
+            SOURCE_MODE="$2"
             shift 2
             ;;
-        --goal_mode)
-            GOAL_MODE="$2"
+        --target_mode)
+            TARGET_MODE="$2"
             shift 2
             ;;
         --T)
@@ -101,9 +101,13 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "OPTIONAL ARGUMENTS:"
             echo "  --lineage_key KEY           Key in adata.obs for lineage labels (default: leiden)"
-            echo "  --start_cell_idx N          Start cell index (mutually exclusive with --start_lineage)"
-            echo "  --start_lineage LABEL       Start lineage label (mutually exclusive with --start_cell_idx, default: random)"
-            echo "  --goal_mode MODE            Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --start_cell_idx N          Start cell index (mutually exclusive with --start_lineage/--source_lineage)"
+            echo "  --start_lineage LABEL       Start lineage label (deprecated, use --source_lineage)"
+            echo "  --source_lineage LABEL      Source lineage label (mutually exclusive with --start_cell_idx, default: random)"
+            echo "  --source_mode MODE          Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
+            echo "  --target_goal LABEL         Target goal label (deprecated, use --target_lineage)"
+            echo "  --target_lineage LABEL      Target lineage label (required if --target_goal not provided)"
+            echo "  --goal_mode MODE            Goal mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
             echo "  --T N                       Rollout horizon (default: 256)"
             echo "  --T_max N                   Maximum episode length (default: same as T)"
             echo "  --embedding METHOD          Embedding method: 'pca' or 'umap' (default: pca)"
@@ -117,8 +121,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --conda_env ENV             Conda environment name (default: test3)"
             echo ""
             echo "EXAMPLES:"
-            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_goal 1"
-            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_goal Beta --start_lineage Alpha --T 512 --T_max 512"
+            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_lineage 1"
+            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode goal_cell --T 512 --T_max 512"
             exit 0
             ;;
         *)
@@ -135,8 +139,8 @@ if [[ -z "$LINEAGEVI_OUTPUT_DIR" ]]; then
     exit 1
 fi
 
-if [[ -z "$TARGET_GOAL" ]]; then
-    echo "Error: --target_goal is required"
+if [[ -z "$TARGET_LINEAGE" ]]; then
+    echo "Error: --target_lineage is required"
     exit 1
 fi
 
@@ -172,10 +176,17 @@ echo "=========================================="
 echo "LineageVI output dir: $LINEAGEVI_OUTPUT_DIR"
 echo "Model: $MODEL_PATH"
 echo "AnnData: $ADATA_PATH"
-echo "Target goal: $TARGET_GOAL"
+echo "Target lineage: $TARGET_LINEAGE"
+if [[ -n "$SOURCE_LINEAGE" ]]; then
+    echo "Source lineage: $SOURCE_LINEAGE (mode: $SOURCE_MODE)"
+fi
+echo "Goal mode: $GOAL_MODE"
 echo "T: $T"
 if [[ -n "$T_MAX" ]]; then
     echo "T_max: $T_MAX"
+fi
+if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
+    echo "Using negative velocity"
 fi
 echo "Output dir: $OUTPUT_DIR"
 echo "=========================================="
@@ -196,8 +207,8 @@ PYTHON_ARGS=(
     --model_path "$MODEL_PATH"
     --adata_path "$ADATA_PATH"
     --lineage_key "$LINEAGE_KEY"
-    --target_goal "$TARGET_GOAL"
-    --goal_mode "$GOAL_MODE"
+    --target_lineage "$TARGET_LINEAGE"
+    --target_mode "$TARGET_MODE"
     --T "$T"
     --embedding "$EMBEDDING"
     --z_key "$Z_KEY"
@@ -207,12 +218,12 @@ PYTHON_ARGS=(
     --dt "$DT"
 )
 
-if [[ -n "$START_CELL_IDX" ]]; then
-    PYTHON_ARGS+=(--start_cell_idx "$START_CELL_IDX")
+if [[ -n "$SOURCE_LINEAGE" ]]; then
+    PYTHON_ARGS+=(--source_lineage "$SOURCE_LINEAGE")
 fi
 
-if [[ -n "$START_LINEAGE" ]]; then
-    PYTHON_ARGS+=(--start_lineage "$START_LINEAGE")
+if [[ -n "$SOURCE_MODE" ]]; then
+    PYTHON_ARGS+=(--source_mode "$SOURCE_MODE")
 fi
 
 if [[ -n "$T_MAX" ]]; then

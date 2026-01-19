@@ -5,15 +5,16 @@ set -e  # Exit on error
 
 # Default values
 CONDA_ENV="test3"
-RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260117_231344"
+RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260118_195302"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
 LINEAGE_KEY="leiden"
 CHECKPOINT=""
-TARGET_GOAL="1"
-START_CELL_IDX=""
-START_LINEAGE=""
-GOAL_MODE="centroid"
-T=512
+TARGET_LINEAGE="1"
+SOURCE_LINEAGE="2"
+SOURCE_MODE="centroid"  # "centroid" or "sample"
+TARGET_MODE="centroid"  # "centroid" or "goal_cell"
+USE_NEGATIVE_VELOCITY=""
+T=256
 EMBEDDING="pca"
 Z_KEY="mean"
 OUTPUT_DIR_BASE="./test_outputs/viz"
@@ -21,6 +22,7 @@ SEED=42
 DEVICE="auto"
 DETERMINISTIC=""
 INTERVENTION_METHOD="heatmap"
+N_VIZ_TRAJECTORIES="10"
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,21 +47,25 @@ while [[ $# -gt 0 ]]; do
             LINEAGE_KEY="$2"
             shift 2
             ;;
-        --target_goal)
-            TARGET_GOAL="$2"
+        --target_lineage)
+            TARGET_LINEAGE="$2"
             shift 2
             ;;
-        --start_cell_idx)
-            START_CELL_IDX="$2"
+        --source_lineage)
+            SOURCE_LINEAGE="$2"
             shift 2
             ;;
-        --start_lineage)
-            START_LINEAGE="$2"
+        --source_mode)
+            SOURCE_MODE="$2"
             shift 2
             ;;
-        --goal_mode)
-            GOAL_MODE="$2"
+        --target_mode)
+            TARGET_MODE="$2"
             shift 2
+            ;;
+        --use_negative_velocity)
+            USE_NEGATIVE_VELOCITY="--use_negative_velocity"
+            shift
             ;;
         --T)
             T="$2"
@@ -93,6 +99,10 @@ while [[ $# -gt 0 ]]; do
             INTERVENTION_METHOD="$2"
             shift 2
             ;;
+        --n_viz_trajectories)
+            N_VIZ_TRAJECTORIES="$2"
+            shift 2
+            ;;
         --conda_env)
             CONDA_ENV="$2"
             shift 2
@@ -102,15 +112,16 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "REQUIRED ARGUMENTS:"
             echo "  --rl_output_dir DIR         Path to RL training output folder (contains checkpoints)"
-            echo "  --target_goal LABEL         Target goal label for visualization"
+            echo "  --target_lineage LABEL       Target lineage label"
             echo ""
             echo "OPTIONAL ARGUMENTS:"
             echo "  --lineagevi_output_dir DIR  Path to LineageVI output folder (default: auto-detect from RL output)"
             echo "  --checkpoint PATH           Path to specific checkpoint file (default: latest policy_iter_*.pt)"
             echo "  --lineage_key KEY           Key in adata.obs for lineage labels (default: leiden)"
-            echo "  --start_cell_idx N          Start cell index (mutually exclusive with --start_lineage)"
-            echo "  --start_lineage LABEL       Start lineage label (mutually exclusive with --start_cell_idx, default: random)"
-            echo "  --goal_mode MODE            Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --source_lineage LABEL      Source lineage label (default: random)"
+            echo "  --source_mode MODE          Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
+            echo "  --target_mode MODE          Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo "  --T N                       Rollout horizon (default: 64)"
             echo "  --embedding METHOD          Embedding method: 'pca' or 'umap' (default: pca)"
             echo "  --z_key KEY                 Key in adata.obsm for latent states (default: mean)"
@@ -118,14 +129,15 @@ while [[ $# -gt 0 ]]; do
             echo "                             Timestamp will be appended automatically"
             echo "  --seed N                    Random seed (default: 42)"
             echo "  --device DEV                Device: auto, cpu, or cuda (default: auto)"
-            echo "  --deterministic             Use deterministic policy (default: True)"
+            echo "  --deterministic             Use deterministic policy (default: False, uses stochastic sampling)"
             echo "  --intervention_method M     Intervention plot method: 'stem' or 'heatmap' (default: heatmap)"
+            echo "  --n_viz_trajectories N      Number of trajectory visualizations to generate (default: 1)"
             echo "  --conda_env ENV             Conda environment name (default: test3)"
             echo ""
             echo "EXAMPLES:"
-            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_goal 1"
-            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_goal Beta --start_lineage Alpha --goal_mode goal_cell"
-            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_goal Beta --start_cell_idx 123 --goal_mode goal_cell"
+            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage 1"
+            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --target_mode goal_cell"
+            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode goal_cell"
             exit 0
             ;;
         *)
@@ -142,8 +154,8 @@ if [[ -z "$RL_OUTPUT_DIR" ]]; then
     exit 1
 fi
 
-if [[ -z "$TARGET_GOAL" ]]; then
-    echo "Error: --target_goal is required"
+if [[ -z "$TARGET_LINEAGE" ]]; then
+    echo "Error: --target_lineage is required"
     exit 1
 fi
 
@@ -221,7 +233,14 @@ echo "LineageVI output dir: $LINEAGEVI_OUTPUT_DIR"
 echo "Checkpoint: $CHECKPOINT"
 echo "Model: $MODEL_PATH"
 echo "AnnData: $ADATA_PATH"
-echo "Target goal: $TARGET_GOAL"
+echo "Target lineage: $TARGET_LINEAGE"
+if [[ -n "$SOURCE_LINEAGE" ]]; then
+    echo "Source lineage: $SOURCE_LINEAGE (mode: $SOURCE_MODE)"
+fi
+echo "Goal mode: $GOAL_MODE"
+if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
+    echo "Using negative velocity"
+fi
 echo "Output dir: $OUTPUT_DIR"
 echo "=========================================="
 
@@ -242,8 +261,8 @@ PYTHON_ARGS=(
     --model_path "$MODEL_PATH"
     --adata_path "$ADATA_PATH"
     --lineage_key "$LINEAGE_KEY"
-    --target_goal "$TARGET_GOAL"
-    --goal_mode "$GOAL_MODE"
+    --target_lineage "$TARGET_LINEAGE"
+    --target_mode "$TARGET_MODE"
     --T "$T"
     --embedding "$EMBEDDING"
     --z_key "$Z_KEY"
@@ -253,16 +272,24 @@ PYTHON_ARGS=(
     --intervention_method "$INTERVENTION_METHOD"
 )
 
-if [[ -n "$START_CELL_IDX" ]]; then
-    PYTHON_ARGS+=(--start_cell_idx "$START_CELL_IDX")
+if [[ -n "$SOURCE_LINEAGE" ]]; then
+    PYTHON_ARGS+=(--source_lineage "$SOURCE_LINEAGE")
 fi
 
-if [[ -n "$START_LINEAGE" ]]; then
-    PYTHON_ARGS+=(--start_lineage "$START_LINEAGE")
+if [[ -n "$SOURCE_MODE" ]]; then
+    PYTHON_ARGS+=(--source_mode "$SOURCE_MODE")
+fi
+
+if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
+    PYTHON_ARGS+=(--use_negative_velocity)
 fi
 
 if [[ -n "$DETERMINISTIC" ]]; then
     PYTHON_ARGS+=(--deterministic)
+fi
+
+if [[ -n "$N_VIZ_TRAJECTORIES" ]]; then
+    PYTHON_ARGS+=(--n_viz_trajectories "$N_VIZ_TRAJECTORIES")
 fi
 
 # Run the visualization script
