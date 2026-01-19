@@ -20,6 +20,8 @@ from .utils import (
     set_seed,
     save_policy_checkpoint,
 )
+from .gmm import SklearnGMMScorer
+from .fit_gmm import fit_gmm
 from .viz import (
     build_embedding,
     rollout_baseline,
@@ -51,8 +53,8 @@ def plot_training_curves(
     plots_dir = output_dir / "training_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     
-    # Plot 1: Combined overview (3x2 grid for better organization)
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    # Plot 1: Combined overview (3x3 grid to include mean_nll)
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
     fig.suptitle("RL Training Metrics", fontsize=16)
     
     # Policy loss (separate subplot)
@@ -118,6 +120,18 @@ def plot_training_curves(
     ax.set_title("Velocity Magnitude")
     ax.legend()
     ax.grid(True, alpha=0.3)
+    
+    # Mean NLL (off-manifold penalty) - if available
+    ax = axes[2, 2]
+    if "mean_nll" in metrics_history:
+        ax.plot(metrics_history["mean_nll"], label="Mean NLL", alpha=0.7, color="purple", linewidth=2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("NLL")
+        ax.set_title("Mean Negative Log-Likelihood\n(Off-Manifold Penalty)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.axis('off')  # Hide empty subplot
     
     plt.tight_layout()
     plot_path = plots_dir / "training_curves.png"
@@ -214,8 +228,9 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return"]
+    task_metric_keys = ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]
     if any(key in metrics_history for key in task_metric_keys):
+        # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
         fig.suptitle("Task-Level Evaluation Metrics", fontsize=16)
         
@@ -305,11 +320,32 @@ def plot_training_curves(
         ax = axes[2, 2]
         if "mean_episode_return" in metrics_history:
             ax.plot(metrics_history["mean_episode_return"], label="Episode Return", alpha=0.7, color="brown", linewidth=2)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel("Return")
-        ax.set_title("Mean Episode Return")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+            ax.set_xlabel("Iteration")
+            ax.set_ylabel("Return")
+            ax.set_title("Mean Episode Return")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        # Plot mean NLL if available (overlay on episode return if both exist, or use separate subplot)
+        if "mean_nll" in metrics_history:
+            if "mean_episode_return" in metrics_history:
+                # Both exist: plot NLL on secondary y-axis
+                ax2 = ax.twinx()
+                ax2.plot(metrics_history["mean_nll"], label="Mean NLL", alpha=0.7, color="purple", linewidth=2, linestyle="--")
+                ax2.set_ylabel("NLL (Off-Manifold)", color="purple")
+                ax2.tick_params(axis='y', labelcolor="purple")
+                # Combine legends
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, loc='best')
+            else:
+                # Only NLL exists: use the main plot
+                ax.plot(metrics_history["mean_nll"], label="Mean NLL", alpha=0.7, color="purple", linewidth=2)
+                ax.set_xlabel("Iteration")
+                ax.set_ylabel("NLL")
+                ax.set_title("Mean Negative Log-Likelihood (Off-Manifold)")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plot_path = plots_dir / "task_metrics.png"
@@ -338,6 +374,10 @@ def generate_example_visualizations(
     lambda_mag: float = 0.1,
     R_succ: float = 10.0,
     use_negative_velocity: bool = False,
+    goal_mode: str = "centroid",
+    seed: int = 42,
+    gmm_path: Optional[str] = None,
+    lambda_off: float = 0.0,
 ):
     """
     Generate example trajectory visualizations after training.
@@ -400,6 +440,22 @@ def generate_example_visualizations(
     # Ensure T_max is at least as large as T_rollout
     T_max_viz = max(T_max_viz, T_rollout)
     
+    # Get GMM path and lambda_off for visualization (use same as training)
+    gmm_path_viz = None
+    lambda_off_viz = 0.0
+    if lambda_off > 0.0:
+        # Use the same GMM that was used during training
+        gmm_path_viz = str(output_dir / "gmm.pkl")
+        if not Path(gmm_path_viz).exists():
+            # Try to use provided gmm_path if it exists
+            if gmm_path and Path(gmm_path).exists():
+                gmm_path_viz = gmm_path
+            else:
+                print(f"Warning: GMM not found at {gmm_path_viz}, disabling off-manifold penalty in visualization")
+                lambda_off_viz = 0.0
+        else:
+            lambda_off_viz = lambda_off
+    
     # Create single environment for visualization
     single_env = LatentVelocityEnv(
         adapter=adapter,
@@ -413,6 +469,8 @@ def generate_example_visualizations(
         lambda_mag=lambda_mag,
         R_succ=R_succ,
         use_negative_velocity=use_negative_velocity,
+        gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
+        lambda_off=lambda_off_viz,
     )
     
     # Sample example trajectories
@@ -425,9 +483,23 @@ def generate_example_visualizations(
         start_lineage = adata.obs[lineage_key].iloc[start_cell_idx]
         
         # Sample random goal (different from start if possible)
-        goal_idx = np.random.randint(0, n_goals)
+        rng = np.random.RandomState(seed + example_idx)  # Use seed + example_idx for reproducibility
+        goal_idx = rng.randint(0, n_goals)
         goal_label = goal_labels[goal_idx]
-        z_goal = centroids[goal_idx].to(device)
+        
+        # Get goal: sample a cell from target lineage or use centroid
+        if goal_mode == "centroid":
+            z_goal = centroids[goal_idx].to(device)
+        else:  # goal_cell (default)
+            # Sample one cell from target lineage
+            target_mask = adata.obs[lineage_key] == goal_label
+            target_indices = np.where(target_mask)[0]
+            if len(target_indices) > 0:
+                goal_cell_idx = rng.choice(target_indices)
+                z_goal = z_all[goal_cell_idx].to(device)
+            else:
+                # Fallback to centroid if no cells found
+                z_goal = centroids[goal_idx].to(device)
         
         # Get cluster/process indices for start cell
         cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
@@ -611,6 +683,9 @@ def main():
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
     parser.add_argument("--skip_viz", action="store_true", help="Skip trajectory visualization after training")
+    parser.add_argument("--gmm_path", type=str, default=None, help="Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically")
+    parser.add_argument("--gmm_components", type=int, default=32, help="Number of GMM components (default: 32)")
+    parser.add_argument("--lambda_off", type=float, default=0.0, help="Off-manifold penalty coefficient (default: 0.0, disabled)")
     
     args = parser.parse_args()
     
@@ -710,6 +785,31 @@ def main():
     T_max_env = args.T_max if args.T_max is not None else env_config.get("T_max", 100)
     T_max_env = max(T_max_env, T_rollout_for_env)  # Ensure T_max is at least as large as T_rollout
     
+    # Handle GMM for off-manifold penalty
+    gmm_path = None
+    lambda_off = args.lambda_off if args.lambda_off is not None else 0.0
+    
+    if lambda_off > 0.0:
+        if args.gmm_path is not None:
+            # Use provided GMM path
+            gmm_path = args.gmm_path
+            print(f"Using GMM from {gmm_path}")
+        else:
+            # Fit GMM automatically
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            gmm_path = str(output_dir / "gmm.pkl")
+            
+            print(f"Fitting GMM with {args.gmm_components} components...")
+            fit_gmm(
+                adata_path=args.adata_path,
+                z_key=args.z_key,
+                out_path=gmm_path,
+                n_components=args.gmm_components,
+                seed=args.seed,
+            )
+            print(f"Saved GMM to {gmm_path}")
+    
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -723,6 +823,8 @@ def main():
         lambda_mag=lambda_mag,
         R_succ=R_succ,
         use_negative_velocity=use_negative_velocity,
+        gmm_path=gmm_path,
+        lambda_off=lambda_off,
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}")
@@ -815,6 +917,7 @@ def main():
         "entropy": [],
         "kl": [],
         "clip_fraction": [],
+        "mean_nll": [],  # Off-manifold penalty (only populated if lambda_off > 0)
         # Task metrics
         "success_rate": [],
         "mean_final_distance": [],
@@ -882,8 +985,12 @@ def main():
             minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
         )
         
-        # Merge PPO metrics and task metrics
-        all_metrics = {**metrics, **task_metrics}
+        # Compute mean NLL if available
+        if lambda_off > 0.0 and "nll" in batch:
+            mean_nll = batch["nll"].mean().item()
+            all_metrics = {**metrics, **task_metrics, "mean_nll": mean_nll}
+        else:
+            all_metrics = {**metrics, **task_metrics}
         
         # Store metrics for plotting
         for k in metrics_history.keys():
@@ -909,7 +1016,7 @@ def main():
                 if k in all_metrics:
                     print(f"    {k}: {all_metrics[k]:.4f}")
             print("  Task metrics:")
-            for k in ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return"]:
+            for k in ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]:
                 if k in all_metrics:
                     print(f"    {k}: {all_metrics[k]:.4f}")
             # Log step norms from environment
@@ -971,6 +1078,10 @@ def main():
             lambda_mag=lambda_mag,
             R_succ=R_succ,
             use_negative_velocity=use_negative_velocity,
+            goal_mode="centroid",  # Default: use lineage centroid
+            seed=args.seed,
+            gmm_path=gmm_path,
+            lambda_off=lambda_off,
         )
 
 

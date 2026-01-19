@@ -7,6 +7,7 @@ import numpy as np
 import scanpy as sc
 
 from .adapter import VelocityVAEAdapter
+from .gmm import SklearnGMMScorer
 
 
 class LatentVelocityEnv:
@@ -39,6 +40,8 @@ class LatentVelocityEnv:
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
+        gmm_path: Optional[str] = None,
+        lambda_off: float = 0.0,
     ):
         self.adapter = adapter
         self.centroids = centroids.to(adapter.device)  # (n_goals, n_latent)
@@ -53,6 +56,14 @@ class LatentVelocityEnv:
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
         self.use_negative_velocity = use_negative_velocity
+        self.lambda_off = lambda_off
+        
+        # Initialize GMM scorer if lambda_off > 0
+        self.gmm_scorer = None
+        if lambda_off > 0.0:
+            if gmm_path is None:
+                raise ValueError("gmm_path must be provided when lambda_off > 0")
+            self.gmm_scorer = SklearnGMMScorer(gmm_path)
         
         # Goal encoding: one-hot if goal_emb_dim is None, else learned embedding
         self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
@@ -224,7 +235,17 @@ class LatentVelocityEnv:
         magnitude_penalty = self.lambda_mag * abs(delta_t)
         success_bonus = self.R_succ if success else 0.0
         
-        reward = progress - action_penalty - magnitude_penalty + success_bonus
+        # Off-manifold penalty
+        off_manifold_penalty = 0.0
+        nll = 0.0
+        if self.lambda_off > 0.0 and self.gmm_scorer is not None:
+            # Compute NLL for z_next (the resulting state after step)
+            with torch.no_grad():
+                nll_torch = self.gmm_scorer.nll_torch(self.z)  # Use current state (z_next)
+                nll = nll_torch.item()
+                off_manifold_penalty = self.lambda_off * nll
+        
+        reward = progress - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
         
         # Log step norms
         v_norm = torch.norm(v, p=2).item()
@@ -235,10 +256,12 @@ class LatentVelocityEnv:
         self.step_norms["perturbation_magnitude"].append(u_norm)
         self.step_norms["state_change"].append(z_change_norm)
         
+        # Build info dictionary
         info = {
             "distance": d_tp1.item(),
             "success": success,
             "timeout": timeout,
+            "nll": nll,  # Store NLL for logging
             "velocity_norm": v_norm,
             "perturbation_norm": u_norm,
             "state_change_norm": z_change_norm,
@@ -273,6 +296,8 @@ class VectorizedLatentVelocityEnv:
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
+        gmm_path: Optional[str] = None,
+        lambda_off: float = 0.0,
     ):
         self.adapter = adapter
         self.centroids = centroids.to(adapter.device)
@@ -288,6 +313,14 @@ class VectorizedLatentVelocityEnv:
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
         self.use_negative_velocity = use_negative_velocity
+        self.lambda_off = lambda_off
+        
+        # Initialize GMM scorer if lambda_off > 0
+        self.gmm_scorer = None
+        if lambda_off > 0.0:
+            if gmm_path is None:
+                raise ValueError("gmm_path must be provided when lambda_off > 0")
+            self.gmm_scorer = SklearnGMMScorer(gmm_path)
         
         self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
         self.use_learned_goal_emb = goal_emb_dim is not None
@@ -472,7 +505,17 @@ class VectorizedLatentVelocityEnv:
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
         success_bonus = self.R_succ * success.float()
         
-        rewards = progress - action_penalty - magnitude_penalty + success_bonus
+        # Off-manifold penalty
+        off_manifold_penalty = torch.zeros(B, device=self.adapter.device, dtype=torch.float32)
+        nll_batch = torch.zeros(B, device=self.adapter.device, dtype=torch.float32)
+        if self.lambda_off > 0.0 and self.gmm_scorer is not None:
+            # Compute NLL for z_next (the resulting state after step)
+            with torch.no_grad():
+                nll_torch = self.gmm_scorer.nll_torch(self.z)  # Use current state (z_next)
+                nll_batch = nll_torch
+                off_manifold_penalty = self.lambda_off * nll_torch
+        
+        rewards = progress - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
         
         # Log step norms (average over active episodes)
         v_norm = torch.norm(v, p=2, dim=1)  # (B,)
@@ -496,6 +539,7 @@ class VectorizedLatentVelocityEnv:
             "distances": d_tp1.cpu().numpy(),
             "success": success.cpu().numpy(),
             "timeout": timeout.cpu().numpy(),
+            "nll": nll_batch.cpu().numpy(),  # Store as numpy for logging
             "velocity_norm": active_v_norm,
             "perturbation_norm": active_u_norm,
             "state_change_norm": active_z_norm,

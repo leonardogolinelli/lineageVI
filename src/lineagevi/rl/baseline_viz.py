@@ -291,7 +291,7 @@ def main():
     parser.add_argument("--start_lineage", type=str, default=None, help="Start lineage label (mutually exclusive with --start_cell_idx, default: random)")
     parser.add_argument("--target_goal", type=str, required=True, help="Target goal label")
     parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Goal mode: 'centroid' or 'goal_cell'")
+                        help="Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
     parser.add_argument("--T", type=int, default=256, help="Rollout horizon (default: 256)")
     parser.add_argument("--T_max", type=int, default=None, help="Maximum episode length (default: same as T)")
     parser.add_argument("--embedding", type=str, default="pca", choices=["pca", "umap"],
@@ -408,15 +408,17 @@ def main():
     if args.goal_mode == "centroid":
         z_goal = centroids[goal_idx].to(device)  # (n_latent,)
         print(f"Goal: centroid for '{args.target_goal}'")
-    else:  # goal_cell
-        # Sample one cell from target lineage
+    else:  # goal_cell (default)
+        # Sample one cell from target lineage (seed ensures reproducibility)
         target_mask = adata.obs[args.lineage_key] == args.target_goal
         target_indices = np.where(target_mask)[0]
         if len(target_indices) == 0:
             raise ValueError(f"No cells found with lineage '{args.target_goal}'")
-        goal_cell_idx = np.random.choice(target_indices)
+        # Use seed for reproducible sampling
+        rng = np.random.RandomState(args.seed)
+        goal_cell_idx = rng.choice(target_indices)
         z_goal = z_all[goal_cell_idx].to(device)  # (n_latent,)
-        print(f"Goal: cell {goal_cell_idx} from lineage '{args.target_goal}'")
+        print(f"Goal: cell {goal_cell_idx} from lineage '{args.target_goal}' (sampled with seed={args.seed})")
     
     # Build embedding
     print(f"Building {args.embedding.upper()} embedding...")

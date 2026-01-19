@@ -108,6 +108,7 @@ class PPOTrainer:
         done_list = []
         log_prob_list = []
         value_list = []
+        nll_list = []
         
         # Collect rollouts
         for t in range(T_rollout):
@@ -131,6 +132,14 @@ class PPOTrainer:
             log_prob_list.append(log_prob.detach().cpu())
             value_list.append(value.detach().cpu())
             
+            # Store NLL if available in info
+            if "nll" in info_next:
+                nll_val = info_next["nll"]
+                if isinstance(nll_val, np.ndarray):
+                    nll_list.append(torch.from_numpy(nll_val).float())
+                else:
+                    nll_list.append(torch.tensor(nll_val, dtype=torch.float32))
+            
             # Update obs for next iteration
             obs = obs_next
             
@@ -152,6 +161,12 @@ class PPOTrainer:
         done_batch = torch.stack(done_list, dim=0)  # (T, B)
         log_prob_batch = torch.stack(log_prob_list, dim=0)  # (T, B)
         value_batch = torch.stack(value_list, dim=0)  # (T, B)
+        
+        # Stack NLL if available
+        if "nll_list" in locals() and len(nll_list) > 0:
+            nll_batch = torch.stack(nll_list, dim=0)  # (T, B)
+        else:
+            nll_batch = None
         
         # Get next value (for bootstrapping)
         # If done, next_value = 0 (terminal/absorbing)
@@ -190,6 +205,11 @@ class PPOTrainer:
             "z": z_batch,  # (T, B, n_latent) - latent states for task metrics
             "goal_idx": goal_idx,  # (B,) - goal indices for each episode
         }
+        
+        # Add NLL if available
+        if len(nll_list) > 0:
+            nll_batch = torch.stack(nll_list, dim=0)  # (T, B)
+            batch["nll"] = nll_batch
         
         return batch
     

@@ -15,22 +15,25 @@ Z_KEY="mean"
 GOAL_ALLOWED=()
 GOAL_EXCLUDE=()
 GOAL_MIN_CELLS=1
-FIXED_GOAL=""
+FIXED_GOAL="1"
 USE_NEGATIVE_VELOCITY=""
 N_ITERATIONS="200"
 EPOCHS="3"
 BATCH_SIZE="128"
-T_ROLLOUT="256"
-T_MAX="256"
-MINIBATCH_SIZE="4096"
+T_ROLLOUT="512"
+T_MAX="512"
+MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="2.0" # default is 1.0
+LAMBDA_PROGRESS="100.0" # default is 1.0
 LAMBDA_ACT="" # default is 0.02
 LAMBDA_MAG="" # default is 0.15
 R_SUCC="" # default is 20.0
-GAMMA="" # default is 0.99
-N_VIZ_TRAJECTORIES="3"
+GAMMA="0" # default is 0.99
+GMM_PATH=""
+GMM_COMPONENTS="32"
+LAMBDA_OFF="50"
+N_VIZ_TRAJECTORIES="10"
 VIZ_EMBEDDING="pca"
 SKIP_VIZ=""
 
@@ -187,6 +190,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
+            echo ""
+            echo "OFF-MANIFOLD PENALTY PARAMETERS:"
+            echo "  --gmm_path PATH           Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically"
+            echo "  --gmm_components N        Number of GMM components (default: 32)"
+            echo "  --lambda_off FLOAT        Off-manifold penalty coefficient (default: 0.0, disabled)"
             echo ""
             echo "VISUALIZATION PARAMETERS:"
             echo "  --n_viz_trajectories N     Number of example trajectories to visualize (default: 3)"
@@ -372,6 +380,15 @@ if [[ -n "$R_SUCC" ]]; then
 fi
 if [[ -n "$GAMMA" ]]; then
     PYTHON_ARGS+=(--gamma "$GAMMA")
+fi
+if [[ -n "$GMM_PATH" ]]; then
+    PYTHON_ARGS+=(--gmm_path "$GMM_PATH")
+fi
+if [[ -n "$GMM_COMPONENTS" ]]; then
+    PYTHON_ARGS+=(--gmm_components "$GMM_COMPONENTS")
+fi
+if [[ -n "$LAMBDA_OFF" ]]; then
+    PYTHON_ARGS+=(--lambda_off "$LAMBDA_OFF")
 fi
 if [[ -n "$N_VIZ_TRAJECTORIES" ]]; then
     PYTHON_ARGS+=(--n_viz_trajectories "$N_VIZ_TRAJECTORIES")

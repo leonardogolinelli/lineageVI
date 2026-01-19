@@ -18,7 +18,7 @@ Z_KEY="mean"
 OUTPUT_DIR_BASE="./test_outputs/baseline_viz"
 SEED=42
 DEVICE="auto"
-DT=0.1
+DT=0.04
 USE_NEGATIVE_VELOCITY=""
 
 # Get script directory
@@ -103,7 +103,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --lineage_key KEY           Key in adata.obs for lineage labels (default: leiden)"
             echo "  --start_cell_idx N          Start cell index (mutually exclusive with --start_lineage)"
             echo "  --start_lineage LABEL       Start lineage label (mutually exclusive with --start_cell_idx, default: random)"
-            echo "  --goal_mode MODE            Goal mode: 'centroid' or 'goal_cell' (default: centroid)"
+            echo "  --goal_mode MODE            Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
             echo "  --T N                       Rollout horizon (default: 256)"
             echo "  --T_max N                   Maximum episode length (default: same as T)"
             echo "  --embedding METHOD          Embedding method: 'pca' or 'umap' (default: pca)"
