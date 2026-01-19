@@ -36,6 +36,7 @@ class LatentVelocityEnv:
         lambda_act: float = 0.01,
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
+        alpha_stay: float = 0.0,
         goal_emb_dim: Optional[int] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
@@ -55,6 +56,7 @@ class LatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.alpha_stay = alpha_stay
         self.use_negative_velocity = use_negative_velocity
         self.lambda_off = lambda_off
         
@@ -93,6 +95,7 @@ class LatentVelocityEnv:
         x0: Optional[torch.Tensor] = None,
         cluster_idx: Optional[torch.Tensor] = None,
         process_idx: Optional[torch.Tensor] = None,
+        goal_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Reset environment to initial state.
@@ -119,6 +122,7 @@ class LatentVelocityEnv:
         """
         self.z = z0.to(self.adapter.device)
         self.goal_idx = goal_idx
+        self.goal_state = goal_state.to(self.adapter.device) if goal_state is not None else None
         self.t = 0
         self.done = False
         self.step_norms = {
@@ -130,6 +134,9 @@ class LatentVelocityEnv:
         # Store per-episode cluster/process indices
         self.cluster_indices = cluster_idx
         self.process_indices = process_idx
+        
+        # Store goal state if provided (for goal_cell mode), otherwise use centroid
+        self.goal_state = None  # Will be set in reset if provided
         
         # Set fixed x if provided
         if x0 is not None and self.adapter.velocity_mode == "fixed_x":
@@ -159,9 +166,12 @@ class LatentVelocityEnv:
         return obs
     
     def _compute_distance(self) -> torch.Tensor:
-        """Compute distance to target centroid."""
-        centroid = self.centroids[self.goal_idx]  # (n_latent,)
-        distance = torch.norm(self.z - centroid, p=2)
+        """Compute distance to target goal (centroid or sampled cell)."""
+        if self.goal_state is not None:
+            goal = self.goal_state  # (n_latent,)
+        else:
+            goal = self.centroids[self.goal_idx]  # (n_latent,)
+        distance = torch.norm(self.z - goal, p=2)
         return distance
     
     def step(
@@ -215,13 +225,24 @@ class LatentVelocityEnv:
         z_old = self.z  # Save before update for state_change logging
         z_next = z_tilde + self.dt * v
         
-        # Compute distances
+        # Compute distances and squared distances
+        if self.goal_state is not None:
+            goal_z = self.goal_state
+        else:
+            goal_z = self.centroids[self.goal_idx]
         d_t = self._compute_distance()
+        phi_t = torch.sum((self.z - goal_z) ** 2).item()  # Squared distance at t
+        
         self.z = z_next
         d_tp1 = self._compute_distance()
+        phi_next = torch.sum((self.z - goal_z) ** 2).item()  # Squared distance at t+1
         
-        # Check success (terminal/absorbing)
-        success = d_tp1 < self.eps_success
+        # Check success (terminal/absorbing) - use goal_z for consistency
+        if self.goal_state is not None:
+            goal_z_check = self.goal_state
+        else:
+            goal_z_check = self.centroids[self.goal_idx]
+        success = torch.norm(z_next - goal_z_check, p=2) < self.eps_success
         if success:
             self.done = True
         
@@ -229,8 +250,9 @@ class LatentVelocityEnv:
         self.t += 1
         timeout = self.t >= self.T_max
         
-        # Compute reward
-        progress = self.lambda_progress * (d_t - d_tp1).item()
+        # Compute reward using squared-distance potential progress
+        progress = self.lambda_progress * (phi_t - phi_next)
+        state_cost = self.alpha_stay * phi_next
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
         success_bonus = self.R_succ if success else 0.0
@@ -245,7 +267,7 @@ class LatentVelocityEnv:
                 nll = nll_torch.item()
                 off_manifold_penalty = self.lambda_off * nll
         
-        reward = progress - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
+        reward = progress - state_cost - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
         
         # Log step norms
         v_norm = torch.norm(v, p=2).item()
@@ -259,6 +281,7 @@ class LatentVelocityEnv:
         # Build info dictionary
         info = {
             "distance": d_tp1.item(),
+            "sqdist": phi_next,  # Squared distance for logging
             "success": success,
             "timeout": timeout,
             "nll": nll,  # Store NLL for logging
@@ -292,6 +315,7 @@ class VectorizedLatentVelocityEnv:
         lambda_act: float = 0.01,
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
+        alpha_stay: float = 0.0,
         goal_emb_dim: Optional[int] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
@@ -312,6 +336,7 @@ class VectorizedLatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.alpha_stay = alpha_stay
         self.use_negative_velocity = use_negative_velocity
         self.lambda_off = lambda_off
         
@@ -348,6 +373,7 @@ class VectorizedLatentVelocityEnv:
         x0: Optional[torch.Tensor] = None,  # (B, 2*n_genes) or (2*n_genes,)
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
         process_idx: Optional[torch.Tensor] = None,  # (B,)
+        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for goal_cell mode
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Reset batch of environments.
@@ -374,6 +400,8 @@ class VectorizedLatentVelocityEnv:
         """
         self.z = z0.to(self.adapter.device)
         self.goal_idx = goal_idx.to(self.adapter.device).long()
+        # Store goal states if provided (for goal_cell mode), otherwise use centroids
+        self.goal_states = goal_states.to(self.adapter.device) if goal_states is not None else None
         self.t = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.done = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
         
@@ -421,11 +449,14 @@ class VectorizedLatentVelocityEnv:
         return obs
     
     def _compute_distances(self) -> torch.Tensor:
-        """Compute distances to target centroids for batch."""
-        # Get centroids for each batch element: (B, n_latent)
-        centroids_batch = self.centroids[self.goal_idx]
+        """Compute distances to target goals (centroids or sampled cells) for batch."""
+        # Get goal states for each batch element: (B, n_latent)
+        if self.goal_states is not None:
+            goals_batch = self.goal_states  # (B, n_latent)
+        else:
+            goals_batch = self.centroids[self.goal_idx]  # (B, n_latent)
         # Compute L2 distances: (B,)
-        distances = torch.norm(self.z - centroids_batch, p=2, dim=1)
+        distances = torch.norm(self.z - goals_batch, p=2, dim=1)
         return distances
     
     def step(
@@ -483,11 +514,16 @@ class VectorizedLatentVelocityEnv:
         # Update states: z_next = z_tilde + dt * v
         z_next = z_tilde + self.dt * v
         
-        # Compute distances before update
+        # Compute distances and squared distances before update
+        if self.goal_states is not None:
+            goal_z_batch = self.goal_states  # (B, n_latent)
+        else:
+            goal_z_batch = self.centroids[self.goal_idx]  # (B, n_latent)
         d_t = self._compute_distances()
+        phi_t = torch.sum((self.z - goal_z_batch) ** 2, dim=1)  # (B,) squared distance at t
         
-        # Check success (terminal/absorbing)
-        success = (torch.norm(z_next - self.centroids[self.goal_idx], p=2, dim=1) < self.eps_success) & active_mask
+        # Check success (terminal/absorbing) - goal_z_batch already set above
+        success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < self.eps_success) & active_mask
         self.done = self.done | success
         
         # Only update active envs (absorbing terminal states)
@@ -495,12 +531,14 @@ class VectorizedLatentVelocityEnv:
         self.t = torch.where(active_mask, self.t + 1, self.t)
         
         d_tp1 = self._compute_distances()
+        phi_next = torch.sum((self.z - goal_z_batch) ** 2, dim=1)  # (B,) squared distance at t+1
         
         # Check timeout
         timeout = self.t >= self.T_max
         
-        # Compute rewards
-        progress = self.lambda_progress * (d_t - d_tp1) * active_mask.float()
+        # Compute rewards using squared-distance potential progress
+        progress = self.lambda_progress * (phi_t - phi_next) * active_mask.float()
+        state_cost = self.alpha_stay * phi_next * active_mask.float()
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
         success_bonus = self.R_succ * success.float()
@@ -515,7 +553,7 @@ class VectorizedLatentVelocityEnv:
                 nll_batch = nll_torch
                 off_manifold_penalty = self.lambda_off * nll_torch
         
-        rewards = progress - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
+        rewards = progress - state_cost - action_penalty - magnitude_penalty + success_bonus - off_manifold_penalty
         
         # Log step norms (average over active episodes)
         v_norm = torch.norm(v, p=2, dim=1)  # (B,)
@@ -537,6 +575,7 @@ class VectorizedLatentVelocityEnv:
         
         info = {
             "distances": d_tp1.cpu().numpy(),
+            "sqdist": phi_next.cpu().numpy(),  # Squared distances for logging
             "success": success.cpu().numpy(),
             "timeout": timeout.cpu().numpy(),
             "nll": nll_batch.cpu().numpy(),  # Store as numpy for logging

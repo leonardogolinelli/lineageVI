@@ -373,11 +373,13 @@ def generate_example_visualizations(
     lambda_act: float = 0.01,
     lambda_mag: float = 0.1,
     R_succ: float = 10.0,
+    alpha_stay: float = 0.0,
     use_negative_velocity: bool = False,
     goal_mode: str = "centroid",
     seed: int = 42,
     gmm_path: Optional[str] = None,
     lambda_off: float = 0.0,
+    fixed_goal_idx: Optional[int] = None,
 ):
     """
     Generate example trajectory visualizations after training.
@@ -468,6 +470,7 @@ def generate_example_visualizations(
         lambda_act=lambda_act,
         lambda_mag=lambda_mag,
         R_succ=R_succ,
+        alpha_stay=alpha_stay,
         use_negative_velocity=use_negative_velocity,
         gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
         lambda_off=lambda_off_viz,
@@ -482,9 +485,12 @@ def generate_example_visualizations(
         z0 = z_all[start_cell_idx]
         start_lineage = adata.obs[lineage_key].iloc[start_cell_idx]
         
-        # Sample random goal (different from start if possible)
+        # Sample goal (use fixed goal if provided, otherwise random)
         rng = np.random.RandomState(seed + example_idx)  # Use seed + example_idx for reproducibility
-        goal_idx = rng.randint(0, n_goals)
+        if fixed_goal_idx is not None:
+            goal_idx = fixed_goal_idx
+        else:
+            goal_idx = rng.randint(0, n_goals)
         goal_label = goal_labels[goal_idx]
         
         # Get goal: sample a cell from target lineage or use centroid
@@ -666,6 +672,8 @@ def main():
     parser.add_argument("--goal_exclude", type=str, nargs="*", default=None, help="Excluded goal labels")
     parser.add_argument("--goal_min_cells", type=int, default=1, help="Minimum cells per goal lineage")
     parser.add_argument("--fixed_goal", type=str, default=None, help="Fixed goal label for all episodes (optional)")
+    parser.add_argument("--goal_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
+                        help="Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
     parser.add_argument("--n_iterations", type=int, default=None, help="Total training iterations (overrides config)")
     parser.add_argument("--epochs", type=int, default=None, help="PPO inner epochs per iteration (overrides config)")
     parser.add_argument("--batch_size", type=int, default=None, help="Environment batch size (overrides config)")
@@ -679,6 +687,9 @@ def main():
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
     parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
+    parser.add_argument("--alpha_stay", type=float, default=None, help="State cost coefficient for staying near goal (overrides config, default: 0.0)")
+    parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
+    parser.add_argument("--delta_max_scale", type=float, default=0.5, help="Scale factor for auto-calibrated delta_max (default: 0.5)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
@@ -779,6 +790,10 @@ def main():
     lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
     lambda_mag = args.lambda_mag if args.lambda_mag is not None else env_config.get("lambda_mag", 0.1)
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
+    alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
+    
+    # Get goal_mode from CLI or config
+    goal_mode = args.goal_mode if args.goal_mode is not None else env_config.get("goal_mode", "centroid")
     
     # Get T_max and T_rollout, ensure T_max >= T_rollout
     T_rollout_for_env = args.T_rollout if args.T_rollout is not None else training_config.get("T_rollout", 50)
@@ -822,26 +837,80 @@ def main():
         lambda_act=lambda_act,
         lambda_mag=lambda_mag,
         R_succ=R_succ,
+        alpha_stay=alpha_stay,
         use_negative_velocity=use_negative_velocity,
         gmm_path=gmm_path,
         lambda_off=lambda_off,
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}")
-    print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}")
+    print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
+    print(f"Goal mode: {goal_mode}")
+    
+    # Auto-calibrate delta_max based on velocity field drift norms
+    z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)  # (n_cells, n_latent)
+    n_cells = z_all.shape[0]
+    
+    # Determine effective delta_max
+    if args.delta_max is not None:
+        # User provided explicit delta_max, use it as-is
+        delta_max_effective = args.delta_max
+        median_drift_norm = None
+        print(f"Using explicit delta_max: {delta_max_effective:.6f}")
+    else:
+        # Auto-calibrate from velocity field
+        delta_max_scale = args.delta_max_scale
+        N_SAMPLE = min(1024, n_cells)
+        
+        # Sample latents
+        sample_indices = torch.randperm(n_cells, device=device)[:N_SAMPLE]
+        z_sample = z_all[sample_indices]  # (N_SAMPLE, n_latent)
+        
+        # Compute velocities using adapter (same as environment)
+        with torch.no_grad():
+            # Get cluster/process indices for sampled cells
+            cluster_idx_sample = None
+            process_idx_sample = None
+            if cluster_indices is not None:
+                cluster_idx_sample = cluster_indices[sample_indices]
+            if process_indices is not None:
+                process_idx_sample = process_indices[sample_indices]
+            
+            v_sample = adapter.velocity(
+                z_sample,
+                cluster_indices=cluster_idx_sample,
+                process_indices=process_idx_sample,
+            )  # (N_SAMPLE, n_latent)
+            
+            # Apply negative velocity if requested (same as environment)
+            if use_negative_velocity:
+                v_sample = -v_sample
+            
+            # Compute drift = dt * v
+            drift = dt * v_sample  # (N_SAMPLE, n_latent)
+            
+            # Compute drift norms
+            drift_norm = torch.linalg.norm(drift, dim=-1)  # (N_SAMPLE,)
+            
+            # Compute median
+            median_drift_norm = drift_norm.median().item()
+            
+            # Set effective delta_max
+            delta_max_effective = delta_max_scale * median_drift_norm
+        
+        print(f"Auto-calibrated delta_max: {delta_max_effective:.6f} (median drift norm {median_drift_norm:.6f}, scale {delta_max_scale})")
     
     # Create policy
     obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
     n_latent = adapter.n_latent
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
-    delta_max = policy_config.get("delta_max", 1.0)
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
         n_latent=n_latent,
         hidden_sizes=hidden_sizes,
-        delta_max=delta_max,
+        delta_max=delta_max_effective,
     ).to(device)
-    print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}")
+    print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}, delta_max={delta_max_effective:.6f}")
     
     # Get PPO hyperparameters (CLI overrides config)
     gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)
@@ -862,8 +931,7 @@ def main():
     )
     print("Created PPO trainer")
     
-    # Get initial states and goals for training
-    z_all = torch.from_numpy(adata.obsm[args.z_key]).float().to(device)  # (n_cells, n_latent)
+    # z_all already computed above for delta_max calibration
     n_cells = z_all.shape[0]
     
     # Precompute origin labels for all cells
@@ -908,7 +976,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Starting training for {n_iterations} iterations...")
-    print("Training uses uniform goal sampling. Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
+    print(f"Training uses uniform goal sampling (goal_mode={goal_mode}). Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
     
     # Initialize metrics history
     metrics_history = {
@@ -954,6 +1022,23 @@ def main():
         # Get latent states for sampled cells
         z0 = z_all[cell_indices]  # (B, n_latent)
         
+        # Sample goal states if goal_mode == "goal_cell"
+        goal_states = None
+        if goal_mode == "goal_cell":
+            goal_states = torch.zeros(batch_size, n_latent, device=device)
+            for i in range(batch_size):
+                g_i = goal_idx[i].item()
+                goal_label = goal_labels[g_i]
+                # Sample one cell from target lineage
+                target_mask = adata.obs[args.lineage_key] == goal_label
+                target_indices = np.where(target_mask)[0]
+                if len(target_indices) > 0:
+                    goal_cell_idx = np.random.choice(target_indices)
+                    goal_states[i] = z_all[goal_cell_idx]
+                else:
+                    # Fallback to centroid if no cells found
+                    goal_states[i] = centroids[g_i]
+        
         # Get per-cell cluster/process indices for sampled cells
         cluster_idx_batch = None
         process_idx_batch = None
@@ -973,7 +1058,7 @@ def main():
             x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
         
         # Collect rollouts
-        batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch)
+        batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch, goal_states=goal_states)
         
         # Compute task metrics
         task_metrics = trainer.compute_task_metrics(batch)
@@ -1037,7 +1122,14 @@ def main():
                 "obs_dim": obs_dim,
                 "n_latent": n_latent,
                 "hidden_sizes": hidden_sizes,
-                "delta_max": delta_max,
+                "delta_max": delta_max_effective,
+                "delta_max_calibration": {
+                    "delta_max_effective": delta_max_effective,
+                    "median_drift_norm": median_drift_norm if median_drift_norm is not None else "N/A (explicit delta_max used)",
+                    "delta_max_scale": args.delta_max_scale if args.delta_max is None else "N/A",
+                    "dt": dt,
+                },
+                "goal_mode": goal_mode,
                 **config_copy,
             }
             save_policy_checkpoint(
@@ -1077,11 +1169,13 @@ def main():
             lambda_act=lambda_act,
             lambda_mag=lambda_mag,
             R_succ=R_succ,
+            alpha_stay=alpha_stay,
             use_negative_velocity=use_negative_velocity,
-            goal_mode="centroid",  # Default: use lineage centroid
+            goal_mode=goal_mode,  # Use same goal_mode as training
             seed=args.seed,
             gmm_path=gmm_path,
             lambda_off=lambda_off,
+            fixed_goal_idx=fixed_goal_idx,
         )
 
 

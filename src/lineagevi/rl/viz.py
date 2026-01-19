@@ -100,7 +100,7 @@ def rollout_baseline(
     distances : np.ndarray
         Distances to goal of shape (T+1,).
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
     
     z_trajectory = [z0.cpu().numpy()]
     # Compute distance to actual goal (not just centroid)
@@ -174,7 +174,7 @@ def rollout_agent(
     deltas : np.ndarray
         Perturbation magnitudes of shape (T,).
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
     
     z_trajectory = [z0.cpu().numpy()]
     # Compute distance to actual goal (not just centroid)

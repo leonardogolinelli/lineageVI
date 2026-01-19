@@ -16,23 +16,27 @@ GOAL_ALLOWED=()
 GOAL_EXCLUDE=()
 GOAL_MIN_CELLS=1
 FIXED_GOAL="1"
+GOAL_MODE="centroid"  # "centroid" or "goal_cell"
 USE_NEGATIVE_VELOCITY=""
 N_ITERATIONS="200"
 EPOCHS="3"
 BATCH_SIZE="128"
-T_ROLLOUT="512"
-T_MAX="512"
+T_ROLLOUT="64"
+T_MAX="64"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="100.0" # default is 1.0
+LAMBDA_PROGRESS="1.0" # default is 1.0
 LAMBDA_ACT="" # default is 0.02
 LAMBDA_MAG="" # default is 0.15
-R_SUCC="" # default is 20.0
-GAMMA="0" # default is 0.99
+R_SUCC="1000" # default is 20.0
+ALPHA_STAY="100.0" # default is 0.0 (state cost for staying near goal)
+DELTA_MAX="" # default: auto-calibrate from velocity field
+DELTA_MAX_SCALE="0.5" # default is 0.5 (scale factor for auto-calibrated delta_max)
+GAMMA="0.99" # default is 0.99
 GMM_PATH=""
 GMM_COMPONENTS="32"
-LAMBDA_OFF="50"
+LAMBDA_OFF="1"
 N_VIZ_TRAJECTORIES="10"
 VIZ_EMBEDDING="pca"
 SKIP_VIZ=""
@@ -147,6 +151,18 @@ while [[ $# -gt 0 ]]; do
             R_SUCC="$2"
             shift 2
             ;;
+        --alpha_stay)
+            ALPHA_STAY="$2"
+            shift 2
+            ;;
+        --delta_max)
+            DELTA_MAX="$2"
+            shift 2
+            ;;
+        --delta_max_scale)
+            DELTA_MAX_SCALE="$2"
+            shift 2
+            ;;
         --n_viz_trajectories)
             N_VIZ_TRAJECTORIES="$2"
             shift 2
@@ -181,6 +197,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --goal_exclude LABEL ...   Excluded goal labels"
             echo "  --goal_min_cells N         Minimum cells per goal lineage (default: 1)"
             echo "  --fixed_goal LABEL         Fixed goal label for all episodes (optional)"
+            echo "  --goal_mode MODE           Goal mode: 'centroid' (use lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
@@ -189,6 +206,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --lambda_act FLOAT        Action penalty coefficient (overrides config)"
             echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
+            echo "  --alpha_stay FLOAT        State cost coefficient for staying near goal (overrides config, default: 0.0)"
+            echo "  --delta_max FLOAT         Maximum action magnitude (overrides config and auto-calibration)"
+            echo "  --delta_max_scale FLOAT   Scale factor for auto-calibrated delta_max (default: 0.5)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo ""
             echo "OFF-MANIFOLD PENALTY PARAMETERS:"
@@ -377,6 +397,15 @@ if [[ -n "$LAMBDA_MAG" ]]; then
 fi
 if [[ -n "$R_SUCC" ]]; then
     PYTHON_ARGS+=(--R_succ "$R_SUCC")
+fi
+if [[ -n "$ALPHA_STAY" ]]; then
+    PYTHON_ARGS+=(--alpha_stay "$ALPHA_STAY")
+fi
+if [[ -n "$DELTA_MAX" ]]; then
+    PYTHON_ARGS+=(--delta_max "$DELTA_MAX")
+fi
+if [[ -n "$DELTA_MAX_SCALE" ]]; then
+    PYTHON_ARGS+=(--delta_max_scale "$DELTA_MAX_SCALE")
 fi
 if [[ -n "$GAMMA" ]]; then
     PYTHON_ARGS+=(--gamma "$GAMMA")

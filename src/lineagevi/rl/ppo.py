@@ -61,6 +61,7 @@ class PPOTrainer:
         x0: Optional[torch.Tensor] = None,
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
         process_idx: Optional[torch.Tensor] = None,  # (B,)
+        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for goal_cell mode
     ) -> Dict[str, torch.Tensor]:
         """
         Collect rollout trajectories.
@@ -97,7 +98,7 @@ class PPOTrainer:
         batch_size = z0.shape[0]
         
         # Reset environment
-        obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
+        obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_states=goal_states)
         
         # Storage
         obs_list = []
