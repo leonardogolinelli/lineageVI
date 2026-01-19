@@ -457,7 +457,7 @@ class PPOTrainer:
                 mb_returns = returns[mb_indices]
                 
                 # Get new log probs and values
-                mb_log_prob_new = self.policy.log_prob(mb_obs, mb_action, mb_delta, mb_raw_delta)
+                mb_log_prob_new = self.policy.log_prob(mb_obs, mb_action, mb_delta)
                 mb_value_new = self.policy.value(mb_obs).squeeze(-1)
                 mb_entropy = self.policy.entropy(mb_obs)
                 

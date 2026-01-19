@@ -1021,9 +1021,8 @@ def main():
         obs_dim=obs_dim,
         n_latent=n_latent,
         hidden_sizes=hidden_sizes,
-        delta_max=delta_max_effective,
     ).to(device)
-    print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}, delta_max={delta_max_effective:.6f}")
+    print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}")
     
     # Get PPO hyperparameters (CLI overrides config)
     gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)

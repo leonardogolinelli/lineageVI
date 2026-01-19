@@ -152,15 +152,30 @@ def inspect_policy(
     
     with torch.no_grad():
         # Get policy outputs
-        action_logits, magnitude_mu, magnitude_logstd, value = policy.forward(obs_batch)
+        action_logits, _, _, value = policy.forward(obs_batch)
         
         # Convert logits to probabilities
         action_probs = torch.softmax(action_logits, dim=1).squeeze(0)  # (n_latent + 1,)
         
+        # Get magnitude params for each possible action (action-conditioned)
+        # For inspection, we'll compute magnitude params for each action
+        magnitude_mu_list = []
+        magnitude_logstd_list = []
+        for a in range(policy.n_latent + 1):
+            action_tensor = torch.full((1,), a, dtype=torch.long, device=obs_batch.device)
+            mu_a, std_a = policy._get_magnitude_params(obs_batch, action_tensor)
+            # Get log_std from std (reverse the exp)
+            log_std_a = torch.log(std_a + 1e-8)  # Add small epsilon for numerical stability
+            magnitude_mu_list.append(mu_a.item())
+            magnitude_logstd_list.append(log_std_a.item())
+        
+        # Convert to tensors (for actions 1..n_latent, action 0 has no magnitude)
+        magnitude_mu = torch.tensor(magnitude_mu_list[1:], device=obs_batch.device)  # (n_latent,)
+        magnitude_logstd = torch.tensor(magnitude_logstd_list[1:], device=obs_batch.device)  # (n_latent,)
+        
         # Get clamped magnitude std
         magnitude_logstd_clamped = torch.clamp(magnitude_logstd, policy.LOG_STD_MIN, policy.LOG_STD_MAX)
-        magnitude_std = torch.exp(magnitude_logstd_clamped).squeeze(0)  # (n_latent,)
-        magnitude_mu = magnitude_mu.squeeze(0)  # (n_latent,)
+        magnitude_std = torch.exp(magnitude_logstd_clamped)  # (n_latent,)
         
         # Compute entropy of action distribution
         action_dist = torch.distributions.Categorical(logits=action_logits)
@@ -270,11 +285,11 @@ def rollout_agent(
                 action_logits, magnitude_mu, _, _ = policy.forward(obs_tensor.unsqueeze(0))
                 action = torch.argmax(action_logits, dim=1).item()
                 
-                # Get magnitude for chosen action
+                # Get magnitude for chosen action (conditioned on state + action)
                 if action > 0:
-                    action_idx = action - 1
-                    delta = magnitude_mu[0, action_idx].item()
-                    delta = policy.delta_max * np.tanh(delta)  # Apply tanh squashing
+                    action_tensor = torch.tensor([action], device=obs_tensor.device)
+                    magnitude_mu, _ = policy._get_magnitude_params(obs_tensor, action_tensor)
+                    delta = magnitude_mu[0].item()  # Use mean directly (deterministic)
                 else:
                     delta = 0.0
             else:

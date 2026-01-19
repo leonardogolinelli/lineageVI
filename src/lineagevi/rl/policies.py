@@ -17,8 +17,12 @@ class ActorCriticPolicy(nn.Module):
     Architecture:
     - Shared MLP trunk: [z, goal_emb, t] → hidden
     - Categorical head: hidden → logits[d+1]
-    - Magnitude head: hidden → (μ[d], logσ[d]) (one per latent dim)
+    - Action embedding: action → action_emb
+    - Magnitude head: [hidden, action_emb] → (μ, logσ) (conditioned on state + action)
     - Value head: hidden → V(s)
+    
+    The magnitude distribution is now conditioned on both the state and the chosen action,
+    allowing the policy to learn different magnitude distributions for different actions.
     """
     
     def __init__(
@@ -26,13 +30,11 @@ class ActorCriticPolicy(nn.Module):
         obs_dim: int,  # n_latent + goal_emb_dim + 1 (for time)
         n_latent: int,
         hidden_sizes: list = [128, 128],
-        delta_max: float = 1.0,
         activation: str = "relu",
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.n_latent = n_latent
-        self.delta_max = delta_max
         
         # Build shared trunk
         layers = []
@@ -53,9 +55,15 @@ class ActorCriticPolicy(nn.Module):
         # Categorical head (action selection)
         self.action_head = nn.Linear(trunk_output_dim, n_latent + 1)  # +1 for no-op
         
-        # Magnitude head (one μ, logσ per latent dim)
-        self.magnitude_mu_head = nn.Linear(trunk_output_dim, n_latent)
-        self.magnitude_logstd_head = nn.Linear(trunk_output_dim, n_latent)
+        # Action embedding for magnitude conditioning
+        self.action_embed_dim = 16
+        self.action_embedding = nn.Embedding(n_latent + 1, self.action_embed_dim)  # +1 for no-op
+        
+        # Magnitude head (conditioned on state + action)
+        # Input: hidden_state + action_embedding
+        magnitude_input_dim = trunk_output_dim + self.action_embed_dim
+        self.magnitude_mu_head = nn.Linear(magnitude_input_dim, 1)  # Single μ output
+        self.magnitude_logstd_head = nn.Linear(magnitude_input_dim, 1)  # Single logσ output
         
         # Value head
         self.value_head = nn.Linear(trunk_output_dim, 1)
@@ -67,23 +75,37 @@ class ActorCriticPolicy(nn.Module):
     def _get_magnitude_params(
         self,
         obs: torch.Tensor,
+        action: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Shared helper to get clamped magnitude parameters.
+        Get clamped magnitude parameters conditioned on state and action.
         
         Parameters
         ----------
         obs : torch.Tensor
             Observations of shape (batch_size, obs_dim).
+        action : torch.Tensor
+            Discrete actions of shape (batch_size,).
         
         Returns
         -------
         magnitude_mu : torch.Tensor
-            Magnitude means of shape (batch_size, n_latent).
+            Magnitude means of shape (batch_size,).
         magnitude_std : torch.Tensor
-            Magnitude stddevs (from clamped log_std) of shape (batch_size, n_latent).
+            Magnitude stddevs (from clamped log_std) of shape (batch_size,).
         """
-        _, magnitude_mu, magnitude_logstd, _ = self.forward(obs)
+        h = self.shared_trunk(obs)  # (B, trunk_output_dim)
+        
+        # Embed action
+        action_emb = self.action_embedding(action)  # (B, action_embed_dim)
+        
+        # Concatenate hidden state and action embedding
+        magnitude_input = torch.cat([h, action_emb], dim=1)  # (B, trunk_output_dim + action_embed_dim)
+        
+        # Get μ and logσ for the chosen action
+        magnitude_mu = self.magnitude_mu_head(magnitude_input).squeeze(-1)  # (B,)
+        magnitude_logstd = self.magnitude_logstd_head(magnitude_input).squeeze(-1)  # (B,)
+        
         # Clamp log_std to prevent sigma collapse and KL blowups
         magnitude_logstd_clamped = torch.clamp(magnitude_logstd, self.LOG_STD_MIN, self.LOG_STD_MAX)
         magnitude_std = torch.exp(magnitude_logstd_clamped)
@@ -96,6 +118,10 @@ class ActorCriticPolicy(nn.Module):
         """
         Forward pass through policy network.
         
+        Note: Magnitude parameters are now conditioned on action, so this method
+        returns placeholder values for magnitude_mu and magnitude_logstd.
+        Use _get_magnitude_params(obs, action) to get actual magnitude params.
+        
         Parameters
         ----------
         obs : torch.Tensor
@@ -106,18 +132,24 @@ class ActorCriticPolicy(nn.Module):
         action_logits : torch.Tensor
             Categorical logits of shape (batch_size, n_latent + 1).
         magnitude_mu : torch.Tensor
-            Magnitude means of shape (batch_size, n_latent).
+            Placeholder (zeros) of shape (batch_size, n_latent). 
+            Use _get_magnitude_params(obs, action) for actual values.
         magnitude_logstd : torch.Tensor
-            Magnitude log-stddevs of shape (batch_size, n_latent).
+            Placeholder (zeros) of shape (batch_size, n_latent).
+            Use _get_magnitude_params(obs, action) for actual values.
         value : torch.Tensor
             Value estimates of shape (batch_size, 1).
         """
         h = self.shared_trunk(obs)
         
         action_logits = self.action_head(h)  # (B, n_latent + 1)
-        magnitude_mu = self.magnitude_mu_head(h)  # (B, n_latent)
-        magnitude_logstd = self.magnitude_logstd_head(h)  # (B, n_latent)
         value = self.value_head(h)  # (B, 1)
+        
+        # Return placeholders for backward compatibility
+        # Magnitude params are now action-conditioned, so we can't return them here
+        batch_size = obs.shape[0]
+        magnitude_mu = torch.zeros(batch_size, self.n_latent, device=obs.device)
+        magnitude_logstd = torch.zeros(batch_size, self.n_latent, device=obs.device)
         
         return action_logits, magnitude_mu, magnitude_logstd, value
     
@@ -143,11 +175,11 @@ class ActorCriticPolicy(nn.Module):
         delta : torch.Tensor
             Continuous magnitudes of shape (batch_size,).
         raw_delta : torch.Tensor
-            Raw (pre-tanh) magnitudes of shape (batch_size,).
+            Same as delta (kept for backward compatibility).
         log_prob : torch.Tensor
             Log probabilities of shape (batch_size,).
         """
-        action_logits, magnitude_mu, magnitude_logstd, _ = self.forward(obs)
+        action_logits, _, _, _ = self.forward(obs)
         
         # Sample discrete action
         if deterministic:
@@ -156,36 +188,31 @@ class ActorCriticPolicy(nn.Module):
             action_dist = dist.Categorical(logits=action_logits)
             action = action_dist.sample()  # (B,)
         
-        # Sample magnitude (only used if action > 0) - use clamped params
-        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
-        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
-        raw_delta = magnitude_dist.sample()  # (B, n_latent)
-        
-        # Apply tanh squashing
-        delta = self.delta_max * torch.tanh(raw_delta)  # (B, n_latent)
-        
-        # Select magnitude for chosen action
-        # If action = 0, delta = 0; else delta = delta[action - 1]
+        # Sample magnitude conditioned on state and chosen action
+        # If action = 0, magnitude is 0 (no-op)
         batch_size = obs.shape[0]
-        action_mask = (action > 0).long()  # (B,)
-        action_indices = (action - 1).clamp(min=0, max=self.n_latent - 1)  # (B,)
-        delta_selected = delta[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
-        delta_selected = delta_selected * action_mask.float()  # Zero if action == 0
+        action_mask = (action > 0).float()  # (B,)
         
-        raw_delta_selected = raw_delta[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
-        raw_delta_selected = raw_delta_selected * action_mask.float()
+        # Get magnitude params for chosen action (conditioned on state + action)
+        magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
+        
+        # Sample magnitude directly from normal distribution (only if action > 0)
+        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+        delta = magnitude_dist.sample()  # (B,)
+        
+        # Zero out magnitude for no-op actions
+        delta = delta * action_mask
         
         # Compute log probability
-        log_prob = self.log_prob(obs, action, delta_selected, raw_delta_selected)
+        log_prob = self.log_prob(obs, action, delta)
         
-        return action, delta_selected, raw_delta_selected, log_prob
+        return action, delta, delta, log_prob  # raw_delta same as delta now
     
     def log_prob(
         self,
         obs: torch.Tensor,
         action: torch.Tensor,
         delta: torch.Tensor,
-        raw_delta: torch.Tensor,
     ) -> torch.Tensor:
         """
         Compute log probability of action.
@@ -197,42 +224,28 @@ class ActorCriticPolicy(nn.Module):
         action : torch.Tensor
             Discrete actions of shape (batch_size,).
         delta : torch.Tensor
-            Continuous magnitudes (post-tanh) of shape (batch_size,).
-        raw_delta : torch.Tensor
-            Raw (pre-tanh) magnitudes of shape (batch_size,).
+            Continuous magnitudes of shape (batch_size,).
         
         Returns
         -------
         log_prob : torch.Tensor
             Log probabilities of shape (batch_size,).
         """
-        action_logits, magnitude_mu, magnitude_logstd, _ = self.forward(obs)
+        action_logits, _, _, _ = self.forward(obs)
         
         # Categorical log prob
         action_dist = dist.Categorical(logits=action_logits)
         log_prob_cat = action_dist.log_prob(action)  # (B,)
         
         # Magnitude log prob (only if action > 0)
-        batch_size = obs.shape[0]
         action_mask = (action > 0).float()  # (B,)
-        action_indices = (action - 1).clamp(min=0, max=self.n_latent - 1)  # (B,)
         
-        # Get μ and σ for chosen action - use clamped params
-        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
-        mu_selected = magnitude_mu[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
-        std_selected = magnitude_std[torch.arange(batch_size, device=obs.device), action_indices]  # (B,)
+        # Get μ and σ for chosen action (conditioned on state + action)
+        magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
         
-        # Gaussian log prob of raw_delta
-        magnitude_dist = dist.Normal(mu_selected, std_selected)
-        log_prob_mag_raw = magnitude_dist.log_prob(raw_delta)  # (B,)
-        
-        # Tanh squashing correction: log(1 - tanh^2(x))
-        # delta = delta_max * tanh(raw_delta)
-        # d/delta_max * tanh = delta_max * (1 - tanh^2)
-        tanh_raw = torch.tanh(raw_delta)
-        log_det_jacobian = torch.log(self.delta_max * (1 - tanh_raw**2) + 1e-6)  # (B,) - epsilon for numerical stability
-        
-        log_prob_mag = log_prob_mag_raw - log_det_jacobian  # (B,) - correct change of variables
+        # Gaussian log prob of delta (directly from normal distribution)
+        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+        log_prob_mag = magnitude_dist.log_prob(delta)  # (B,)
         
         # Total log prob: categorical + magnitude (only if action > 0)
         log_prob = log_prob_cat + action_mask * log_prob_mag
@@ -242,6 +255,10 @@ class ActorCriticPolicy(nn.Module):
     def entropy(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Compute entropy of policy distribution.
+        
+        Only includes categorical action entropy, not magnitude entropy.
+        We want to diversify action selection, but magnitude should be
+        determined optimally for each chosen action.
         
         Parameters
         ----------
@@ -253,25 +270,13 @@ class ActorCriticPolicy(nn.Module):
         entropy : torch.Tensor
             Entropy of shape (batch_size,).
         """
-        action_logits, magnitude_mu, magnitude_logstd, _ = self.forward(obs)
+        action_logits, _, _, _ = self.forward(obs)
         
-        # Categorical entropy
+        # Categorical entropy only
         action_dist = dist.Categorical(logits=action_logits)
         entropy_cat = action_dist.entropy()  # (B,)
         
-        # Magnitude entropy (weighted by action probs) - use clamped params
-        magnitude_mu, magnitude_std = self._get_magnitude_params(obs)
-        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
-        entropy_mag_per_dim = magnitude_dist.entropy()  # (B, n_latent)
-        
-        # Weight by probability of selecting each action
-        action_probs = F.softmax(action_logits, dim=1)  # (B, n_latent + 1)
-        # Action 0 has no magnitude, so weight by probs of actions 1..n_latent
-        action_probs_mag = action_probs[:, 1:]  # (B, n_latent)
-        entropy_mag = (entropy_mag_per_dim * action_probs_mag).sum(dim=1)  # (B,)
-        
-        total_entropy = entropy_cat + entropy_mag
-        return total_entropy
+        return entropy_cat
     
     def value(self, obs: torch.Tensor) -> torch.Tensor:
         """
