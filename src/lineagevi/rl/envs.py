@@ -225,17 +225,15 @@ class LatentVelocityEnv:
         z_old = self.z  # Save before update for state_change logging
         z_next = z_tilde + self.dt * v
         
-        # Compute distances and squared distances
+        # Compute distances (linear, not squared)
         if self.goal_state is not None:
             goal_z = self.goal_state
         else:
             goal_z = self.centroids[self.goal_idx]
-        d_t = self._compute_distance()
-        phi_t = torch.sum((self.z - goal_z) ** 2).item()  # Squared distance at t
+        d_t = self._compute_distance()  # Linear distance at t
         
         self.z = z_next
-        d_tp1 = self._compute_distance()
-        phi_next = torch.sum((self.z - goal_z) ** 2).item()  # Squared distance at t+1
+        d_tp1 = self._compute_distance()  # Linear distance at t+1
         
         # Check success (terminal/absorbing) - use goal_z for consistency
         if self.goal_state is not None:
@@ -250,9 +248,9 @@ class LatentVelocityEnv:
         self.t += 1
         timeout = self.t >= self.T_max
         
-        # Compute reward using squared-distance potential progress
-        progress = self.lambda_progress * (phi_t - phi_next)
-        state_cost = self.alpha_stay * phi_next
+        # Compute reward using linear distance progress (instead of squared distance)
+        progress = self.lambda_progress * (d_t - d_tp1)
+        state_cost = self.alpha_stay * d_tp1
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
         success_bonus = self.R_succ if success else 0.0
@@ -281,7 +279,7 @@ class LatentVelocityEnv:
         # Build info dictionary
         info = {
             "distance": d_tp1.item(),
-            "sqdist": phi_next,  # Squared distance for logging
+            "sqdist": d_tp1.item() ** 2,  # Squared distance for logging (computed from linear distance)
             "success": success,
             "timeout": timeout,
             "nll": nll,  # Store NLL for logging
@@ -514,13 +512,12 @@ class VectorizedLatentVelocityEnv:
         # Update states: z_next = z_tilde + dt * v
         z_next = z_tilde + self.dt * v
         
-        # Compute distances and squared distances before update
+        # Compute distances (linear, not squared) before update
         if self.goal_states is not None:
             goal_z_batch = self.goal_states  # (B, n_latent)
         else:
             goal_z_batch = self.centroids[self.goal_idx]  # (B, n_latent)
-        d_t = self._compute_distances()
-        phi_t = torch.sum((self.z - goal_z_batch) ** 2, dim=1)  # (B,) squared distance at t
+        d_t = self._compute_distances()  # (B,) linear distance at t
         
         # Check success (terminal/absorbing) - goal_z_batch already set above
         success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < self.eps_success) & active_mask
@@ -530,15 +527,14 @@ class VectorizedLatentVelocityEnv:
         self.z = torch.where(active_mask.unsqueeze(1), z_next, self.z)
         self.t = torch.where(active_mask, self.t + 1, self.t)
         
-        d_tp1 = self._compute_distances()
-        phi_next = torch.sum((self.z - goal_z_batch) ** 2, dim=1)  # (B,) squared distance at t+1
+        d_tp1 = self._compute_distances()  # (B,) linear distance at t+1
         
         # Check timeout
         timeout = self.t >= self.T_max
         
-        # Compute rewards using squared-distance potential progress
-        progress = self.lambda_progress * (phi_t - phi_next) * active_mask.float()
-        state_cost = self.alpha_stay * phi_next * active_mask.float()
+        # Compute rewards using linear distance progress (instead of squared distance)
+        progress = self.lambda_progress * (d_t - d_tp1) * active_mask.float()
+        state_cost = self.alpha_stay * d_tp1 * active_mask.float()  # Use linear distance for state cost
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
         success_bonus = self.R_succ * success.float()
@@ -575,7 +571,7 @@ class VectorizedLatentVelocityEnv:
         
         info = {
             "distances": d_tp1.cpu().numpy(),
-            "sqdist": phi_next.cpu().numpy(),  # Squared distances for logging
+            "sqdist": (d_tp1 ** 2).cpu().numpy(),  # Squared distances for logging (computed from linear distance)
             "success": success.cpu().numpy(),
             "timeout": timeout.cpu().numpy(),
             "nll": nll_batch.cpu().numpy(),  # Store as numpy for logging
