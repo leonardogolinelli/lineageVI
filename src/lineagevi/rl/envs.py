@@ -137,7 +137,7 @@ class LatentVelocityEnv:
         self.cluster_indices = cluster_idx
         self.process_indices = process_idx
         
-        # Store goal state if provided (for goal_cell mode), otherwise use centroid
+        # Store goal state if provided (for sample mode), otherwise use centroid
         self.goal_state = None  # Will be set in reset if provided
         
         # Set fixed x if provided
@@ -238,10 +238,12 @@ class LatentVelocityEnv:
             goal_z = self.goal_state
         else:
             goal_z = self.centroids[self.goal_idx]
-        d_t = self._compute_distance()  # Linear distance at t
+        d_t = self._compute_distance()  # L2 distance at t
+        d1_t = torch.norm(self.z - goal_z, p=1) / np.sqrt(self.n_latent)
         
         self.z = z_next
-        d_tp1 = self._compute_distance()  # Linear distance at t+1
+        d_tp1 = self._compute_distance()  # L2 distance at t+1
+        d1_tp1 = torch.norm(self.z - goal_z, p=1) / np.sqrt(self.n_latent)
         
         # Check success (terminal/absorbing) - use goal_z for consistency
         if self.goal_state is not None:
@@ -257,7 +259,7 @@ class LatentVelocityEnv:
         timeout = self.t >= self.T_max
         
         # Compute reward using linear distance progress (instead of squared distance)
-        progress = self.lambda_progress * (d_t - d_tp1)
+        progress = self.lambda_progress * ((d_t - d_tp1) + (d1_t - d1_tp1))
         state_cost = self.alpha_stay * d_tp1
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
@@ -381,7 +383,7 @@ class VectorizedLatentVelocityEnv:
         x0: Optional[torch.Tensor] = None,  # (B, 2*n_genes) or (2*n_genes,)
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
         process_idx: Optional[torch.Tensor] = None,  # (B,)
-        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for goal_cell mode
+        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for sample mode
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Reset batch of environments.
@@ -408,7 +410,7 @@ class VectorizedLatentVelocityEnv:
         """
         self.z = z0.to(self.adapter.device)
         self.goal_idx = goal_idx.to(self.adapter.device).long()
-        # Store goal states if provided (for goal_cell mode), otherwise use centroids
+        # Store goal states if provided (for sample mode), otherwise use centroids
         self.goal_states = goal_states.to(self.adapter.device) if goal_states is not None else None
         self.t = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.done = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
@@ -523,6 +525,7 @@ class VectorizedLatentVelocityEnv:
                 v = -v
         
         # Update states: z_next = z_tilde + dt * v (or just z_tilde if velocity is deactivated)
+        z_old = self.z
         if self.deactivate_velocity:
             z_next = z_tilde  # Skip velocity update
         else:
@@ -533,7 +536,8 @@ class VectorizedLatentVelocityEnv:
             goal_z_batch = self.goal_states  # (B, n_latent)
         else:
             goal_z_batch = self.centroids[self.goal_idx]  # (B, n_latent)
-        d_t = self._compute_distances()  # (B,) linear distance at t
+        d_t = self._compute_distances()  # (B,) L2 distance at t
+        d1_t = torch.norm(self.z - goal_z_batch, p=1, dim=1) / np.sqrt(self.n_latent)
         
         # Check success (terminal/absorbing) - goal_z_batch already set above
         success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < self.eps_success) & active_mask
@@ -543,13 +547,14 @@ class VectorizedLatentVelocityEnv:
         self.z = torch.where(active_mask.unsqueeze(1), z_next, self.z)
         self.t = torch.where(active_mask, self.t + 1, self.t)
         
-        d_tp1 = self._compute_distances()  # (B,) linear distance at t+1
+        d_tp1 = self._compute_distances()  # (B,) L2 distance at t+1
+        d1_tp1 = torch.norm(self.z - goal_z_batch, p=1, dim=1) / np.sqrt(self.n_latent)
         
         # Check timeout
         timeout = self.t >= self.T_max
         
         # Compute rewards using linear distance progress (instead of squared distance)
-        progress = self.lambda_progress * (d_t - d_tp1) * active_mask.float()
+        progress = self.lambda_progress * ((d_t - d_tp1) + (d1_t - d1_tp1)) * active_mask.float()
         state_cost = self.alpha_stay * d_tp1 * active_mask.float()  # Use linear distance for state cost
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
@@ -571,7 +576,6 @@ class VectorizedLatentVelocityEnv:
         v_norm = torch.norm(v, p=2, dim=1)  # (B,)
         u_norm = torch.norm(u, p=2, dim=1)  # (B,)
         # State change is z_next - z_old (before update)
-        z_old = z_tilde  # State before velocity update
         z_change = z_next - z_old
         z_change_norm = torch.norm(z_change, p=2, dim=1)  # (B,)
         

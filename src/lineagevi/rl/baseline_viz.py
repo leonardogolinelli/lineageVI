@@ -291,8 +291,8 @@ def main():
     parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
                         help="Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)")
     parser.add_argument("--target_lineage", type=str, required=True, help="Target lineage label")
-    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "sample"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)")
     parser.add_argument("--T", type=int, default=256, help="Rollout horizon (default: 256)")
     parser.add_argument("--T_max", type=int, default=None, help="Maximum episode length (default: same as T)")
     parser.add_argument("--embedding", type=str, default="pca", choices=["pca", "umap"],
@@ -413,7 +413,7 @@ def main():
     if args.target_mode == "centroid":
         z_goal = centroids[goal_idx].to(device)  # (n_latent,)
         print(f"Target: centroid for '{target_goal_label}'")
-    else:  # target_mode == "goal_cell"
+    else:  # target_mode == "sample"
         # Sample one cell from target lineage (seed ensures reproducibility)
         target_mask = adata.obs[args.lineage_key] == target_goal_label
         target_indices = np.where(target_mask)[0]

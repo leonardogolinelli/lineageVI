@@ -18,28 +18,30 @@ CONFIG_FILE=""
 SEED=42
 DEVICE="auto"
 Z_KEY="mean"
-SOURCE_LINEAGE="1"
-TARGET_LINEAGE="1"
+SOURCE_LINEAGE="4"
+TARGET_LINEAGE="0"
 SOURCE_MODE="centroid"  # "centroid" or "sample"
-TARGET_MODE="centroid"  # "centroid" or "goal_cell"
+TARGET_MODE="centroid"  # "centroid" or "sample"
 USE_NEGATIVE_VELOCITY=""
 DETERMINISTIC=""
-DEACTIVATE_VELOCITY=""
+DEACTIVATE_VELOCITY="--deactivate_velocity"
 N_ITERATIONS="200"
 EPOCHS="2"
 BATCH_SIZE="256"
-T_ROLLOUT="100"
-T_MAX="100"
+T_ROLLOUT="1000"
+T_MAX="1000"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
 LAMBDA_PROGRESS="0.1" # default is 1.0
 LAMBDA_ACT="0" # default is 0.02
 LAMBDA_MAG="0" # default is 0.15
-R_SUCC="1000" # default is 20.0
+R_SUCC="30" # default is 20.0
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
-GAMMA="0.99" # default is 0.99
-ENT_COEF="1"
+EPS_SUCCESS="5" # default is 0.1
+GAMMA="1" # default is 0.99
+ENT_COEF="0"
+LR="" # default is 3e-4
 GMM_PATH=""
 GMM_COMPONENTS="32"
 LAMBDA_OFF="0"
@@ -160,12 +162,20 @@ while [[ $# -gt 0 ]]; do
             ALPHA_STAY="$2"
             shift 2
             ;;
+        --eps_success)
+            EPS_SUCCESS="$2"
+            shift 2
+            ;;
         --n_viz_trajectories)
             N_VIZ_TRAJECTORIES="$2"
             shift 2
             ;;
         --ent_coef)
             ENT_COEF="$2"
+            shift 2
+            ;;
+        --lr)
+            LR="$2"
             shift 2
             ;;
         --viz_embedding)
@@ -209,7 +219,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --source_lineage LABEL     Source lineage label (cells will be sampled from this lineage as starting points)"
             echo "  --target_lineage LABEL     Target lineage label (goal for all episodes)"
             echo "  --source_mode MODE         Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
-            echo "  --target_mode MODE         Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --target_mode MODE         Target mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
             echo "  --deactivate_velocity       Deactivate velocity effect on next state (default: velocity affects state)"
@@ -221,8 +231,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
             echo "  --alpha_stay FLOAT        State cost coefficient for staying near goal (overrides config, default: 0.0)"
+            echo "  --eps_success FLOAT       Success radius for goal (overrides config, default: 0.1)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
+            echo "  --lr FLOAT                Learning rate (overrides config, default: 3e-4)"
             echo ""
             echo "OFF-MANIFOLD PENALTY PARAMETERS:"
             echo "  --gmm_path PATH           Path to saved GMM (.pkl). If not provided and lambda_off > 0, will fit automatically"
@@ -425,11 +437,17 @@ fi
 if [[ -n "$ALPHA_STAY" ]]; then
     PYTHON_ARGS+=(--alpha_stay "$ALPHA_STAY")
 fi
+if [[ -n "$EPS_SUCCESS" ]]; then
+    PYTHON_ARGS+=(--eps_success "$EPS_SUCCESS")
+fi
 if [[ -n "$GAMMA" ]]; then
     PYTHON_ARGS+=(--gamma "$GAMMA")
 fi
 if [[ -n "$ENT_COEF" ]]; then
     PYTHON_ARGS+=(--ent_coef "$ENT_COEF")
+fi
+if [[ -n "$LR" ]]; then
+    PYTHON_ARGS+=(--lr "$LR")
 fi
 if [[ -n "$GMM_PATH" ]]; then
     PYTHON_ARGS+=(--gmm_path "$GMM_PATH")

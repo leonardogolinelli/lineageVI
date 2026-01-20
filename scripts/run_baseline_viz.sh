@@ -10,7 +10,7 @@ LINEAGE_KEY="leiden"
 TARGET_LINEAGE="1"
 SOURCE_LINEAGE=""
 SOURCE_MODE="sample"  # "centroid" or "sample"
-TARGET_MODE="centroid"  # "centroid" or "goal_cell"
+TARGET_MODE="centroid"  # "centroid" or "sample"
 T="512"
 T_MAX="512"
 EMBEDDING="pca"
@@ -107,7 +107,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --source_mode MODE          Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
             echo "  --target_goal LABEL         Target goal label (deprecated, use --target_lineage)"
             echo "  --target_lineage LABEL      Target lineage label (required if --target_goal not provided)"
-            echo "  --goal_mode MODE            Goal mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --goal_mode MODE            Goal mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)"
             echo "  --T N                       Rollout horizon (default: 256)"
             echo "  --T_max N                   Maximum episode length (default: same as T)"
             echo "  --embedding METHOD          Embedding method: 'pca' or 'umap' (default: pca)"
@@ -122,7 +122,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "EXAMPLES:"
             echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_lineage 1"
-            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode goal_cell --T 512 --T_max 512"
+            echo "  $0 --lineagevi_output_dir ./test_outputs/lineagevi_20260117_201810 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode sample --T 512 --T_max 512"
             exit 0
             ;;
         *)

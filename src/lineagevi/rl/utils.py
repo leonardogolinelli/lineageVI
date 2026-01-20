@@ -208,13 +208,15 @@ def load_policy_checkpoint(
     obs_dim = config["obs_dim"]
     n_latent = config["n_latent"]
     hidden_sizes = config.get("hidden_sizes", [128, 128])
-    delta_max = config.get("delta_max", 1.0)
+    activation = config.get("activation", "relu")
+    delta_clip = config.get("delta_clip", None)
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
         n_latent=n_latent,
         hidden_sizes=hidden_sizes,
-        delta_max=delta_max,
+        activation=activation,
+        delta_clip=delta_clip,
     ).to(device)
     
     policy.load_state_dict(policy_state_dict)

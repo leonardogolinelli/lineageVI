@@ -228,7 +228,7 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]
+    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -385,6 +385,7 @@ def generate_example_visualizations(
     source_lineage: Optional[str] = None,
     target_lineage: Optional[str] = None,
     source_mode: str = "sample",
+    eps_success: Optional[float] = None,
 ):
     """
     Generate example trajectory visualizations after training.
@@ -464,13 +465,14 @@ def generate_example_visualizations(
             lambda_off_viz = lambda_off
     
     # Create single environment for visualization
+    eps_success_viz = eps_success if eps_success is not None else env_config.get("eps_success", 0.1)
     single_env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
         goal_names=goal_labels,
         dt=env_config.get("dt", 0.1),
         T_max=T_max_viz,
-        eps_success=env_config.get("eps_success", 0.1),
+        eps_success=eps_success_viz,
         lambda_progress=lambda_progress,
         lambda_act=lambda_act,
         lambda_mag=lambda_mag,
@@ -542,7 +544,7 @@ def generate_example_visualizations(
         # Get goal: sample a cell from target lineage or use centroid
         if target_mode == "centroid":
             z_goal = centroids[goal_idx].to(device)
-        else:  # target_mode == "goal_cell"
+        else:  # target_mode == "sample"
             # Sample one cell from target lineage
             target_mask = adata.obs[lineage_key] == goal_label
             target_indices = np.where(target_mask)[0]
@@ -645,6 +647,8 @@ def generate_example_visualizations(
             viz_dir / f"{example_prefix}_trajectory_overlay.png",
             lineage_key=lineage_key,
             lineage_labels=lineage_labels,
+            eps_success=single_env.eps_success,
+            centroids=centroids.cpu().numpy(),
         )
         
         # Plot B: Distance curves
@@ -759,8 +763,8 @@ def main():
     parser.add_argument("--target_lineage", type=str, default=None, help="Target lineage label (goal for all episodes)")
     parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
                         help="Source mode: 'centroid' (use source lineage centroid as starting point) or 'sample' (sample a cell from source lineage, default)")
-    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "sample"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)")
     parser.add_argument("--n_iterations", type=int, default=None, help="Total training iterations (overrides config)")
     parser.add_argument("--epochs", type=int, default=None, help="PPO inner epochs per iteration (overrides config)")
     parser.add_argument("--batch_size", type=int, default=None, help="Environment batch size (overrides config)")
@@ -776,9 +780,11 @@ def main():
     parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
     parser.add_argument("--alpha_stay", type=float, default=None, help="State cost coefficient for staying near goal (overrides config, default: 0.0)")
+    parser.add_argument("--eps_success", type=float, default=None, help="Success radius for goal (overrides config, default: 0.1)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
     parser.add_argument("--delta_max_scale", type=float, default=0.5, help="Scale factor for auto-calibrated delta_max (default: 0.5)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate (overrides config, default: 3e-4)")
     parser.add_argument("--ent_coef", type=float, default=None, help="Entropy coefficient for exploration bonus (overrides config, default: 0.01)")
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
@@ -937,6 +943,7 @@ def main():
     lambda_mag = args.lambda_mag if args.lambda_mag is not None else env_config.get("lambda_mag", 0.1)
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
+    eps_success = args.eps_success if args.eps_success is not None else env_config.get("eps_success", 0.1)
     
     # Get source_mode and target_mode from CLI or config
     source_mode = args.source_mode if args.source_mode is not None else env_config.get("source_mode", "sample")
@@ -978,6 +985,8 @@ def main():
             )
             print(f"Saved GMM to {gmm_path}")
     
+    ent_coef = args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01)
+    
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -985,7 +994,7 @@ def main():
         batch_size=batch_size,
         dt=dt,
         T_max=T_max_env,
-        eps_success=env_config.get("eps_success", 0.1),
+        eps_success=eps_success,
         lambda_progress=lambda_progress,
         lambda_act=lambda_act,
         lambda_mag=lambda_mag,
@@ -997,6 +1006,7 @@ def main():
         lambda_off=lambda_off,
     )
     print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}")
+    print(f"Success threshold: eps_success={eps_success}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
     print(f"Source mode: {source_mode}, Target mode: {target_mode}")
     
@@ -1071,6 +1081,7 @@ def main():
     
     # Get PPO hyperparameters (CLI overrides config)
     gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)
+    lr = args.lr if args.lr is not None else ppo_config.get("lr", 3e-4)
     
     # Create trainer
     trainer = PPOTrainer(
@@ -1081,8 +1092,8 @@ def main():
         clip_eps=ppo_config.get("clip_eps", 0.2),
         target_kl=ppo_config.get("target_kl", 0.01),
         vf_coef=ppo_config.get("vf_coef", 0.5),
-        ent_coef=args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01),
-        lr=ppo_config.get("lr", 3e-4),
+        ent_coef=ent_coef,
+        lr=lr,
         max_grad_norm=ppo_config.get("max_grad_norm", 0.5),
         device=device,
     )
@@ -1207,6 +1218,7 @@ def main():
         "mean_nll": [],  # Off-manifold penalty (only populated if lambda_off > 0)
         # Task metrics
         "success_rate": [],
+        "mean_initial_distance": [],
         "mean_final_distance": [],
         "mean_best_distance": [],
         "mean_distance_improvement": [],
@@ -1222,201 +1234,206 @@ def main():
         "state_change": [],
     }
     
-    for iteration in tqdm(range(n_iterations), desc="Training"):
-        # Sample goals first (uniform)
-        if fixed_goal_idx is not None:
-            # Fixed goal for all batch elements
-            goal_idx = torch.full((batch_size,), fixed_goal_idx, dtype=torch.long, device=device)
-        else:
-            # Uniform sampling from all goals
-            goal_idx = torch.randint(0, n_goals, (batch_size,), device=device)
-        
-        # Sample start cells conditioned on goal (origin != goal)
-        if source_lineage is not None and source_mode == "centroid":
-            # Use source lineage centroid as starting point for all episodes
-            z0 = source_centroid.unsqueeze(0).repeat(batch_size, 1)  # (B, n_latent) - same starting point for all
-            cell_indices = None  # Not used when using centroid
-        else:
-            # Sample cells (either from source lineage or all eligible)
-            cell_indices = np.zeros(batch_size, dtype=np.int64)
-            for i in range(batch_size):
-                g_i = goal_idx[i].item()
-                if source_lineage is not None:
-                    # Sample only from source lineage cells that are eligible for this goal
-                    source_eligible = np.intersect1d(source_cell_indices, eligible_cells[g_i])
-                    if len(source_eligible) == 0:
-                        raise ValueError(
-                            f"No eligible cells from source lineage '{source_lineage}' for goal index {g_i}. "
-                            f"This should have been caught during validation."
-                        )
-                    cell_indices[i] = np.random.choice(source_eligible)
-                else:
-                    # Original behavior: sample from all eligible cells
-                    eligible = eligible_cells[g_i]
-                    cell_indices[i] = np.random.choice(eligible)
-            
-            # Get latent states for sampled cells
-            z0 = z_all[cell_indices]  # (B, n_latent)
-        
-        # Sample goal states if target_mode == "goal_cell"
-        goal_states = None
-        if target_mode == "goal_cell":
-            goal_states = torch.zeros(batch_size, n_latent, device=device)
-            for i in range(batch_size):
-                g_i = goal_idx[i].item()
-                goal_label = goal_labels[g_i]
-                # Sample one cell from target lineage
-                target_mask = adata.obs[args.lineage_key] == goal_label
-                target_indices = np.where(target_mask)[0]
-                if len(target_indices) > 0:
-                    goal_cell_idx = np.random.choice(target_indices)
-                    goal_states[i] = z_all[goal_cell_idx]
-                else:
-                    # Fallback to centroid if no cells found
-                    goal_states[i] = centroids[g_i]
-        
-        # Get per-cell cluster/process indices for sampled cells
-        cluster_idx_batch = None
-        process_idx_batch = None
-        if cell_indices is not None:
-            if cluster_indices is not None:
-                cluster_idx_batch = cluster_indices[cell_indices]
-            if process_indices is not None:
-                process_idx_batch = process_indices[cell_indices]
-        else:
-            # When using centroid, use representative cluster/process indices from source lineage
-            if source_lineage is not None:
-                source_mask = adata.obs[args.lineage_key] == source_lineage
-                source_cell_idx_array = np.where(source_mask)[0]
-                
-                if cluster_indices is not None:
-                    # Use the most common cluster index from source lineage
-                    source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
-                    # Compute mode manually
-                    unique, counts = np.unique(source_cluster_values, return_counts=True)
-                    mode_cluster = unique[np.argmax(counts)]
-                    cluster_idx_batch = torch.full((batch_size,), int(mode_cluster), dtype=torch.long, device=device)
-                
-                if process_indices is not None:
-                    # Use the most common process index from source lineage
-                    source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
-                    # Compute mode manually
-                    unique, counts = np.unique(source_process_values, return_counts=True)
-                    mode_process = unique[np.argmax(counts)]
-                    process_idx_batch = torch.full((batch_size,), int(mode_process), dtype=torch.long, device=device)
-            else:
-                # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
-                if cluster_indices is not None:
-                    cluster_idx_batch = torch.full((batch_size,), cluster_indices[0].item(), dtype=torch.long, device=device)
-                if process_indices is not None:
-                    process_idx_batch = torch.full((batch_size,), process_indices[0].item(), dtype=torch.long, device=device)
-        
-        # Get initial x if needed for fixed_x mode
-        x0 = None
-        if velocity_mode == "fixed_x":
-            if cell_indices is not None:
-                # Get gene expression for sampled cells
-                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
-                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
-                u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][cell_indices])).float().to(device)
-                s = torch.from_numpy(np.asarray(adata.layers[spliced_key][cell_indices])).float().to(device)
-                x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
-            else:
-                # When using centroid, compute mean gene expression from source lineage
-                source_mask = adata.obs[args.lineage_key] == source_lineage
-                unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
-                spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
-                u_mean = np.asarray(adata.layers[unspliced_key][source_mask]).mean(axis=0)
-                s_mean = np.asarray(adata.layers[spliced_key][source_mask]).mean(axis=0)
-                u = torch.from_numpy(u_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
-                s = torch.from_numpy(s_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
-                x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
-        
-        # Collect rollouts
-        batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch, goal_states=goal_states)
-        
-        # Compute task metrics
-        task_metrics = trainer.compute_task_metrics(batch)
-        
-        # Update policy
-        metrics = trainer.update(
-            batch,
-            epochs=args.epochs if args.epochs is not None else training_config.get("epochs", 10),
-            minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
-        )
-        
-        # Compute mean NLL if available
-        if lambda_off > 0.0 and "nll" in batch:
-            mean_nll = batch["nll"].mean().item()
-            all_metrics = {**metrics, **task_metrics, "mean_nll": mean_nll}
-        else:
-            all_metrics = {**metrics, **task_metrics}
-        
-        # Store metrics for plotting
-        for k in metrics_history.keys():
-            if k in all_metrics:
-                metrics_history[k].append(all_metrics[k])
-        
-        # Store step norms (average over last batch)
-        if env.step_norms["velocity_magnitude"]:
-            # Get averages from the last batch
-            recent_velocity = env.step_norms["velocity_magnitude"][-batch_size:] if len(env.step_norms["velocity_magnitude"]) >= batch_size else env.step_norms["velocity_magnitude"]
-            recent_perturb = env.step_norms["perturbation_magnitude"][-batch_size:] if len(env.step_norms["perturbation_magnitude"]) >= batch_size else env.step_norms["perturbation_magnitude"]
-            recent_state = env.step_norms["state_change"][-batch_size:] if len(env.step_norms["state_change"]) >= batch_size else env.step_norms["state_change"]
-            
-            step_norms_history["velocity_magnitude"].append(np.mean(recent_velocity) if len(recent_velocity) > 0 else 0.0)
-            step_norms_history["perturbation_magnitude"].append(np.mean(recent_perturb) if len(recent_perturb) > 0 else 0.0)
-            step_norms_history["state_change"].append(np.mean(recent_state) if len(recent_state) > 0 else 0.0)
-        
-        # Log metrics
-        if iteration % 10 == 0:
-            print(f"\nIteration {iteration} (dt={dt}):")
-            print("  PPO metrics:")
-            for k in ["policy_loss", "value_loss", "entropy", "kl", "clip_fraction"]:
-                if k in all_metrics:
-                    print(f"    {k}: {all_metrics[k]:.4f}")
-            print("  Task metrics:")
-            for k in ["success_rate", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]:
-                if k in all_metrics:
-                    print(f"    {k}: {all_metrics[k]:.4f}")
-            # Log step norms from environment
-            if env.step_norms["velocity_magnitude"]:
-                print(f"  avg_velocity_norm: {np.mean(env.step_norms['velocity_magnitude'][-10:]):.4f}")
-                print(f"  avg_perturbation_norm: {np.mean(env.step_norms['perturbation_magnitude'][-10:]):.4f}")
-                print(f"  avg_state_change_norm: {np.mean(env.step_norms['state_change'][-10:]):.4f}")
-        
-        # Save checkpoint
-        if (iteration + 1) % save_freq == 0 or iteration == n_iterations - 1:
-            # Update env config with actual T_max used
-            config_copy = config.copy()
-            if "env" not in config_copy:
-                config_copy["env"] = {}
-            config_copy["env"]["T_max"] = T_max_env
-            
-            save_config = {
-                "obs_dim": obs_dim,
-                "n_latent": n_latent,
-                "hidden_sizes": hidden_sizes,
-                "delta_max": delta_max_effective,
-                "delta_max_calibration": {
-                    "delta_max_effective": delta_max_effective,
-                    "median_drift_norm": median_drift_norm if median_drift_norm is not None else "N/A (explicit delta_max used)",
-                    "delta_max_scale": args.delta_max_scale if args.delta_max is None else "N/A",
-                    "dt": dt,
-                },
-                "target_mode": target_mode,
-                **config_copy,
-            }
-            save_policy_checkpoint(
-                policy,
-                centroids,
-                goal_labels,  # Save goal_labels (not lineage_names)
-                save_config,
-                output_dir,
-                iteration=iteration + 1,
-            )
     
-    print(f"\nTraining complete! Checkpoints saved to {output_dir}")
+    interrupted = False
+    try:
+        for iteration in tqdm(range(n_iterations), desc="Training"):
+            # Sample goals first (uniform)
+            if fixed_goal_idx is not None:
+                # Fixed goal for all batch elements
+                goal_idx = torch.full((batch_size,), fixed_goal_idx, dtype=torch.long, device=device)
+            else:
+                # Uniform sampling from all goals
+                goal_idx = torch.randint(0, n_goals, (batch_size,), device=device)
+
+            # Sample start cells conditioned on goal (origin != goal)
+            if source_lineage is not None and source_mode == "centroid":
+                # Use source lineage centroid as starting point for all episodes
+                z0 = source_centroid.unsqueeze(0).repeat(batch_size, 1)  # (B, n_latent)
+                cell_indices = None  # Not used when using centroid
+            else:
+                # Sample cells (either from source lineage or all eligible)
+                cell_indices = np.zeros(batch_size, dtype=np.int64)
+                for i in range(batch_size):
+                    g_i = goal_idx[i].item()
+                    if source_lineage is not None:
+                        # Sample only from source lineage cells that are eligible for this goal
+                        source_eligible = np.intersect1d(source_cell_indices, eligible_cells[g_i])
+                        if len(source_eligible) == 0:
+                            raise ValueError(
+                                f"No eligible cells from source lineage '{source_lineage}' for goal index {g_i}. "
+                                f"This should have been caught during validation."
+                            )
+                        cell_indices[i] = np.random.choice(source_eligible)
+                    else:
+                        # Original behavior: sample from all eligible cells
+                        eligible = eligible_cells[g_i]
+                        cell_indices[i] = np.random.choice(eligible)
+
+                # Get latent states for sampled cells
+                z0 = z_all[cell_indices]  # (B, n_latent)
+
+            # Sample goal states if target_mode == "sample"
+            goal_states = None
+            if target_mode == "sample":
+                goal_states = torch.zeros(batch_size, n_latent, device=device)
+                for i in range(batch_size):
+                    g_i = goal_idx[i].item()
+                    goal_label = goal_labels[g_i]
+                    # Sample one cell from target lineage
+                    target_mask = adata.obs[args.lineage_key] == goal_label
+                    target_indices = np.where(target_mask)[0]
+                    if len(target_indices) > 0:
+                        goal_cell_idx = np.random.choice(target_indices)
+                        goal_states[i] = z_all[goal_cell_idx]
+                    else:
+                        # Fallback to centroid if no cells found
+                        goal_states[i] = centroids[g_i]
+
+            # Get per-cell cluster/process indices for sampled cells
+            cluster_idx_batch = None
+            process_idx_batch = None
+            if cell_indices is not None:
+                if cluster_indices is not None:
+                    cluster_idx_batch = cluster_indices[cell_indices]
+                if process_indices is not None:
+                    process_idx_batch = process_indices[cell_indices]
+            else:
+                # When using centroid, use representative cluster/process indices from source lineage
+                if source_lineage is not None:
+                    source_mask = adata.obs[args.lineage_key] == source_lineage
+                    source_cell_idx_array = np.where(source_mask)[0]
+
+                    if cluster_indices is not None:
+                        # Use the most common cluster index from source lineage
+                        source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
+                        unique, counts = np.unique(source_cluster_values, return_counts=True)
+                        mode_cluster = unique[np.argmax(counts)]
+                        cluster_idx_batch = torch.full((batch_size,), int(mode_cluster), dtype=torch.long, device=device)
+
+                    if process_indices is not None:
+                        # Use the most common process index from source lineage
+                        source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
+                        unique, counts = np.unique(source_process_values, return_counts=True)
+                        mode_process = unique[np.argmax(counts)]
+                        process_idx_batch = torch.full((batch_size,), int(mode_process), dtype=torch.long, device=device)
+                else:
+                    # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
+                    if cluster_indices is not None:
+                        cluster_idx_batch = torch.full((batch_size,), cluster_indices[0].item(), dtype=torch.long, device=device)
+                    if process_indices is not None:
+                        process_idx_batch = torch.full((batch_size,), process_indices[0].item(), dtype=torch.long, device=device)
+
+            # Get initial x if needed for fixed_x mode
+            x0 = None
+            if velocity_mode == "fixed_x":
+                if cell_indices is not None:
+                    # Get gene expression for sampled cells
+                    unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                    spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                    u = torch.from_numpy(np.asarray(adata.layers[unspliced_key][cell_indices])).float().to(device)
+                    s = torch.from_numpy(np.asarray(adata.layers[spliced_key][cell_indices])).float().to(device)
+                    x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
+                else:
+                    # When using centroid, compute mean gene expression from source lineage
+                    source_mask = adata.obs[args.lineage_key] == source_lineage
+                    unspliced_key = "unspliced" if "unspliced" in adata.layers else "Mu"
+                    spliced_key = "spliced" if "spliced" in adata.layers else "Ms"
+                    u_mean = np.asarray(adata.layers[unspliced_key][source_mask]).mean(axis=0)
+                    s_mean = np.asarray(adata.layers[spliced_key][source_mask]).mean(axis=0)
+                    u = torch.from_numpy(u_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
+                    s = torch.from_numpy(s_mean).float().to(device).unsqueeze(0).repeat(batch_size, 1)
+                    x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
+
+            # Collect rollouts
+            batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch, goal_states=goal_states)
+
+            # Compute task metrics
+            task_metrics = trainer.compute_task_metrics(batch)
+
+            # Update policy
+            metrics = trainer.update(
+                batch,
+                epochs=args.epochs if args.epochs is not None else training_config.get("epochs", 10),
+                minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
+            )
+
+            # Compute mean NLL if available
+            if lambda_off > 0.0 and "nll" in batch:
+                mean_nll = batch["nll"].mean().item()
+                all_metrics = {**metrics, **task_metrics, "mean_nll": mean_nll}
+            else:
+                all_metrics = {**metrics, **task_metrics}
+
+            # Store metrics for plotting
+            for k in metrics_history.keys():
+                if k in all_metrics:
+                    metrics_history[k].append(all_metrics[k])
+
+            # Store step norms (average over last batch)
+            if env.step_norms["velocity_magnitude"]:
+                recent_velocity = env.step_norms["velocity_magnitude"][-batch_size:] if len(env.step_norms["velocity_magnitude"]) >= batch_size else env.step_norms["velocity_magnitude"]
+                recent_perturb = env.step_norms["perturbation_magnitude"][-batch_size:] if len(env.step_norms["perturbation_magnitude"]) >= batch_size else env.step_norms["perturbation_magnitude"]
+                recent_state = env.step_norms["state_change"][-batch_size:] if len(env.step_norms["state_change"]) >= batch_size else env.step_norms["state_change"]
+
+                step_norms_history["velocity_magnitude"].append(np.mean(recent_velocity) if len(recent_velocity) > 0 else 0.0)
+                step_norms_history["perturbation_magnitude"].append(np.mean(recent_perturb) if len(recent_perturb) > 0 else 0.0)
+                step_norms_history["state_change"].append(np.mean(recent_state) if len(recent_state) > 0 else 0.0)
+
+
+            # Log metrics
+            if iteration % 10 == 0:
+                print(f"\nIteration {iteration} (dt={dt}):")
+                print("  PPO metrics:")
+                for k in ["policy_loss", "value_loss", "entropy", "kl", "clip_fraction"]:
+                    if k in all_metrics:
+                        print(f"    {k}: {all_metrics[k]:.4f}")
+                print("  Task metrics:")
+                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]:
+                    if k in all_metrics:
+                        print(f"    {k}: {all_metrics[k]:.4f}")
+                # Log step norms from environment
+                if env.step_norms["velocity_magnitude"]:
+                    print(f"  avg_velocity_norm: {np.mean(env.step_norms['velocity_magnitude'][-10:]):.4f}")
+                    print(f"  avg_perturbation_norm: {np.mean(env.step_norms['perturbation_magnitude'][-10:]):.4f}")
+                    print(f"  avg_state_change_norm: {np.mean(env.step_norms['state_change'][-10:]):.4f}")
+
+            # Save checkpoint
+            if (iteration + 1) % save_freq == 0 or iteration == n_iterations - 1:
+                # Update env config with actual T_max used
+                config_copy = config.copy()
+                if "env" not in config_copy:
+                    config_copy["env"] = {}
+                config_copy["env"]["T_max"] = T_max_env
+
+                save_config = {
+                    "obs_dim": obs_dim,
+                    "n_latent": n_latent,
+                    "hidden_sizes": hidden_sizes,
+                    "delta_max": delta_max_effective,
+                    "delta_max_calibration": {
+                        "delta_max_effective": delta_max_effective,
+                        "median_drift_norm": median_drift_norm if median_drift_norm is not None else "N/A (explicit delta_max used)",
+                        "delta_max_scale": args.delta_max_scale if args.delta_max is None else "N/A",
+                        "dt": dt,
+                    },
+                    "target_mode": target_mode,
+                    **config_copy,
+                }
+                save_policy_checkpoint(
+                    policy,
+                    centroids,
+                    goal_labels,  # Save goal_labels (not lineage_names)
+                    save_config,
+                    output_dir,
+                    iteration=iteration + 1,
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nTraining interrupted by user. Proceeding to plots/visualizations...")
+    
+    if not interrupted:
+        print(f"\nTraining complete! Checkpoints saved to {output_dir}")
     
     # Plot training curves
     print("Generating training plots...")
@@ -1456,6 +1473,7 @@ def main():
             target_lineage=target_lineage,  # Pass target_lineage from training
             source_mode=source_mode,  # Pass source_mode from training
             deterministic=args.deterministic,
+            eps_success=eps_success,
         )
 
 

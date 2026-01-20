@@ -5,24 +5,28 @@ set -e  # Exit on error
 
 # Default values
 CONDA_ENV="test3"
-RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260118_215639"
+RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260119_221705"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
 LINEAGE_KEY="leiden"
 CHECKPOINT=""
-TARGET_LINEAGE="5"
-SOURCE_LINEAGE="2"
+SOURCE_LINEAGE="4"
+TARGET_LINEAGE="0"
 SOURCE_MODE="centroid"  # "centroid" or "sample"
-TARGET_MODE="centroid"  # "centroid" or "goal_cell"
+TARGET_MODE="centroid"  # "centroid" or "sample"
 USE_NEGATIVE_VELOCITY=""
-T=256
+DEACTIVATE_VELOCITY="--deactivate_velocity"
+T=1000
 EMBEDDING="pca"
 Z_KEY="mean"
 OUTPUT_DIR_BASE="./test_outputs/viz"
 SEED=42
 DEVICE="auto"
 DETERMINISTIC=""
+DETERMINISTIC_ACTION=""
 INTERVENTION_METHOD="heatmap"
 N_VIZ_TRAJECTORIES="10"
+REACHABILITY_TEST="--reachability_test"
+BASELINE_DELTA_MAX=""
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             USE_NEGATIVE_VELOCITY="--use_negative_velocity"
             shift
             ;;
+        --deactivate_velocity)
+            DEACTIVATE_VELOCITY="--deactivate_velocity"
+            shift
+            ;;
         --T)
             T="$2"
             shift 2
@@ -95,12 +103,24 @@ while [[ $# -gt 0 ]]; do
             DETERMINISTIC="--deterministic"
             shift
             ;;
+        --deterministic_action)
+            DETERMINISTIC_ACTION="--deterministic_action"
+            shift
+            ;;
         --intervention_method)
             INTERVENTION_METHOD="$2"
             shift 2
             ;;
         --n_viz_trajectories)
             N_VIZ_TRAJECTORIES="$2"
+            shift 2
+            ;;
+        --reachability_test)
+            REACHABILITY_TEST="--reachability_test"
+            shift
+            ;;
+        --baseline_delta_max)
+            BASELINE_DELTA_MAX="$2"
             shift 2
             ;;
         --conda_env)
@@ -120,8 +140,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --lineage_key KEY           Key in adata.obs for lineage labels (default: leiden)"
             echo "  --source_lineage LABEL      Source lineage label (default: random)"
             echo "  --source_mode MODE          Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)"
-            echo "  --target_mode MODE          Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)"
+            echo "  --target_mode MODE          Target mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)"
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
+            echo "  --deactivate_velocity      Deactivate velocity effect on next state (default: velocity affects state)"
             echo "  --T N                       Rollout horizon (default: 64)"
             echo "  --embedding METHOD          Embedding method: 'pca' or 'umap' (default: pca)"
             echo "  --z_key KEY                 Key in adata.obsm for latent states (default: mean)"
@@ -130,14 +151,17 @@ while [[ $# -gt 0 ]]; do
             echo "  --seed N                    Random seed (default: 42)"
             echo "  --device DEV                Device: auto, cpu, or cuda (default: auto)"
             echo "  --deterministic             Use deterministic policy (default: False, uses stochastic sampling)"
+            echo "  --deterministic_action      Use argmax action but sample magnitude (default: False)"
             echo "  --intervention_method M     Intervention plot method: 'stem' or 'heatmap' (default: heatmap)"
             echo "  --n_viz_trajectories N      Number of trajectory visualizations to generate (default: 1)"
+            echo "  --reachability_test         Run greedy reachability baseline (default: off)"
+            echo "  --baseline_delta_max FLOAT  Delta max for reachability baseline (default: delta_clip or 1.0)"
             echo "  --conda_env ENV             Conda environment name (default: test3)"
             echo ""
             echo "EXAMPLES:"
             echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage 1"
-            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --target_mode goal_cell"
-            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode goal_cell"
+            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --target_mode sample"
+            echo "  $0 --rl_output_dir ./test_outputs/rl_20260117_205544 --target_lineage Beta --source_lineage Alpha --source_mode centroid --target_mode sample"
             exit 0
             ;;
         *)
@@ -241,6 +265,9 @@ echo "Goal mode: $GOAL_MODE"
 if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
     echo "Using negative velocity"
 fi
+if [[ -n "$DEACTIVATE_VELOCITY" ]]; then
+    echo "Deactivating velocity"
+fi
 echo "Output dir: $OUTPUT_DIR"
 echo "=========================================="
 
@@ -283,13 +310,25 @@ fi
 if [[ -n "$USE_NEGATIVE_VELOCITY" ]]; then
     PYTHON_ARGS+=(--use_negative_velocity)
 fi
+if [[ -n "$DEACTIVATE_VELOCITY" ]]; then
+    PYTHON_ARGS+=(--deactivate_velocity)
+fi
 
 if [[ -n "$DETERMINISTIC" ]]; then
     PYTHON_ARGS+=(--deterministic)
 fi
+if [[ -n "$DETERMINISTIC_ACTION" ]]; then
+    PYTHON_ARGS+=(--deterministic_action)
+fi
 
 if [[ -n "$N_VIZ_TRAJECTORIES" ]]; then
     PYTHON_ARGS+=(--n_viz_trajectories "$N_VIZ_TRAJECTORIES")
+fi
+if [[ -n "$REACHABILITY_TEST" ]]; then
+    PYTHON_ARGS+=(--reachability_test)
+fi
+if [[ -n "$BASELINE_DELTA_MAX" ]]; then
+    PYTHON_ARGS+=(--baseline_delta_max "$BASELINE_DELTA_MAX")
 fi
 
 # Run the visualization script

@@ -61,7 +61,7 @@ class PPOTrainer:
         x0: Optional[torch.Tensor] = None,
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
         process_idx: Optional[torch.Tensor] = None,  # (B,)
-        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for goal_cell mode
+        goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for sample mode
     ) -> Dict[str, torch.Tensor]:
         """
         Collect rollout trajectories.
@@ -278,6 +278,9 @@ class PPOTrainer:
         # Initial distances (d_0)
         initial_distances = distances[0]  # (B,)
         
+        # mean_initial_distance: mean distance at first timestep
+        mean_initial_distance = initial_distances.mean().item()
+        
         # mean_final_distance: mean distance at last timestep
         final_distances = distances[-1]  # (B,)
         mean_final_distance = final_distances.mean().item()
@@ -314,6 +317,7 @@ class PPOTrainer:
         
         return {
             "success_rate": success_rate,
+            "mean_initial_distance": mean_initial_distance,
             "mean_final_distance": mean_final_distance,
             "mean_best_distance": mean_best_distance,
             "mean_distance_improvement": mean_distance_improvement,

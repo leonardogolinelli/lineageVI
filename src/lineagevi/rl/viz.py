@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Optional, Tuple, Literal, List
 import torch
+import torch.distributions as dist
 import numpy as np
 import scanpy as sc
 import matplotlib.pyplot as plt
@@ -114,8 +115,8 @@ def rollout_baseline(
         z_current = env.z  # Keep on device
         z_trajectory.append(z_current.cpu().numpy())
         # Compute distance to actual goal
-        dist = torch.norm(z_current - z_goal, p=2).item()
-        distances.append(dist)
+        distance = torch.norm(z_current - z_goal, p=2).item()
+        distances.append(distance)
         
         if done:
             break
@@ -123,6 +124,59 @@ def rollout_baseline(
         obs = obs_next
     
     return np.array(z_trajectory), np.array(distances)
+
+
+def rollout_reachability_baseline(
+    env: LatentVelocityEnv,
+    z0: torch.Tensor,
+    z_goal: torch.Tensor,
+    T: int,
+    delta_max: float,
+    x0: Optional[torch.Tensor] = None,
+    cluster_idx: Optional[torch.Tensor] = None,
+    process_idx: Optional[torch.Tensor] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Greedy coordinate-descent baseline for reachability.
+    
+    Picks the coordinate with largest absolute error and applies a clipped step.
+    """
+    obs, info = env.reset(z0, goal_idx=0, x0=x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
+    
+    z_trajectory = [z0.cpu().numpy()]
+    initial_dist = torch.norm(z0 - z_goal, p=2).item()
+    distances = [initial_dist]
+    actions = []
+    deltas = []
+    
+    for t in range(T):
+        z_current = env.z
+        error = z_goal - z_current
+        
+        idx = torch.argmax(error.abs()).item()
+        raw_delta = error[idx].item()
+        delta = float(np.clip(raw_delta, -delta_max, delta_max))
+        
+        if delta == 0.0:
+            action = 0
+        else:
+            action = idx + 1  # 0 is no-op, 1..n_latent map to dims
+        
+        obs_next, reward, done, info_next = env.step((action, delta))
+        
+        z_current = env.z
+        z_trajectory.append(z_current.cpu().numpy())
+        distance = torch.norm(z_current - z_goal, p=2).item()
+        distances.append(distance)
+        actions.append(action)
+        deltas.append(delta)
+        
+        if done:
+            break
+        
+        obs = obs_next
+    
+    return np.array(z_trajectory), np.array(distances), np.array(actions), np.array(deltas)
 
 
 def inspect_policy(
@@ -225,6 +279,7 @@ def rollout_agent(
     cluster_idx: Optional[torch.Tensor] = None,
     process_idx: Optional[torch.Tensor] = None,
     deterministic: bool = True,
+    deterministic_action: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Roll out agent trajectory using policy.
@@ -251,6 +306,8 @@ def rollout_agent(
         Process index.
     deterministic : bool
         If True, use argmax for discrete action and mean for magnitude.
+    deterministic_action : bool
+        If True, use argmax for action but sample magnitude.
     
     Returns
     -------
@@ -280,7 +337,23 @@ def rollout_agent(
         obs_tensor = obs_tensor.to(device).float()
         
         with torch.no_grad():
-            if deterministic:
+            if deterministic_action:
+                # Argmax action, sampled magnitude
+                action_logits, _, _, _ = policy.forward(obs_tensor.unsqueeze(0))
+                action = torch.argmax(action_logits, dim=1).item()
+                
+                if action > 0:
+                    action_tensor = torch.tensor([action], device=obs_tensor.device)
+                    magnitude_mu, magnitude_std = policy._get_magnitude_params(obs_tensor.unsqueeze(0), action_tensor)
+                    delta = dist.Normal(magnitude_mu, magnitude_std).sample()[0].item()
+                else:
+                    delta = 0.0
+                
+                # Clip magnitude if configured
+                delta_clip = getattr(policy, "delta_clip", None)
+                if delta_clip is not None:
+                    delta = float(np.clip(delta, -delta_clip, delta_clip))
+            elif deterministic:
                 # Deterministic: argmax for action, mean for magnitude
                 action_logits, magnitude_mu, _, _ = policy.forward(obs_tensor.unsqueeze(0))
                 action = torch.argmax(action_logits, dim=1).item()
@@ -288,7 +361,7 @@ def rollout_agent(
                 # Get magnitude for chosen action (conditioned on state + action)
                 if action > 0:
                     action_tensor = torch.tensor([action], device=obs_tensor.device)
-                    magnitude_mu, _ = policy._get_magnitude_params(obs_tensor, action_tensor)
+                    magnitude_mu, _ = policy._get_magnitude_params(obs_tensor.unsqueeze(0), action_tensor)
                     delta = magnitude_mu[0].item()  # Use mean directly (deterministic)
                 else:
                     delta = 0.0
@@ -308,8 +381,8 @@ def rollout_agent(
         z_current = env.z  # Keep on device
         z_trajectory.append(z_current.cpu().numpy())
         # Compute distance to actual goal
-        dist = torch.norm(z_current - z_goal, p=2).item()
-        distances.append(dist)
+        distance = torch.norm(z_current - z_goal, p=2).item()
+        distances.append(distance)
         actions.append(action)
         deltas.append(delta)
         
@@ -335,6 +408,8 @@ def plot_trajectory_overlay(
     output_path: Path,
     lineage_key: Optional[str] = None,
     lineage_labels: Optional[np.ndarray] = None,
+    eps_success: Optional[float] = None,
+    centroids: Optional[np.ndarray] = None,
 ):
     """
     Plot trajectory overlay on embedding.
@@ -367,6 +442,10 @@ def plot_trajectory_overlay(
         Key for lineage labels in adata.
     lineage_labels : np.ndarray, optional
         Lineage labels for coloring cells.
+    eps_success : float, optional
+        Success radius in latent space (projected to embedding).
+    centroids : np.ndarray, optional
+        Centroid latent states (n_goals, n_latent) to plot with indices.
     """
     # Project trajectories to embedding space
     z_baseline_2d = transformer.transform(z_baseline)
@@ -395,6 +474,21 @@ def plot_trajectory_overlay(
     else:
         # Gray scatter
         ax.scatter(embedding[:, 0], embedding[:, 1], c='gray', s=10, alpha=0.3, label='Cells')
+    
+    # Plot all centroids with index labels if provided
+    if centroids is not None and len(centroids) > 0:
+        centroids_2d = transformer.transform(centroids)
+        ax.scatter(
+            centroids_2d[:, 0],
+            centroids_2d[:, 1],
+            c='black',
+            s=60,
+            alpha=0.8,
+            label='Centroids',
+            zorder=8,
+        )
+        for idx, (x, y) in enumerate(centroids_2d):
+            ax.text(x, y + 1, str(idx), color='black', fontsize=11, fontweight='bold', ha='center', va='bottom', zorder=9)
     
     # Plot baseline trajectory
     ax.plot(
@@ -443,6 +537,19 @@ def plot_trajectory_overlay(
         label='Goal',
         zorder=10,
     )
+    
+    # Plot success radius if provided
+    if eps_success is not None and eps_success > 0:
+        rng = np.random.default_rng(0)
+        n_samples = 128
+        dirs = rng.normal(size=(n_samples, z_goal.shape[0]))
+        dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-8
+        circle_latent = z_goal.reshape(1, -1) + eps_success * dirs
+        circle_2d = transformer.transform(circle_latent)
+        angles = np.arctan2(circle_2d[:, 1] - z_goal_2d[1], circle_2d[:, 0] - z_goal_2d[0])
+        order = np.argsort(angles)
+        circle_2d = circle_2d[order]
+        ax.plot(circle_2d[:, 0], circle_2d[:, 1], color='black', alpha=0.6, linewidth=2.5, label='Success radius')
     
     # Mark end of agent trajectory
     ax.scatter(
@@ -679,8 +786,8 @@ def main():
     parser.add_argument("--source_mode", type=str, default="sample", choices=["centroid", "sample"],
                         help="Source mode: 'centroid' (use source lineage centroid) or 'sample' (sample a cell from source lineage, default)")
     parser.add_argument("--target_lineage", type=str, required=True, help="Target lineage label")
-    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "goal_cell"],
-                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'goal_cell' (sample a cell from target lineage)")
+    parser.add_argument("--target_mode", type=str, default="centroid", choices=["centroid", "sample"],
+                        help="Target mode: 'centroid' (use target lineage centroid, default) or 'sample' (sample a cell from target lineage)")
     parser.add_argument("--T", type=int, default=64, help="Rollout horizon")
     parser.add_argument("--embedding", type=str, default="pca", choices=["pca", "umap"],
                         help="Embedding method: 'pca' or 'umap'")
@@ -690,12 +797,20 @@ def main():
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda)")
     parser.add_argument("--deterministic", action="store_true", default=False,
                         help="Use deterministic policy (default: False, uses stochastic sampling)")
+    parser.add_argument("--deterministic_action", action="store_true", default=False,
+                        help="Use argmax action but sample magnitude (default: False)")
     parser.add_argument("--intervention_method", type=str, default="heatmap", choices=["stem", "heatmap"],
                         help="Intervention visualization method")
     parser.add_argument("--use_negative_velocity", action="store_true",
                         help="Use negative velocity instead of normal velocity")
+    parser.add_argument("--deactivate_velocity", action="store_true",
+                        help="Deactivate velocity effect on next state (default: velocity affects state)")
     parser.add_argument("--n_viz_trajectories", type=int, default=1,
                         help="Number of trajectory visualizations to generate (default: 1)")
+    parser.add_argument("--reachability_test", action="store_true", default=False,
+                        help="Run greedy reachability baseline (default: False)")
+    parser.add_argument("--baseline_delta_max", type=float, default=None,
+                        help="Delta max for reachability baseline (default: delta_clip from checkpoint or 1.0)")
     
     args = parser.parse_args()
     
@@ -793,6 +908,7 @@ def main():
         lambda_mag=env_config.get("lambda_mag", 0.1),
         R_succ=env_config.get("R_succ", 10.0),
         use_negative_velocity=use_negative_velocity,
+        deactivate_velocity=args.deactivate_velocity,
     )
     
     # Get lineage labels for coloring (shared across all experiments)
@@ -858,7 +974,7 @@ def main():
         if args.target_mode == "centroid":
             z_goal = centroids[goal_idx].to(device)  # (n_latent,)
             print(f"Target: centroid for '{target_goal_label}'")
-        else:  # target_mode == "goal_cell"
+        else:  # target_mode == "sample"
             # Sample one cell from target lineage (seed ensures reproducibility)
             target_mask = adata.obs[args.lineage_key] == target_goal_label
             target_indices = np.where(target_mask)[0]
@@ -926,6 +1042,21 @@ def main():
         z_baseline, distances_baseline = rollout_baseline(
             env, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx
         )
+
+        if args.reachability_test:
+            if args.baseline_delta_max is not None:
+                baseline_delta_max = args.baseline_delta_max
+            else:
+                baseline_delta_max = config.get("delta_clip", None)
+                if baseline_delta_max is None:
+                    baseline_delta_max = 1.0
+            
+            print(f"Running reachability baseline (delta_max={baseline_delta_max})...")
+            _, distances_greedy, _, _ = rollout_reachability_baseline(
+                env, z0, z_goal, args.T, baseline_delta_max, x0, cluster_idx, process_idx
+            )
+            best_distance = float(np.min(distances_greedy))
+            print(f"Reachability baseline best distance: {best_distance:.4f}")
         
         # Inspect policy at initial state (first experiment only)
         if example_idx == 0:
@@ -970,10 +1101,11 @@ def main():
             print(f"  Policy inspection saved to {outdir / 'policy_inspection.json'}")
         
         # Roll out agent trajectory
-        print(f"\nRolling out agent trajectory (deterministic={args.deterministic})...")
+        print(f"\nRolling out agent trajectory (deterministic={args.deterministic}, deterministic_action={args.deterministic_action})...")
         z_agent, distances_agent, actions, deltas = rollout_agent(
             env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx,
-            deterministic=args.deterministic
+            deterministic=args.deterministic,
+            deterministic_action=args.deterministic_action,
         )
         
         # Compute metrics
