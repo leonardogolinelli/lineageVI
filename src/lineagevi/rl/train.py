@@ -986,6 +986,7 @@ def main():
             print(f"Saved GMM to {gmm_path}")
     
     ent_coef = args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01)
+    delta_clip_config = policy_config.get("delta_clip", None)
     
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
@@ -1068,7 +1069,7 @@ def main():
     n_latent = adapter.n_latent
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
     activation = policy_config.get("activation", "relu")
-    delta_clip = policy_config.get("delta_clip", None)
+    delta_clip = delta_clip_config
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
@@ -1078,6 +1079,7 @@ def main():
         delta_clip=delta_clip,
     ).to(device)
     print(f"Created policy with obs_dim={obs_dim}, n_latent={n_latent}")
+    
     
     # Get PPO hyperparameters (CLI overrides config)
     gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)
