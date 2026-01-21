@@ -795,6 +795,8 @@ def main():
                         help="Multiplicative decay factor for eps_success percentage (default: 0.95)")
     parser.add_argument("--eps_success_decay_reward_pct", type=float, default=0.0,
                         help="Reward bonus percentage applied when eps_success_pct decays (default: 0.0)")
+    parser.add_argument("--eps_success_reward_match_decay", action="store_true",
+                        help="Increase success reward by the same pct as eps_success_pct decay (default: False)")
     parser.add_argument("--perturb_clip", type=float, default=None,
                         help="Clip applied perturbation magnitude (env-side, default: none)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
@@ -978,6 +980,12 @@ def main():
     eps_success_success_rate_threshold = args.eps_success_success_rate_threshold
     eps_success_decay_factor = args.eps_success_decay_factor
     eps_success_decay_reward_pct = args.eps_success_decay_reward_pct
+    eps_success_reward_match_decay = args.eps_success_reward_match_decay
+    if eps_success_decay_reward_pct > 0.0 and eps_success_reward_match_decay:
+        raise ValueError(
+            "eps_success_decay_reward_pct and eps_success_reward_match_decay are mutually exclusive. "
+            "Use only one."
+        )
     if not (0.0 < eps_success_pct <= 1.0):
         raise ValueError("eps_success_pct must be in (0, 1]")
     if eps_success_decay_on_success:
@@ -990,7 +998,8 @@ def main():
         print(
             "Eps-success decay enabled: "
             f"pct={eps_success_pct}, threshold={eps_success_success_rate_threshold}, "
-            f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}"
+            f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}, "
+            f"reward_match_decay={eps_success_reward_match_decay}"
         )
     else:
         print(f"Eps-success pct enabled: pct={eps_success_pct}")
@@ -1441,8 +1450,12 @@ def main():
                 success_rate = task_metrics.get("success_rate", 0.0)
                 decay_triggered = success_rate > eps_success_success_rate_threshold
                 if decay_triggered:
-                    task_metrics["eps_success_reward_bonus_pct"] = eps_success_decay_reward_pct
+                    reward_bonus_pct = eps_success_decay_reward_pct
                     current_eps_success_pct *= eps_success_decay_factor
+                    if eps_success_reward_match_decay:
+                        reward_bonus_pct = (1.0 - eps_success_decay_factor)
+                        env.R_succ *= (1.0 + reward_bonus_pct)
+                    task_metrics["eps_success_reward_bonus_pct"] = reward_bonus_pct
                     if eps_success_decay_reward_pct > 0.0:
                         bonus_factor = 1.0 + eps_success_decay_reward_pct
                         batch["reward"] = batch["reward"] * bonus_factor
@@ -1512,6 +1525,7 @@ def main():
                 config_copy["env"]["eps_success_success_rate_threshold"] = eps_success_success_rate_threshold
                 config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
                 config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
+                config_copy["env"]["eps_success_reward_match_decay"] = eps_success_reward_match_decay
                 config_copy["env"]["perturb_clip"] = perturb_clip
 
                 save_config = {

@@ -36,13 +36,14 @@ DT="" # default is 0.1
 LAMBDA_PROGRESS="1" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
-R_SUCC="10" # default is 20.0
+R_SUCC="10" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
 EPS_SUCCESS_PCT="0.99"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
 EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.55"
 EPS_SUCCESS_DECAY_FACTOR="0.99"
 EPS_SUCCESS_DECAY_REWARD_PCT="0.0" # fraction of reward bonus to apply when eps_success decays
+EPS_SUCCESS_REWARD_MATCH_DECAY="--eps_success_reward_match_decay"
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
 ENT_COEF="1e-3"
@@ -194,6 +195,10 @@ while [[ $# -gt 0 ]]; do
             EPS_SUCCESS_DECAY_REWARD_PCT="$2"
             shift 2
             ;;
+        --eps_success_reward_match_decay)
+            EPS_SUCCESS_REWARD_MATCH_DECAY="--eps_success_reward_match_decay"
+            shift
+            ;;
         --perturb_clip)
             PERTURB_CLIP="$2"
             shift 2
@@ -296,6 +301,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --eps_success_success_rate_threshold FLOAT  Success-rate threshold to decay eps_success (default: 0.2)"
             echo "  --eps_success_decay_factor FLOAT  Multiplicative decay factor (default: 0.95)"
             echo "  --eps_success_decay_reward_pct FLOAT  Reward bonus percent when eps_success decays (default: 0.0)"
+            echo "  --eps_success_reward_match_decay  Match success reward increase to eps_success decay"
             echo "  --perturb_clip FLOAT      Clip applied perturbation magnitude (env-side, default: none)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
@@ -523,6 +529,9 @@ if [[ -n "$EPS_SUCCESS_DECAY_FACTOR" ]]; then
 fi
 if [[ -n "$EPS_SUCCESS_DECAY_REWARD_PCT" ]]; then
     PYTHON_ARGS+=(--eps_success_decay_reward_pct "$EPS_SUCCESS_DECAY_REWARD_PCT")
+fi
+if [[ -n "$EPS_SUCCESS_REWARD_MATCH_DECAY" ]]; then
+    PYTHON_ARGS+=(--eps_success_reward_match_decay)
 fi
 if [[ -n "$PERTURB_CLIP" ]]; then
     PYTHON_ARGS+=(--perturb_clip "$PERTURB_CLIP")
