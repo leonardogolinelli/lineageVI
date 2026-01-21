@@ -33,12 +33,17 @@ T_MAX="1000"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="1" # default is 1.0
+LAMBDA_PROGRESS="0.1" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
-R_SUCC="30" # default is 20.0
+R_SUCC="100" # default is 20.0
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
 EPS_SUCCESS="5" # default is 0.1
+EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
+EPS_SUCCESS_PCT="0.95"
+EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.3"
+EPS_SUCCESS_DECAY_FACTOR="0.95"
+EPS_SUCCESS_DECAY_REWARD_PCT="0.0" # fraction of reward bonus to apply when eps_success decays
 GAMMA=".9" # default is 0.99
 ENT_COEF="1e-3"
 LR="3e-4" # default is 3e-4
@@ -166,6 +171,26 @@ while [[ $# -gt 0 ]]; do
             EPS_SUCCESS="$2"
             shift 2
             ;;
+        --eps_success_decay_on_success)
+            EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
+            shift
+            ;;
+        --eps_success_pct)
+            EPS_SUCCESS_PCT="$2"
+            shift 2
+            ;;
+        --eps_success_success_rate_threshold)
+            EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="$2"
+            shift 2
+            ;;
+        --eps_success_decay_factor)
+            EPS_SUCCESS_DECAY_FACTOR="$2"
+            shift 2
+            ;;
+        --eps_success_decay_reward_pct)
+            EPS_SUCCESS_DECAY_REWARD_PCT="$2"
+            shift 2
+            ;;
         --n_viz_trajectories)
             N_VIZ_TRAJECTORIES="$2"
             shift 2
@@ -232,6 +257,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
             echo "  --alpha_stay FLOAT        State cost coefficient for staying near goal (overrides config, default: 0.0)"
             echo "  --eps_success FLOAT       Success radius for goal (overrides config, default: 0.1)"
+            echo "  --eps_success_decay_on_success  Decay eps_success percentage when success rate exceeds threshold"
+            echo "  --eps_success_pct FLOAT   Success radius as fraction of initial distance (default: 0.1)"
+            echo "  --eps_success_success_rate_threshold FLOAT  Success-rate threshold to decay eps_success (default: 0.2)"
+            echo "  --eps_success_decay_factor FLOAT  Multiplicative decay factor (default: 0.95)"
+            echo "  --eps_success_decay_reward_pct FLOAT  Reward bonus percent when eps_success decays (default: 0.0)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
             echo "  --lr FLOAT                Learning rate (overrides config, default: 3e-4)"
@@ -439,6 +469,21 @@ if [[ -n "$ALPHA_STAY" ]]; then
 fi
 if [[ -n "$EPS_SUCCESS" ]]; then
     PYTHON_ARGS+=(--eps_success "$EPS_SUCCESS")
+fi
+if [[ -n "$EPS_SUCCESS_DECAY_ON_SUCCESS" ]]; then
+    PYTHON_ARGS+=(--eps_success_decay_on_success)
+fi
+if [[ -n "$EPS_SUCCESS_PCT" ]]; then
+    PYTHON_ARGS+=(--eps_success_pct "$EPS_SUCCESS_PCT")
+fi
+if [[ -n "$EPS_SUCCESS_SUCCESS_RATE_THRESHOLD" ]]; then
+    PYTHON_ARGS+=(--eps_success_success_rate_threshold "$EPS_SUCCESS_SUCCESS_RATE_THRESHOLD")
+fi
+if [[ -n "$EPS_SUCCESS_DECAY_FACTOR" ]]; then
+    PYTHON_ARGS+=(--eps_success_decay_factor "$EPS_SUCCESS_DECAY_FACTOR")
+fi
+if [[ -n "$EPS_SUCCESS_DECAY_REWARD_PCT" ]]; then
+    PYTHON_ARGS+=(--eps_success_decay_reward_pct "$EPS_SUCCESS_DECAY_REWARD_PCT")
 fi
 if [[ -n "$GAMMA" ]]; then
     PYTHON_ARGS+=(--gamma "$GAMMA")

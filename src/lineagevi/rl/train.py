@@ -228,7 +228,7 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]
+    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -781,6 +781,16 @@ def main():
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
     parser.add_argument("--alpha_stay", type=float, default=None, help="State cost coefficient for staying near goal (overrides config, default: 0.0)")
     parser.add_argument("--eps_success", type=float, default=None, help="Success radius for goal (overrides config, default: 0.1)")
+    parser.add_argument("--eps_success_decay_on_success", action="store_true",
+                        help="Decay eps_success percentage when success rate exceeds a threshold")
+    parser.add_argument("--eps_success_pct", type=float, default=0.1,
+                        help="Success radius as a fraction of initial distance (default: 0.1)")
+    parser.add_argument("--eps_success_success_rate_threshold", type=float, default=0.2,
+                        help="Success-rate threshold to trigger eps_success decay (default: 0.2)")
+    parser.add_argument("--eps_success_decay_factor", type=float, default=0.95,
+                        help="Multiplicative decay factor for eps_success percentage (default: 0.95)")
+    parser.add_argument("--eps_success_decay_reward_pct", type=float, default=0.0,
+                        help="Reward bonus percentage applied when eps_success_pct decays (default: 0.0)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
     parser.add_argument("--delta_max_scale", type=float, default=0.5, help="Scale factor for auto-calibrated delta_max (default: 0.5)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
@@ -944,6 +954,25 @@ def main():
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
     eps_success = args.eps_success if args.eps_success is not None else env_config.get("eps_success", 0.1)
+    eps_success_decay_on_success = args.eps_success_decay_on_success
+    eps_success_pct = args.eps_success_pct
+    eps_success_success_rate_threshold = args.eps_success_success_rate_threshold
+    eps_success_decay_factor = args.eps_success_decay_factor
+    eps_success_decay_reward_pct = args.eps_success_decay_reward_pct
+    if eps_success_decay_on_success:
+        if not (0.0 < eps_success_decay_factor < 1.0):
+            raise ValueError("eps_success_decay_factor must be in (0, 1) when decay is enabled")
+        if not (0.0 < eps_success_pct <= 1.0):
+            raise ValueError("eps_success_pct must be in (0, 1] when decay is enabled")
+        if not (0.0 <= eps_success_success_rate_threshold <= 1.0):
+            raise ValueError("eps_success_success_rate_threshold must be in [0, 1]")
+        if eps_success_decay_reward_pct < 0.0:
+            raise ValueError("eps_success_decay_reward_pct must be >= 0")
+        print(
+            "Eps-success decay enabled: "
+            f"pct={eps_success_pct}, threshold={eps_success_success_rate_threshold}, "
+            f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}"
+        )
     
     # Get source_mode and target_mode from CLI or config
     source_mode = args.source_mode if args.source_mode is not None else env_config.get("source_mode", "sample")
@@ -1200,6 +1229,7 @@ def main():
         source_centroid = z_all[source_mask].mean(dim=0)  # (n_latent,)
         print(f"Computed source centroid for '{source_lineage}': shape {source_centroid.shape}")
     
+    current_eps_success_pct = eps_success_pct
     print(f"Starting training for {n_iterations} iterations...")
     if source_lineage is not None and target_lineage is not None:
         print(f"Training with fixed source='{source_lineage}' (mode={source_mode}) and target='{target_lineage}' (mode={target_mode})")
@@ -1229,6 +1259,9 @@ def main():
         "L1_magnitude": [],
         "noop_fraction": [],
         "mean_episode_return": [],
+        "eps_success_pct": [],
+        "eps_success_mean": [],
+        "eps_success_reward_bonus_pct": [],
     }
     step_norms_history = {
         "velocity_magnitude": [],
@@ -1292,6 +1325,12 @@ def main():
                         # Fallback to centroid if no cells found
                         goal_states[i] = centroids[g_i]
 
+            # Optionally set eps_success as a fraction of per-episode initial distance
+            if eps_success_decay_on_success:
+                goal_z_batch = goal_states if goal_states is not None else centroids[goal_idx]
+                initial_distances = torch.norm(z0 - goal_z_batch, p=2, dim=1)
+                env.eps_success = current_eps_success_pct * initial_distances
+
             # Get per-cell cluster/process indices for sampled cells
             cluster_idx_batch = None
             process_idx_batch = None
@@ -1352,6 +1391,28 @@ def main():
 
             # Compute task metrics
             task_metrics = trainer.compute_task_metrics(batch)
+            if eps_success_decay_on_success:
+                eps_val = env.eps_success
+                if torch.is_tensor(eps_val):
+                    eps_val = eps_val.mean().item()
+                task_metrics = {
+                    **task_metrics,
+                    "eps_success_pct": current_eps_success_pct,
+                    "eps_success_mean": eps_val,
+                }
+            
+            # Conditionally decay eps_success based on success rate
+            if eps_success_decay_on_success:
+                success_rate = task_metrics.get("success_rate", 0.0)
+                decay_triggered = success_rate > eps_success_success_rate_threshold
+                task_metrics["eps_success_reward_bonus_pct"] = eps_success_decay_reward_pct if decay_triggered else 0.0
+                if decay_triggered:
+                    current_eps_success_pct *= eps_success_decay_factor
+                    if eps_success_decay_reward_pct > 0.0:
+                        bonus_factor = 1.0 + eps_success_decay_reward_pct
+                        batch["reward"] = batch["reward"] * bonus_factor
+                        if "mean_episode_return" in task_metrics:
+                            task_metrics["mean_episode_return"] *= bonus_factor
 
             # Update policy
             metrics = trainer.update(
@@ -1391,7 +1452,7 @@ def main():
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 print("  Task metrics:")
-                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll"]:
+                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 # Log step norms from environment
@@ -1407,6 +1468,15 @@ def main():
                 if "env" not in config_copy:
                     config_copy["env"] = {}
                 config_copy["env"]["T_max"] = T_max_env
+                if torch.is_tensor(env.eps_success):
+                    config_copy["env"]["eps_success"] = env.eps_success.mean().item()
+                else:
+                    config_copy["env"]["eps_success"] = env.eps_success
+                config_copy["env"]["eps_success_decay_on_success"] = eps_success_decay_on_success
+                config_copy["env"]["eps_success_pct"] = current_eps_success_pct
+                config_copy["env"]["eps_success_success_rate_threshold"] = eps_success_success_rate_threshold
+                config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
+                config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
 
                 save_config = {
                     "obs_dim": obs_dim,

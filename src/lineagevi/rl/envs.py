@@ -540,7 +540,10 @@ class VectorizedLatentVelocityEnv:
         d1_t = torch.norm(self.z - goal_z_batch, p=1, dim=1) / np.sqrt(self.n_latent)
         
         # Check success (terminal/absorbing) - goal_z_batch already set above
-        success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < self.eps_success) & active_mask
+        eps_success = self.eps_success
+        if torch.is_tensor(eps_success):
+            eps_success = eps_success.to(self.adapter.device)
+        success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < eps_success) & active_mask
         self.done = self.done | success
         
         # Only update active envs (absorbing terminal states)

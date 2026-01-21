@@ -100,6 +100,13 @@ class PPOTrainer:
         # Reset environment
         obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_states=goal_states)
         
+        # Capture per-episode eps_success if present
+        eps_success = self.env.eps_success
+        if torch.is_tensor(eps_success):
+            eps_success_batch = eps_success.detach().cpu().float()
+        else:
+            eps_success_batch = torch.full((batch_size,), float(eps_success), dtype=torch.float32)
+        
         # Storage
         obs_list = []
         action_list = []
@@ -205,6 +212,7 @@ class PPOTrainer:
             "next_value": next_value_batch,
             "z": z_batch,  # (T, B, n_latent) - latent states for task metrics
             "goal_idx": goal_idx,  # (B,) - goal indices for each episode
+            "eps_success": eps_success_batch,  # (B,) per-episode success threshold
         }
         
         # Add NLL if available
@@ -269,7 +277,10 @@ class PPOTrainer:
         distances = torch.norm(z - centroids_expanded, p=2, dim=2)  # (T, B)
         
         # success[t,b] = dist[t,b] < eps_success
-        success = distances < eps_success  # (T, B)
+        if torch.is_tensor(eps_success):
+            success = distances < eps_success.unsqueeze(0)  # (T, B)
+        else:
+            success = distances < eps_success  # (T, B)
         
         # success_rate: fraction of episodes that reach success at any step
         success_per_episode = success.any(dim=0)  # (B,) - True if episode succeeded at any step
