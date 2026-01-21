@@ -210,10 +210,18 @@ def load_policy_checkpoint(
     hidden_sizes = config.get("hidden_sizes", [128, 128])
     activation = config.get("activation", "relu")
     delta_clip = config.get("delta_clip", None)
+    kl_stop_threshold = config.get("kl_stop_threshold", 0.02)
+    kl_stop_immediate_threshold = config.get("kl_stop_immediate_threshold", 0.03)
+    goal_cond_dim = config.get("goal_cond_dim", 32)
+    use_t_norm = config.get("use_t_norm", False)
+    allow_noop_action = config.get("allow_noop_action", True)
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
         n_latent=n_latent,
+        goal_cond_dim=goal_cond_dim,
+        use_t_norm=use_t_norm,
+        allow_noop_action=allow_noop_action,
         hidden_sizes=hidden_sizes,
         activation=activation,
         delta_clip=delta_clip,

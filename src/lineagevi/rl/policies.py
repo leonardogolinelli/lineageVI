@@ -15,7 +15,7 @@ class ActorCriticPolicy(nn.Module):
     Continuous action: Δ_t ∈ R (magnitude, only used if a_t != 0)
     
     Architecture:
-    - Shared MLP trunk: [z, goal_emb, t] → hidden
+    - Shared MLP trunk: [z, proj(z_goal - z_t), t] → hidden
     - Categorical head: hidden → logits[d+1]
     - Action embedding: action → action_emb
     - Magnitude head: [hidden, action_emb] → (μ, logσ) (conditioned on state + action)
@@ -27,8 +27,11 @@ class ActorCriticPolicy(nn.Module):
     
     def __init__(
         self,
-        obs_dim: int,  # n_latent + goal_emb_dim + 1 (for time)
+        obs_dim: int,  # 2*n_latent + 1 (z, goal_diff, time)
         n_latent: int,
+        goal_cond_dim: int = 32,
+        use_t_norm: bool = False,
+        allow_noop_action: bool = True,
         hidden_sizes: list = [128, 128],
         activation: str = "relu",
         delta_clip: Optional[float] = None,
@@ -37,10 +40,16 @@ class ActorCriticPolicy(nn.Module):
         self.obs_dim = obs_dim
         self.n_latent = n_latent
         self.delta_clip = delta_clip
+        self.goal_cond_dim = goal_cond_dim
+        self.allow_noop_action = allow_noop_action
+        self.use_t_norm = use_t_norm
+        
+        # Goal conditioning projection for (z_goal - z_t)
+        self.goal_proj = nn.Linear(n_latent, goal_cond_dim)
         
         # Build shared trunk
         layers = []
-        input_dim = obs_dim
+        input_dim = n_latent + goal_cond_dim + (1 if use_t_norm else 0)
         for hidden_size in hidden_sizes:
             layers.append(nn.Linear(input_dim, hidden_size))
             if activation == "relu":
@@ -96,7 +105,7 @@ class ActorCriticPolicy(nn.Module):
         magnitude_std : torch.Tensor
             Magnitude stddevs (from clamped log_std) of shape (batch_size,).
         """
-        h = self.shared_trunk(obs)  # (B, trunk_output_dim)
+        h = self.shared_trunk(self._encode_obs(obs))  # (B, trunk_output_dim)
         
         # Embed action
         action_emb = self.action_embedding(action)  # (B, action_embed_dim)
@@ -142,9 +151,10 @@ class ActorCriticPolicy(nn.Module):
         value : torch.Tensor
             Value estimates of shape (batch_size, 1).
         """
-        h = self.shared_trunk(obs)
+        h = self.shared_trunk(self._encode_obs(obs))
         
         action_logits = self.action_head(h)  # (B, n_latent + 1)
+        action_logits = self._apply_noop_mask(action_logits)
         value = self.value_head(h)  # (B, 1)
         
         # Return placeholders for backward compatibility
@@ -300,3 +310,27 @@ class ActorCriticPolicy(nn.Module):
         """
         _, _, _, value = self.forward(obs)
         return value
+
+    def _encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Encode observation into trunk input by projecting goal_diff.
+        
+        obs is [z_t, goal_diff, t_norm] (if enabled), with goal_diff = z_goal - z_t.
+        """
+        z = obs[:, : self.n_latent]
+        goal_diff = obs[:, self.n_latent : 2 * self.n_latent]
+        if self.use_t_norm:
+            t_norm = obs[:, 2 * self.n_latent : 2 * self.n_latent + 1]
+        else:
+            t_norm = None
+        goal_emb = self.goal_proj(goal_diff)
+        if t_norm is None:
+            return torch.cat([z, goal_emb], dim=1)
+        return torch.cat([z, goal_emb, t_norm], dim=1)
+
+    def _apply_noop_mask(self, action_logits: torch.Tensor) -> torch.Tensor:
+        if self.allow_noop_action:
+            return action_logits
+        masked_logits = action_logits.clone()
+        masked_logits[:, 0] = -1e9
+        return masked_logits

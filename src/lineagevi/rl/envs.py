@@ -2,7 +2,6 @@
 
 from typing import Optional, Tuple, Dict, Literal
 import torch
-import torch.nn as nn
 import numpy as np
 import scanpy as sc
 
@@ -37,7 +36,7 @@ class LatentVelocityEnv:
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
         alpha_stay: float = 0.0,
-        goal_emb_dim: Optional[int] = None,
+        perturb_clip: Optional[float] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
@@ -58,6 +57,7 @@ class LatentVelocityEnv:
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
         self.alpha_stay = alpha_stay
+        self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
         self.lambda_off = lambda_off
@@ -69,9 +69,7 @@ class LatentVelocityEnv:
                 raise ValueError("gmm_path must be provided when lambda_off > 0")
             self.gmm_scorer = SklearnGMMScorer(gmm_path)
         
-        # Goal encoding: one-hot if goal_emb_dim is None, else learned embedding
-        self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
-        self.use_learned_goal_emb = goal_emb_dim is not None
+        # Goal encoding: difference vector (z_goal - z_t)
         
         # Cluster and process indices (fixed for episode)
         self.cluster_indices = cluster_indices
@@ -150,15 +148,13 @@ class LatentVelocityEnv:
     
     def _get_obs(self) -> torch.Tensor:
         """Get current observation."""
-        # Goal embedding
-        if self.use_learned_goal_emb:
-            # For now, use one-hot (can be replaced with learned embedding)
-            goal_emb = torch.zeros(self.goal_emb_dim, device=self.adapter.device)
-            if self.goal_idx < self.goal_emb_dim:
-                goal_emb[self.goal_idx] = 1.0
+        # Goal embedding: difference vector (z_goal - z_t)
+        if self.goal_state is not None:
+            goal = self.goal_state  # (n_latent,)
         else:
-            goal_emb = torch.zeros(self.n_goals, device=self.adapter.device)
-            goal_emb[self.goal_idx] = 1.0
+            goal = self.centroids[self.goal_idx]  # (n_latent,)
+        goal_diff = goal - self.z  # (n_latent,)
+        goal_emb = goal_diff
         
         # Normalized time
         t_norm = torch.tensor(self.t / self.T_max, device=self.adapter.device)
@@ -204,6 +200,8 @@ class LatentVelocityEnv:
             return self._get_obs(), 0.0, True, {"distance": self._compute_distance().item()}
         
         a_t, delta_t = action
+        if self.perturb_clip is not None:
+            delta_t = float(np.clip(delta_t, -self.perturb_clip, self.perturb_clip))
         
         # Apply perturbation
         u = torch.zeros(self.n_latent, device=self.adapter.device)
@@ -324,7 +322,7 @@ class VectorizedLatentVelocityEnv:
         lambda_mag: float = 0.1,
         R_succ: float = 10.0,
         alpha_stay: float = 0.0,
-        goal_emb_dim: Optional[int] = None,
+        perturb_clip: Optional[float] = None,
         cluster_indices: Optional[torch.Tensor] = None,
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
@@ -346,6 +344,7 @@ class VectorizedLatentVelocityEnv:
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
         self.alpha_stay = alpha_stay
+        self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
         self.lambda_off = lambda_off
@@ -357,8 +356,7 @@ class VectorizedLatentVelocityEnv:
                 raise ValueError("gmm_path must be provided when lambda_off > 0")
             self.gmm_scorer = SklearnGMMScorer(gmm_path)
         
-        self.goal_emb_dim = goal_emb_dim if goal_emb_dim is not None else self.n_goals
-        self.use_learned_goal_emb = goal_emb_dim is not None
+        # Goal encoding: difference vector (z_goal - z_t)
         
         self.cluster_indices = cluster_indices
         self.process_indices = process_indices
@@ -443,19 +441,19 @@ class VectorizedLatentVelocityEnv:
         """Get current observations for batch."""
         B = self.batch_size
         
-        # Goal embeddings
-        if self.use_learned_goal_emb:
-            goal_emb = torch.zeros(B, self.goal_emb_dim, device=self.adapter.device)
-            goal_emb.scatter_(1, self.goal_idx.unsqueeze(1), 1.0)
+        # Goal embeddings: difference vector (z_goal - z_t)
+        if self.goal_states is not None:
+            goals_batch = self.goal_states  # (B, n_latent)
         else:
-            goal_emb = torch.zeros(B, self.n_goals, device=self.adapter.device)
-            goal_emb.scatter_(1, self.goal_idx.unsqueeze(1), 1.0)
+            goals_batch = self.centroids[self.goal_idx]  # (B, n_latent)
+        goal_diff = goals_batch - self.z  # (B, n_latent)
+        goal_emb = goal_diff
         
         # Normalized time
         t_norm = (self.t.float() / self.T_max).unsqueeze(1)  # (B, 1)
         
         # Concatenate: [z, goal_emb, t_norm]
-        obs = torch.cat([self.z, goal_emb, t_norm], dim=1)  # (B, n_latent + goal_emb_dim + 1)
+        obs = torch.cat([self.z, goal_emb, t_norm], dim=1)  # (B, 2*n_latent + 1)
         return obs
     
     def _compute_distances(self) -> torch.Tensor:
@@ -495,6 +493,8 @@ class VectorizedLatentVelocityEnv:
         a_t, delta_t = actions
         a_t = a_t.to(self.adapter.device).long()
         delta_t = delta_t.to(self.adapter.device).float()
+        if self.perturb_clip is not None:
+            delta_t = torch.clamp(delta_t, -self.perturb_clip, self.perturb_clip)
         B = self.batch_size
         
         # Mask out already-done episodes

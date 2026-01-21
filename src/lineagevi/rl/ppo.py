@@ -31,7 +31,11 @@ class PPOTrainer:
         target_kl: float = 0.01,
         vf_coef: float = 0.5,
         ent_coef: float = 0.01,
+        kl_stop_threshold: float = 0.02,
+        kl_stop_immediate_threshold: float = 0.03,
         lr: float = 3e-4,
+        actor_lr: Optional[float] = None,
+        critic_lr: Optional[float] = None,
         max_grad_norm: float = 0.5,
         device: Optional[torch.device] = None,
     ):
@@ -44,11 +48,26 @@ class PPOTrainer:
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
         self.max_grad_norm = max_grad_norm
+        self.kl_stop_threshold = kl_stop_threshold
+        self.kl_stop_immediate_threshold = kl_stop_immediate_threshold
+        self.actor_lr = lr if actor_lr is None else actor_lr
+        self.critic_lr = lr if critic_lr is None else critic_lr
         
         self.device = device if device is not None else next(policy.parameters()).device
         
-        # Optimizer
-        self.optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+        # Optimizer (optionally separate actor/critic lrs)
+        if self.actor_lr == self.critic_lr:
+            self.optimizer = torch.optim.Adam(policy.parameters(), lr=self.actor_lr)
+        else:
+            value_param_ids = {id(p) for p in self.policy.value_head.parameters()}
+            actor_params = [p for p in self.policy.parameters() if id(p) not in value_param_ids]
+            critic_params = list(self.policy.value_head.parameters())
+            self.optimizer = torch.optim.Adam(
+                [
+                    {"params": actor_params, "lr": self.actor_lr},
+                    {"params": critic_params, "lr": self.critic_lr},
+                ]
+            )
         
         # Logging
         self.metrics = defaultdict(list)
@@ -195,7 +214,7 @@ class PPOTrainer:
             next_value_batch[t] = next_value_t
         
         # Extract z_t from obs for task metrics
-        # obs shape: (T, B, obs_dim) where obs_dim = n_latent + goal_emb_dim + 1
+        # obs shape: (T, B, obs_dim) where obs_dim = 2*n_latent + 1
         # z_t is the first n_latent dimensions
         n_latent = self.env.n_latent
         z_batch = obs_batch[:, :, :n_latent]  # (T, B, n_latent)
@@ -453,6 +472,8 @@ class PPOTrainer:
         
         # PPO update loop
         for epoch in range(epochs):
+            consecutive_high_kl = 0
+            early_stop = False
             # Shuffle indices
             indices = torch.randperm(N, device=self.device)
             
@@ -512,6 +533,22 @@ class PPOTrainer:
                 metrics["entropy"].append(entropy_bonus.item())
                 metrics["kl"].append(kl.item())
                 metrics["clip_fraction"].append(clip_fraction.item())
+                
+                # KL early stopping rule
+                kl_value = kl.item()
+                if kl_value > self.kl_stop_immediate_threshold:
+                    early_stop = True
+                    break
+                if kl_value > self.kl_stop_threshold:
+                    consecutive_high_kl += 1
+                else:
+                    consecutive_high_kl = 0
+                if consecutive_high_kl >= 2:
+                    early_stop = True
+                    break
+            
+            if early_stop:
+                break
             
             # Check KL early stopping (fix edge case when minibatch_size > N)
             n_mb = max(1, int(np.ceil(N / minibatch_size)))

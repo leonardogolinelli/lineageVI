@@ -374,6 +374,7 @@ def generate_example_visualizations(
     lambda_mag: float = 0.1,
     R_succ: float = 10.0,
     alpha_stay: float = 0.0,
+    perturb_clip: Optional[float] = None,
     use_negative_velocity: bool = False,
     deactivate_velocity: bool = False,
     target_mode: str = "centroid",
@@ -428,6 +429,8 @@ def generate_example_visualizations(
         Success reward bonus.
     use_negative_velocity : bool
         Whether to use negative velocity.
+    perturb_clip : float, optional
+        Clip applied perturbation magnitude in visualization env.
     """
     device = next(policy.parameters()).device
     n_cells = z_all.shape[0]
@@ -478,6 +481,7 @@ def generate_example_visualizations(
         lambda_mag=lambda_mag,
         R_succ=R_succ,
         alpha_stay=alpha_stay,
+        perturb_clip=perturb_clip,
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
         gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
@@ -780,7 +784,7 @@ def main():
     parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
     parser.add_argument("--alpha_stay", type=float, default=None, help="State cost coefficient for staying near goal (overrides config, default: 0.0)")
-    parser.add_argument("--eps_success", type=float, default=None, help="Success radius for goal (overrides config, default: 0.1)")
+    parser.add_argument("--eps_success", type=float, default=None, help="Success radius as fraction of initial distance (overrides config, default: 0.1)")
     parser.add_argument("--eps_success_decay_on_success", action="store_true",
                         help="Decay eps_success percentage when success rate exceeds a threshold")
     parser.add_argument("--eps_success_pct", type=float, default=0.1,
@@ -791,12 +795,26 @@ def main():
                         help="Multiplicative decay factor for eps_success percentage (default: 0.95)")
     parser.add_argument("--eps_success_decay_reward_pct", type=float, default=0.0,
                         help="Reward bonus percentage applied when eps_success_pct decays (default: 0.0)")
+    parser.add_argument("--perturb_clip", type=float, default=None,
+                        help="Clip applied perturbation magnitude (env-side, default: none)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
     parser.add_argument("--delta_max_scale", type=float, default=0.5, help="Scale factor for auto-calibrated delta_max (default: 0.5)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor for future rewards (overrides config, default: 0.99)")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate (overrides config, default: 3e-4)")
+    parser.add_argument("--actor_lr", type=float, default=None, help="Actor learning rate (overrides lr)")
+    parser.add_argument("--critic_lr", type=float, default=None, help="Critic learning rate (overrides lr)")
     parser.add_argument("--ent_coef", type=float, default=None, help="Entropy coefficient for exploration bonus (overrides config, default: 0.01)")
+    parser.add_argument("--kl_stop_threshold", type=float, default=0.02,
+                        help="Stop PPO epoch if KL exceeds this for 2 consecutive minibatches (default: 0.02)")
+    parser.add_argument("--kl_stop_immediate_threshold", type=float, default=0.03,
+                        help="Stop PPO epoch immediately if KL exceeds this once (default: 0.03)")
+    parser.add_argument("--goal_cond_dim", type=int, default=32,
+                        help="Goal-conditioning projection dim for (z_goal - z_t) (default: 32)")
+    parser.add_argument("--use_t_norm", action="store_true",
+                        help="Include normalized time in policy conditioning (default: False)")
     parser.add_argument("--n_viz_trajectories", type=int, default=3, help="Number of example trajectories to visualize (default: 3)")
+    parser.add_argument("--disable_noop_action", action="store_true",
+                        help="Disallow no-op action (forces a perturbation each step)")
     parser.add_argument("--viz_embedding", type=str, default="pca", choices=["pca", "umap"], help="Embedding method for visualization (default: pca)")
     parser.add_argument("--skip_viz", action="store_true", help="Skip trajectory visualization after training")
     parser.add_argument("--deterministic", action="store_true", default=False,
@@ -953,17 +971,18 @@ def main():
     lambda_mag = args.lambda_mag if args.lambda_mag is not None else env_config.get("lambda_mag", 0.1)
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
+    perturb_clip = args.perturb_clip if args.perturb_clip is not None else env_config.get("perturb_clip", None)
     eps_success = args.eps_success if args.eps_success is not None else env_config.get("eps_success", 0.1)
     eps_success_decay_on_success = args.eps_success_decay_on_success
-    eps_success_pct = args.eps_success_pct
+    eps_success_pct = args.eps_success_pct if args.eps_success is None else eps_success
     eps_success_success_rate_threshold = args.eps_success_success_rate_threshold
     eps_success_decay_factor = args.eps_success_decay_factor
     eps_success_decay_reward_pct = args.eps_success_decay_reward_pct
+    if not (0.0 < eps_success_pct <= 1.0):
+        raise ValueError("eps_success_pct must be in (0, 1]")
     if eps_success_decay_on_success:
         if not (0.0 < eps_success_decay_factor < 1.0):
             raise ValueError("eps_success_decay_factor must be in (0, 1) when decay is enabled")
-        if not (0.0 < eps_success_pct <= 1.0):
-            raise ValueError("eps_success_pct must be in (0, 1] when decay is enabled")
         if not (0.0 <= eps_success_success_rate_threshold <= 1.0):
             raise ValueError("eps_success_success_rate_threshold must be in [0, 1]")
         if eps_success_decay_reward_pct < 0.0:
@@ -973,6 +992,8 @@ def main():
             f"pct={eps_success_pct}, threshold={eps_success_success_rate_threshold}, "
             f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}"
         )
+    else:
+        print(f"Eps-success pct enabled: pct={eps_success_pct}")
     
     # Get source_mode and target_mode from CLI or config
     source_mode = args.source_mode if args.source_mode is not None else env_config.get("source_mode", "sample")
@@ -1015,6 +1036,8 @@ def main():
             print(f"Saved GMM to {gmm_path}")
     
     ent_coef = args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01)
+    kl_stop_threshold = args.kl_stop_threshold if args.kl_stop_threshold is not None else ppo_config.get("kl_stop_threshold", 0.02)
+    kl_stop_immediate_threshold = args.kl_stop_immediate_threshold if args.kl_stop_immediate_threshold is not None else ppo_config.get("kl_stop_immediate_threshold", 0.03)
     delta_clip_config = policy_config.get("delta_clip", None)
     
     env = VectorizedLatentVelocityEnv(
@@ -1030,6 +1053,7 @@ def main():
         lambda_mag=lambda_mag,
         R_succ=R_succ,
         alpha_stay=alpha_stay,
+        perturb_clip=perturb_clip,
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
         gmm_path=gmm_path,
@@ -1094,15 +1118,21 @@ def main():
         print(f"Auto-calibrated delta_max: {delta_max_effective:.6f} (median drift norm {median_drift_norm:.6f}, scale {delta_max_scale})")
     
     # Create policy
-    obs_dim = adapter.n_latent + n_goals + 1  # z + goal_emb + t
     n_latent = adapter.n_latent
+    goal_cond_dim = args.goal_cond_dim if args.goal_cond_dim is not None else policy_config.get("goal_cond_dim", 32)
+    use_t_norm = args.use_t_norm if args.use_t_norm is not None else policy_config.get("use_t_norm", False)
+    obs_dim = (2 * n_latent) + (1 if use_t_norm else 0)  # z + (z_goal - z_t) [+ t]
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
     activation = policy_config.get("activation", "relu")
     delta_clip = delta_clip_config
+    allow_noop_action = not args.disable_noop_action if args.disable_noop_action is not None else policy_config.get("allow_noop_action", True)
     
     policy = ActorCriticPolicy(
         obs_dim=obs_dim,
         n_latent=n_latent,
+        goal_cond_dim=goal_cond_dim,
+        use_t_norm=use_t_norm,
+        allow_noop_action=allow_noop_action,
         hidden_sizes=hidden_sizes,
         activation=activation,
         delta_clip=delta_clip,
@@ -1113,6 +1143,8 @@ def main():
     # Get PPO hyperparameters (CLI overrides config)
     gamma = args.gamma if args.gamma is not None else ppo_config.get("gamma", 0.99)
     lr = args.lr if args.lr is not None else ppo_config.get("lr", 3e-4)
+    actor_lr = args.actor_lr if args.actor_lr is not None else lr
+    critic_lr = args.critic_lr if args.critic_lr is not None else lr
     
     # Create trainer
     trainer = PPOTrainer(
@@ -1125,7 +1157,11 @@ def main():
         vf_coef=ppo_config.get("vf_coef", 0.5),
         ent_coef=ent_coef,
         lr=lr,
+        actor_lr=actor_lr,
+        critic_lr=critic_lr,
         max_grad_norm=ppo_config.get("max_grad_norm", 0.5),
+        kl_stop_threshold=kl_stop_threshold,
+        kl_stop_immediate_threshold=kl_stop_immediate_threshold,
         device=device,
     )
     print("Created PPO trainer")
@@ -1325,11 +1361,10 @@ def main():
                         # Fallback to centroid if no cells found
                         goal_states[i] = centroids[g_i]
 
-            # Optionally set eps_success as a fraction of per-episode initial distance
-            if eps_success_decay_on_success:
-                goal_z_batch = goal_states if goal_states is not None else centroids[goal_idx]
-                initial_distances = torch.norm(z0 - goal_z_batch, p=2, dim=1)
-                env.eps_success = current_eps_success_pct * initial_distances
+            # Set eps_success as a fraction of per-episode initial distance
+            goal_z_batch = goal_states if goal_states is not None else centroids[goal_idx]
+            initial_distances = torch.norm(z0 - goal_z_batch, p=2, dim=1)
+            env.eps_success = current_eps_success_pct * initial_distances
 
             # Get per-cell cluster/process indices for sampled cells
             cluster_idx_batch = None
@@ -1391,22 +1426,22 @@ def main():
 
             # Compute task metrics
             task_metrics = trainer.compute_task_metrics(batch)
-            if eps_success_decay_on_success:
-                eps_val = env.eps_success
-                if torch.is_tensor(eps_val):
-                    eps_val = eps_val.mean().item()
-                task_metrics = {
-                    **task_metrics,
-                    "eps_success_pct": current_eps_success_pct,
-                    "eps_success_mean": eps_val,
-                }
+            eps_val = env.eps_success
+            if torch.is_tensor(eps_val):
+                eps_val = eps_val.mean().item()
+            task_metrics = {
+                **task_metrics,
+                "eps_success_pct": current_eps_success_pct,
+                "eps_success_mean": eps_val,
+                "eps_success_reward_bonus_pct": 0.0,
+            }
             
             # Conditionally decay eps_success based on success rate
             if eps_success_decay_on_success:
                 success_rate = task_metrics.get("success_rate", 0.0)
                 decay_triggered = success_rate > eps_success_success_rate_threshold
-                task_metrics["eps_success_reward_bonus_pct"] = eps_success_decay_reward_pct if decay_triggered else 0.0
                 if decay_triggered:
+                    task_metrics["eps_success_reward_bonus_pct"] = eps_success_decay_reward_pct
                     current_eps_success_pct *= eps_success_decay_factor
                     if eps_success_decay_reward_pct > 0.0:
                         bonus_factor = 1.0 + eps_success_decay_reward_pct
@@ -1477,11 +1512,19 @@ def main():
                 config_copy["env"]["eps_success_success_rate_threshold"] = eps_success_success_rate_threshold
                 config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
                 config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
+                config_copy["env"]["perturb_clip"] = perturb_clip
 
                 save_config = {
                     "obs_dim": obs_dim,
                     "n_latent": n_latent,
+                    "goal_cond_dim": goal_cond_dim,
+                    "use_t_norm": use_t_norm,
                     "hidden_sizes": hidden_sizes,
+                    "allow_noop_action": allow_noop_action,
+                    "kl_stop_threshold": kl_stop_threshold,
+                    "kl_stop_immediate_threshold": kl_stop_immediate_threshold,
+                    "actor_lr": actor_lr,
+                    "critic_lr": critic_lr,
                     "delta_max": delta_max_effective,
                     "delta_max_calibration": {
                         "delta_max_effective": delta_max_effective,
@@ -1534,6 +1577,7 @@ def main():
             lambda_mag=lambda_mag,
             R_succ=R_succ,
             alpha_stay=alpha_stay,
+            perturb_clip=perturb_clip,
             use_negative_velocity=use_negative_velocity,
             deactivate_velocity=deactivate_velocity,
             target_mode=target_mode,  # Use same target_mode as training
