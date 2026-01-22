@@ -25,7 +25,8 @@ TARGET_MODE="centroid"  # "centroid" or "sample"
 USE_NEGATIVE_VELOCITY=""
 DETERMINISTIC=""
 DEACTIVATE_VELOCITY="--deactivate_velocity"
-TERMINATE_ON_SUCCESS="--terminate_on_success"
+TERMINATE_ON_SUCCESS=""
+MILESTONE_REWARDS="--milestone_rewards"
 N_ITERATIONS="200"
 EPOCHS="2"
 BATCH_SIZE="256"
@@ -43,9 +44,9 @@ EPS_SUCCESS_PCT="0.99"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
 EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.90"
 EPS_SUCCESS_DECAY_FACTOR="0.99"
-EPS_SUCCESS_DECAY_REWARD_PCT="0.0" # fraction of reward bonus to apply when eps_success decays
-EPS_SUCCESS_REWARD_MATCH_DECAY=""
-EPS_SUCCESS_REWARD_LINEAR_W="15" # linear increment to R_succ per eps_success decay
+ 
+SUCCESS_REWARD_BONUS_PCT="0.0" # reward bonus pct when success-rate threshold or milestone is reached
+SUCCESS_REWARD_BONUS_W="15" # linear reward bonus when success-rate threshold or milestone is reached
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
 ENT_COEF="1e-3"
@@ -157,6 +158,10 @@ while [[ $# -gt 0 ]]; do
             TERMINATE_ON_SUCCESS="--terminate_on_success"
             shift
             ;;
+        --milestone_rewards)
+            MILESTONE_REWARDS="--milestone_rewards"
+            shift
+            ;;
         --dt)
             DT="$2"
             shift 2
@@ -197,16 +202,12 @@ while [[ $# -gt 0 ]]; do
             EPS_SUCCESS_DECAY_FACTOR="$2"
             shift 2
             ;;
-        --eps_success_decay_reward_pct)
-            EPS_SUCCESS_DECAY_REWARD_PCT="$2"
+        --success_reward_bonus_pct)
+            SUCCESS_REWARD_BONUS_PCT="$2"
             shift 2
             ;;
-        --eps_success_reward_match_decay)
-            EPS_SUCCESS_REWARD_MATCH_DECAY="--eps_success_reward_match_decay"
-            shift
-            ;;
-        --eps_success_reward_linear_w)
-            EPS_SUCCESS_REWARD_LINEAR_W="$2"
+        --success_reward_bonus_w)
+            SUCCESS_REWARD_BONUS_W="$2"
             shift 2
             ;;
         --perturb_clip)
@@ -299,6 +300,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
             echo "  --deactivate_velocity       Deactivate velocity effect on next state (default: velocity affects state)"
             echo "  --terminate_on_success      Terminate episode immediately on success (default: False)"
+            echo "  --milestone_rewards         Enable multi-milestone success rewards (default: False)"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
             echo "  --dt FLOAT                Time step size (overrides config)"
@@ -308,11 +310,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
             echo "  --alpha_stay FLOAT        State cost coefficient for staying near goal (overrides config, default: 0.0)"
             echo "  --eps_success_decay_on_success  Decay eps_success percentage when success rate exceeds threshold"
+            echo "  --success_reward_bonus_pct FLOAT  Reward bonus pct on success-rate threshold or milestone (default: 0.0)"
+            echo "  --success_reward_bonus_w FLOAT   Linear reward bonus on success-rate threshold or milestone (default: 0.0)"
             echo "  --eps_success_pct FLOAT   Success radius as fraction of initial distance (default: 0.1)"
             echo "  --eps_success_success_rate_threshold FLOAT  Success-rate threshold to decay eps_success (default: 0.2)"
             echo "  --eps_success_decay_factor FLOAT  Multiplicative decay factor (default: 0.95)"
-            echo "  --eps_success_decay_reward_pct FLOAT  Reward bonus percent when eps_success decays (default: 0.0)"
-            echo "  --eps_success_reward_match_decay  Match success reward increase to eps_success decay"
             echo "  --perturb_clip FLOAT      Clip applied perturbation magnitude (env-side, default: none)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
@@ -485,6 +487,9 @@ fi
 if [[ -n "$TERMINATE_ON_SUCCESS" ]]; then
     PYTHON_ARGS+=("$TERMINATE_ON_SUCCESS")
 fi
+if [[ -n "$MILESTONE_REWARDS" ]]; then
+    PYTHON_ARGS+=("$MILESTONE_REWARDS")
+fi
 
 # Add training parameters (override config if provided)
 if [[ -n "$N_ITERATIONS" ]]; then
@@ -541,14 +546,11 @@ fi
 if [[ -n "$EPS_SUCCESS_DECAY_FACTOR" ]]; then
     PYTHON_ARGS+=(--eps_success_decay_factor "$EPS_SUCCESS_DECAY_FACTOR")
 fi
-if [[ -n "$EPS_SUCCESS_DECAY_REWARD_PCT" ]]; then
-    PYTHON_ARGS+=(--eps_success_decay_reward_pct "$EPS_SUCCESS_DECAY_REWARD_PCT")
+if [[ -n "$SUCCESS_REWARD_BONUS_PCT" ]]; then
+    PYTHON_ARGS+=(--success_reward_bonus_pct "$SUCCESS_REWARD_BONUS_PCT")
 fi
-if [[ -n "$EPS_SUCCESS_REWARD_MATCH_DECAY" ]]; then
-    PYTHON_ARGS+=(--eps_success_reward_match_decay)
-fi
-if [[ -n "$EPS_SUCCESS_REWARD_LINEAR_W" ]]; then
-    PYTHON_ARGS+=(--eps_success_reward_linear_w "$EPS_SUCCESS_REWARD_LINEAR_W")
+if [[ -n "$SUCCESS_REWARD_BONUS_W" ]]; then
+    PYTHON_ARGS+=(--success_reward_bonus_w "$SUCCESS_REWARD_BONUS_W")
 fi
 if [[ -n "$PERTURB_CLIP" ]]; then
     PYTHON_ARGS+=(--perturb_clip "$PERTURB_CLIP")

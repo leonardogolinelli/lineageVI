@@ -42,6 +42,10 @@ class LatentVelocityEnv:
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
         terminate_on_success: bool = False,
+        milestone_rewards: bool = False,
+        milestone_decay_factor: Optional[float] = None,
+        success_reward_bonus_pct: float = 0.0,
+        success_reward_bonus_w: float = 0.0,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -57,12 +61,25 @@ class LatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.base_R_succ = R_succ
         self.alpha_stay = alpha_stay
         self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
         self.terminate_on_success = terminate_on_success
+        self.milestone_rewards = milestone_rewards
+        self.milestone_decay_factor = milestone_decay_factor
+        self.success_reward_bonus_pct = success_reward_bonus_pct
+        self.success_reward_bonus_w = success_reward_bonus_w
         self.lambda_off = lambda_off
+        
+        if self.milestone_rewards and self.terminate_on_success:
+            raise ValueError("milestone_rewards requires terminate_on_success=False")
+        if self.success_reward_bonus_pct > 0.0 and self.success_reward_bonus_w > 0.0:
+            raise ValueError("success_reward_bonus_pct and success_reward_bonus_w are mutually exclusive")
+        
+        if self.milestone_rewards and self.terminate_on_success:
+            raise ValueError("milestone_rewards requires terminate_on_success=False")
         
         # Initialize GMM scorer if lambda_off > 0
         self.gmm_scorer = None
@@ -83,6 +100,7 @@ class LatentVelocityEnv:
         self.t: int = 0
         self.done: bool = False
         self.success_awarded: bool = False
+        self.milestone_level: int = 0
         
         # Logging
         self.step_norms: Dict[str, list] = {
@@ -129,6 +147,7 @@ class LatentVelocityEnv:
         self.t = 0
         self.done = False
         self.success_awarded = False
+        self.milestone_level = 0
         self.step_norms = {
             "velocity_magnitude": [],
             "perturbation_magnitude": [],
@@ -252,8 +271,23 @@ class LatentVelocityEnv:
             goal_z_check = self.goal_state
         else:
             goal_z_check = self.centroids[self.goal_idx]
-        success = torch.norm(z_next - goal_z_check, p=2) < self.eps_success
-        success_award = success and (not self.success_awarded)
+        distance_next = torch.norm(z_next - goal_z_check, p=2)
+        success = distance_next < self.eps_success
+        if self.milestone_rewards:
+            if self.milestone_decay_factor is None or not (0.0 < self.milestone_decay_factor < 1.0):
+                raise ValueError("milestone_decay_factor must be in (0, 1) when milestone_rewards is enabled")
+            ratio = max(distance_next.item() / float(self.eps_success), 1e-12)
+            if ratio < 1.0:
+                k = int(np.floor(np.log(ratio) / np.log(self.milestone_decay_factor)))
+                milestone_level = k + 1
+            else:
+                milestone_level = 0
+            n_new = max(0, milestone_level - self.milestone_level)
+            success_award = n_new > 0
+            if success_award:
+                self.milestone_level = milestone_level
+        else:
+            success_award = success and (not self.success_awarded)
         if self.terminate_on_success and success:
             self.done = True
         if success:
@@ -268,7 +302,19 @@ class LatentVelocityEnv:
         state_cost = self.alpha_stay * d_tp1
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
-        success_bonus = self.R_succ if success_award else 0.0
+        if self.milestone_rewards:
+            k_start = self.milestone_level + 1
+            k_end = milestone_level
+            n_new_levels = k_end - self.milestone_level
+            sum_k = (k_start + k_end) * n_new_levels / 2.0
+            if self.success_reward_bonus_pct > 0.0:
+                success_bonus = self.base_R_succ * (n_new_levels + (self.success_reward_bonus_pct * sum_k))
+            elif self.success_reward_bonus_w > 0.0:
+                success_bonus = (self.base_R_succ * n_new_levels) + (self.success_reward_bonus_w * sum_k)
+            else:
+                success_bonus = self.base_R_succ * n_new_levels
+        else:
+            success_bonus = self.R_succ if success_award else 0.0
         
         # Off-manifold penalty
         off_manifold_penalty = 0.0
@@ -336,6 +382,10 @@ class VectorizedLatentVelocityEnv:
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
         terminate_on_success: bool = False,
+        milestone_rewards: bool = False,
+        milestone_decay_factor: Optional[float] = None,
+        success_reward_bonus_pct: float = 0.0,
+        success_reward_bonus_w: float = 0.0,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -352,12 +402,22 @@ class VectorizedLatentVelocityEnv:
         self.lambda_act = lambda_act
         self.lambda_mag = lambda_mag
         self.R_succ = R_succ
+        self.base_R_succ = R_succ
         self.alpha_stay = alpha_stay
         self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
         self.terminate_on_success = terminate_on_success
+        self.milestone_rewards = milestone_rewards
+        self.milestone_decay_factor = milestone_decay_factor
+        self.success_reward_bonus_pct = success_reward_bonus_pct
+        self.success_reward_bonus_w = success_reward_bonus_w
         self.lambda_off = lambda_off
+        
+        if self.milestone_rewards and self.terminate_on_success:
+            raise ValueError("milestone_rewards requires terminate_on_success=False")
+        if self.success_reward_bonus_pct > 0.0 and self.success_reward_bonus_w > 0.0:
+            raise ValueError("success_reward_bonus_pct and success_reward_bonus_w are mutually exclusive")
         
         # Initialize GMM scorer if lambda_off > 0
         self.gmm_scorer = None
@@ -377,6 +437,7 @@ class VectorizedLatentVelocityEnv:
         self.t: Optional[torch.Tensor] = None  # (B,)
         self.done: Optional[torch.Tensor] = None  # (B,)
         self.success_awarded: Optional[torch.Tensor] = None  # (B,)
+        self.milestone_level: Optional[torch.Tensor] = None  # (B,)
         
         # Logging
         self.step_norms: Dict[str, list] = {
@@ -424,6 +485,7 @@ class VectorizedLatentVelocityEnv:
         self.t = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.done = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
         self.success_awarded = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
+        self.milestone_level = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         
         # Store per-batch cluster/process indices
         self.cluster_idx = cluster_idx.to(self.adapter.device) if cluster_idx is not None else None
@@ -555,8 +617,25 @@ class VectorizedLatentVelocityEnv:
         eps_success = self.eps_success
         if torch.is_tensor(eps_success):
             eps_success = eps_success.to(self.adapter.device)
-        success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < eps_success) & active_mask
-        success_award = success & (~self.success_awarded)
+        else:
+            eps_success = torch.full((B,), float(eps_success), device=self.adapter.device)
+        distance_next = torch.norm(z_next - goal_z_batch, p=2, dim=1)
+        success = (distance_next < eps_success) & active_mask
+        if self.milestone_rewards:
+            if self.milestone_decay_factor is None or not (0.0 < self.milestone_decay_factor < 1.0):
+                raise ValueError("milestone_decay_factor must be in (0, 1) when milestone_rewards is enabled")
+            ratio = torch.clamp(distance_next / eps_success, min=1e-12)
+            log_decay = float(np.log(self.milestone_decay_factor))
+            k = torch.floor(torch.log(ratio) / log_decay)
+            milestone_level = torch.where(ratio < 1.0, k + 1, torch.zeros_like(k))
+            milestone_level = milestone_level.to(torch.long)
+            current_level = self.milestone_level
+            n_new = torch.clamp(milestone_level - current_level, min=0)
+            success_award = (n_new > 0) & active_mask
+            updated_level = torch.maximum(current_level, milestone_level)
+            self.milestone_level = torch.where(active_mask, updated_level, current_level)
+        else:
+            success_award = success & (~self.success_awarded)
         if self.terminate_on_success:
             self.done = self.done | success
         self.success_awarded = self.success_awarded | success
@@ -576,7 +655,20 @@ class VectorizedLatentVelocityEnv:
         state_cost = self.alpha_stay * d_tp1 * active_mask.float()  # Use linear distance for state cost
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
-        success_bonus = self.R_succ * success_award.float()
+        if self.milestone_rewards:
+            k_start = current_level + 1
+            k_end = milestone_level
+            n_new_levels = k_end - current_level
+            sum_k = (k_start + k_end).float() * n_new_levels.float() / 2.0
+            if self.success_reward_bonus_pct > 0.0:
+                success_bonus = self.base_R_succ * (n_new_levels.float() + (self.success_reward_bonus_pct * sum_k))
+            elif self.success_reward_bonus_w > 0.0:
+                success_bonus = (self.base_R_succ * n_new_levels.float()) + (self.success_reward_bonus_w * sum_k)
+            else:
+                success_bonus = self.base_R_succ * n_new_levels.float()
+            success_bonus = success_bonus * active_mask.float()
+        else:
+            success_bonus = self.R_succ * success_award.float()
         
         # Off-manifold penalty
         off_manifold_penalty = torch.zeros(B, device=self.adapter.device, dtype=torch.float32)

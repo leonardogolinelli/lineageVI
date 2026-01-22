@@ -259,6 +259,7 @@ class PPOTrainer:
         - noop_fraction: fraction of all steps with action == 0
         - mean_episode_return: mean sum of rewards per episode
         - mean_step_reward: mean reward per timestep across the rollout
+        - mean_milestones_reached: mean number of milestones reached per episode (milestone mode only)
         
         Parameters
         ----------
@@ -349,6 +350,25 @@ class PPOTrainer:
         # mean_step_reward: mean reward per timestep across the rollout
         mean_step_reward = reward.mean().item()
         
+        mean_milestones_reached = 0.0
+        if getattr(self.env, "milestone_rewards", False):
+            decay_factor = getattr(self.env, "milestone_decay_factor", None)
+            if decay_factor is None or not (0.0 < decay_factor < 1.0):
+                raise ValueError("milestone_decay_factor must be in (0, 1) when milestone_rewards is enabled")
+            if torch.is_tensor(eps_success):
+                eps_success_batch = eps_success.unsqueeze(0)  # (1, B)
+            else:
+                eps_success_batch = torch.full((1, B), float(eps_success), device=distances.device)
+            ratio = torch.clamp(distances / eps_success_batch, min=1e-12)
+            log_decay = float(torch.log(torch.tensor(decay_factor)))
+            levels = torch.where(
+                ratio < 1.0,
+                torch.floor(torch.log(ratio) / log_decay) + 1.0,
+                torch.zeros_like(ratio),
+            )
+            milestones_reached = levels.max(dim=0)[0]  # (B,)
+            mean_milestones_reached = milestones_reached.float().mean().item()
+        
         return {
             "success_rate": success_rate,
             "mean_initial_distance": mean_initial_distance,
@@ -361,6 +381,7 @@ class PPOTrainer:
             "noop_fraction": noop_fraction,
             "mean_episode_return": mean_episode_return,
             "mean_step_reward": mean_step_reward,
+            "mean_milestones_reached": mean_milestones_reached,
         }
     
     def compute_gae(

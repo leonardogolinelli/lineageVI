@@ -228,7 +228,7 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct", "R_succ_current"]
+    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_milestones_reached", "mean_nll", "eps_success_pct", "eps_success_mean", "success_reward_bonus_pct", "success_reward_bonus_w", "R_succ_current"]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -381,6 +381,10 @@ def generate_example_visualizations(
     use_negative_velocity: bool = False,
     deactivate_velocity: bool = False,
     terminate_on_success: bool = False,
+    milestone_rewards: bool = False,
+    success_reward_bonus_pct: float = 0.0,
+    success_reward_bonus_w: float = 0.0,
+    eps_success_decay_factor: float = 0.95,
     target_mode: str = "centroid",
     seed: int = 42,
     deterministic: bool = False,
@@ -489,6 +493,10 @@ def generate_example_visualizations(
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
         terminate_on_success=terminate_on_success,
+        milestone_rewards=milestone_rewards,
+        milestone_decay_factor=eps_success_decay_factor,
+        success_reward_bonus_pct=success_reward_bonus_pct,
+        success_reward_bonus_w=success_reward_bonus_w,
         gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
         lambda_off=lambda_off_viz,
     )
@@ -784,6 +792,12 @@ def main():
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
     parser.add_argument("--deactivate_velocity", action="store_true", help="Deactivate velocity effect on next state (default: velocity affects state)")
     parser.add_argument("--terminate_on_success", action="store_true", help="Terminate episode immediately on success (default: False)")
+    parser.add_argument("--milestone_rewards", action="store_true",
+                        help="Enable multi-milestone success rewards within an episode (default: False)")
+    parser.add_argument("--success_reward_bonus_pct", type=float, default=0.0,
+                        help="Reward bonus pct applied on success-rate threshold or milestone (default: 0.0)")
+    parser.add_argument("--success_reward_bonus_w", type=float, default=0.0,
+                        help="Linear reward bonus applied on success-rate threshold or milestone (default: 0.0)")
     parser.add_argument("--dt", type=float, default=None, help="Time step size (overrides config)")
     parser.add_argument("--lambda_progress", type=float, default=None, help="Progress reward scaling factor (overrides config)")
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
@@ -799,12 +813,8 @@ def main():
                         help="Success-rate threshold to trigger eps_success decay (default: 0.2)")
     parser.add_argument("--eps_success_decay_factor", type=float, default=0.95,
                         help="Multiplicative decay factor for eps_success percentage (default: 0.95)")
-    parser.add_argument("--eps_success_decay_reward_pct", type=float, default=0.0,
-                        help="Reward bonus percentage applied when eps_success_pct decays (default: 0.0)")
-    parser.add_argument("--eps_success_reward_match_decay", action="store_true",
-                        help="Increase success reward by the same pct as eps_success_pct decay (default: False)")
-    parser.add_argument("--eps_success_reward_linear_w", type=float, default=0.0,
-                        help="Linear increment to success reward per eps_success decay (default: 0.0)")
+    # eps_success decay uses success_reward_bonus_pct / success_reward_bonus_w for bonuses
+    # eps_success_reward_linear_w removed in favor of success_reward_bonus_w
     parser.add_argument("--perturb_clip", type=float, default=None,
                         help="Clip applied perturbation magnitude (env-side, default: none)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
@@ -977,6 +987,8 @@ def main():
     deactivate_velocity = args.deactivate_velocity if args.deactivate_velocity else env_config.get("deactivate_velocity", False)
     # Get terminate_on_success from CLI or config
     terminate_on_success = args.terminate_on_success if args.terminate_on_success else env_config.get("terminate_on_success", False)
+    # Get milestone_rewards from CLI or config
+    milestone_rewards = args.milestone_rewards if args.milestone_rewards else env_config.get("milestone_rewards", False)
     # Get reward parameters from CLI or config
     lambda_progress = args.lambda_progress if args.lambda_progress is not None else env_config.get("lambda_progress", 1.0)
     lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
@@ -989,36 +1001,29 @@ def main():
     eps_success_pct = args.eps_success_pct if args.eps_success is None else eps_success
     eps_success_success_rate_threshold = args.eps_success_success_rate_threshold
     eps_success_decay_factor = args.eps_success_decay_factor
-    eps_success_decay_reward_pct = args.eps_success_decay_reward_pct
-    eps_success_reward_match_decay = args.eps_success_reward_match_decay
-    eps_success_reward_linear_w = args.eps_success_reward_linear_w
-    reward_method_count = sum([
-        eps_success_decay_reward_pct > 0.0,
-        eps_success_reward_match_decay,
-        eps_success_reward_linear_w > 0.0,
-    ])
-    if reward_method_count > 1:
-        raise ValueError(
-            "eps_success_decay_reward_pct, eps_success_reward_match_decay, and "
-            "eps_success_reward_linear_w are mutually exclusive. Use only one."
-        )
+    success_reward_bonus_pct = args.success_reward_bonus_pct
+    success_reward_bonus_w = args.success_reward_bonus_w
     if not (0.0 < eps_success_pct <= 1.0):
         raise ValueError("eps_success_pct must be in (0, 1]")
+    if milestone_rewards and terminate_on_success:
+        raise ValueError("milestone_rewards requires terminate_on_success=False")
+    if milestone_rewards and not (0.0 < eps_success_decay_factor < 1.0):
+        raise ValueError("eps_success_decay_factor must be in (0, 1) when milestone_rewards is enabled")
+    if success_reward_bonus_pct < 0.0:
+        raise ValueError("success_reward_bonus_pct must be >= 0")
+    if success_reward_bonus_w < 0.0:
+        raise ValueError("success_reward_bonus_w must be >= 0")
+    if success_reward_bonus_pct > 0.0 and success_reward_bonus_w > 0.0:
+        raise ValueError("success_reward_bonus_pct and success_reward_bonus_w are mutually exclusive")
     if eps_success_decay_on_success:
         if not (0.0 < eps_success_decay_factor < 1.0):
             raise ValueError("eps_success_decay_factor must be in (0, 1) when decay is enabled")
         if not (0.0 <= eps_success_success_rate_threshold <= 1.0):
             raise ValueError("eps_success_success_rate_threshold must be in [0, 1]")
-        if eps_success_decay_reward_pct < 0.0:
-            raise ValueError("eps_success_decay_reward_pct must be >= 0")
-        if eps_success_reward_linear_w < 0.0:
-            raise ValueError("eps_success_reward_linear_w must be >= 0")
         print(
             "Eps-success decay enabled: "
             f"pct={eps_success_pct}, threshold={eps_success_success_rate_threshold}, "
-            f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}, "
-            f"reward_match_decay={eps_success_reward_match_decay}, "
-            f"reward_linear_w={eps_success_reward_linear_w}"
+            f"factor={eps_success_decay_factor}"
         )
     else:
         print(f"Eps-success pct enabled: pct={eps_success_pct}")
@@ -1085,10 +1090,14 @@ def main():
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
         terminate_on_success=terminate_on_success,
+        milestone_rewards=milestone_rewards,
+        milestone_decay_factor=eps_success_decay_factor,
+        success_reward_bonus_pct=success_reward_bonus_pct,
+        success_reward_bonus_w=success_reward_bonus_w,
         gmm_path=gmm_path,
         lambda_off=lambda_off,
     )
-    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}, terminate_on_success={terminate_on_success}")
+    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}, terminate_on_success={terminate_on_success}, milestone_rewards={milestone_rewards}")
     print(f"Success threshold: eps_success={eps_success}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
     print(f"Source mode: {source_mode}, Target mode: {target_mode}")
@@ -1326,9 +1335,11 @@ def main():
         "noop_fraction": [],
         "mean_episode_return": [],
         "mean_step_reward": [],
+        "mean_milestones_reached": [],
         "eps_success_pct": [],
         "eps_success_mean": [],
-        "eps_success_reward_bonus_pct": [],
+        "success_reward_bonus_pct": [],
+        "success_reward_bonus_w": [],
         "R_succ_current": [],
     }
     step_norms_history = {
@@ -1465,7 +1476,6 @@ def main():
                 **task_metrics,
                 "eps_success_pct": current_eps_success_pct,
                 "eps_success_mean": eps_val,
-                "eps_success_reward_bonus_pct": 0.0,
             }
             
             # Conditionally decay eps_success based on success rate
@@ -1473,20 +1483,27 @@ def main():
                 success_rate = task_metrics.get("success_rate", 0.0)
                 decay_triggered = success_rate > eps_success_success_rate_threshold
                 if decay_triggered:
-                    reward_bonus_pct = eps_success_decay_reward_pct
                     current_eps_success_pct *= eps_success_decay_factor
                     decay_count += 1
-                    if eps_success_reward_match_decay:
-                        reward_bonus_pct = (1.0 - eps_success_decay_factor)
-                        env.R_succ *= (1.0 + reward_bonus_pct)
-                    if eps_success_reward_linear_w > 0.0:
-                        env.R_succ = R_succ + (eps_success_reward_linear_w * decay_count)
-                    task_metrics["eps_success_reward_bonus_pct"] = reward_bonus_pct
-                    if eps_success_decay_reward_pct > 0.0:
-                        bonus_factor = 1.0 + eps_success_decay_reward_pct
-                        batch["reward"] = batch["reward"] * bonus_factor
-                        if "mean_episode_return" in task_metrics:
-                            task_metrics["mean_episode_return"] *= bonus_factor
+                    if success_reward_bonus_pct > 0.0:
+                        env.R_succ = env.base_R_succ * (1.0 + success_reward_bonus_pct * decay_count)
+                        task_metrics["success_reward_bonus_pct"] = success_reward_bonus_pct
+                        task_metrics["success_reward_bonus_w"] = 0.0
+                    elif success_reward_bonus_w > 0.0:
+                        env.R_succ = env.base_R_succ + (success_reward_bonus_w * decay_count)
+                        task_metrics["success_reward_bonus_pct"] = 0.0
+                        task_metrics["success_reward_bonus_w"] = success_reward_bonus_w
+                    else:
+                        env.R_succ = env.base_R_succ
+                        task_metrics["success_reward_bonus_pct"] = 0.0
+                        task_metrics["success_reward_bonus_w"] = 0.0
+                else:
+                    task_metrics["success_reward_bonus_pct"] = 0.0
+                    task_metrics["success_reward_bonus_w"] = 0.0
+            if not eps_success_decay_on_success:
+                task_metrics["success_reward_bonus_pct"] = 0.0
+                task_metrics["success_reward_bonus_w"] = 0.0
+                env.R_succ = env.base_R_succ
             task_metrics["R_succ_current"] = float(env.R_succ)
 
             # Update policy
@@ -1527,7 +1544,7 @@ def main():
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 print("  Task metrics:")
-                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct", "R_succ_current"]:
+                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_milestones_reached", "mean_nll", "eps_success_pct", "eps_success_mean", "success_reward_bonus_pct", "success_reward_bonus_w", "R_succ_current"]:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 # Log step norms from environment
@@ -1551,10 +1568,11 @@ def main():
                 config_copy["env"]["eps_success_pct"] = current_eps_success_pct
                 config_copy["env"]["eps_success_success_rate_threshold"] = eps_success_success_rate_threshold
                 config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
-                config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
-                config_copy["env"]["eps_success_reward_linear_w"] = eps_success_reward_linear_w
-                config_copy["env"]["eps_success_reward_match_decay"] = eps_success_reward_match_decay
                 config_copy["env"]["terminate_on_success"] = terminate_on_success
+                config_copy["env"]["milestone_rewards"] = milestone_rewards
+                config_copy["env"]["milestone_decay_factor"] = eps_success_decay_factor
+                config_copy["env"]["success_reward_bonus_pct"] = success_reward_bonus_pct
+                config_copy["env"]["success_reward_bonus_w"] = success_reward_bonus_w
                 config_copy["env"]["perturb_clip"] = perturb_clip
 
                 save_config = {
@@ -1624,6 +1642,10 @@ def main():
             use_negative_velocity=use_negative_velocity,
             deactivate_velocity=deactivate_velocity,
             terminate_on_success=terminate_on_success,
+            milestone_rewards=milestone_rewards,
+            success_reward_bonus_pct=success_reward_bonus_pct,
+            success_reward_bonus_w=success_reward_bonus_w,
+            eps_success_decay_factor=eps_success_decay_factor,
             target_mode=target_mode,  # Use same target_mode as training
             seed=args.seed,
             gmm_path=gmm_path,
