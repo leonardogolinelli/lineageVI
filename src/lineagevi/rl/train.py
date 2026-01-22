@@ -228,7 +228,7 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]
+    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct", "R_succ_current"]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -380,6 +380,7 @@ def generate_example_visualizations(
     perturb_clip: Optional[float] = None,
     use_negative_velocity: bool = False,
     deactivate_velocity: bool = False,
+    terminate_on_success: bool = False,
     target_mode: str = "centroid",
     seed: int = 42,
     deterministic: bool = False,
@@ -487,6 +488,7 @@ def generate_example_visualizations(
         perturb_clip=perturb_clip,
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
+        terminate_on_success=terminate_on_success,
         gmm_path=gmm_path_viz if lambda_off_viz > 0.0 else None,
         lambda_off=lambda_off_viz,
     )
@@ -781,6 +783,7 @@ def main():
     parser.add_argument("--save_freq", type=int, default=None, help="Checkpoint save frequency (overrides config)")
     parser.add_argument("--use_negative_velocity", action="store_true", help="Use negative velocity instead of normal velocity")
     parser.add_argument("--deactivate_velocity", action="store_true", help="Deactivate velocity effect on next state (default: velocity affects state)")
+    parser.add_argument("--terminate_on_success", action="store_true", help="Terminate episode immediately on success (default: False)")
     parser.add_argument("--dt", type=float, default=None, help="Time step size (overrides config)")
     parser.add_argument("--lambda_progress", type=float, default=None, help="Progress reward scaling factor (overrides config)")
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
@@ -972,6 +975,8 @@ def main():
     use_negative_velocity = args.use_negative_velocity if args.use_negative_velocity else env_config.get("use_negative_velocity", False)
     # Get deactivate_velocity from CLI or config
     deactivate_velocity = args.deactivate_velocity if args.deactivate_velocity else env_config.get("deactivate_velocity", False)
+    # Get terminate_on_success from CLI or config
+    terminate_on_success = args.terminate_on_success if args.terminate_on_success else env_config.get("terminate_on_success", False)
     # Get reward parameters from CLI or config
     lambda_progress = args.lambda_progress if args.lambda_progress is not None else env_config.get("lambda_progress", 1.0)
     lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
@@ -1079,10 +1084,11 @@ def main():
         perturb_clip=perturb_clip,
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=deactivate_velocity,
+        terminate_on_success=terminate_on_success,
         gmm_path=gmm_path,
         lambda_off=lambda_off,
     )
-    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}")
+    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}, terminate_on_success={terminate_on_success}")
     print(f"Success threshold: eps_success={eps_success}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
     print(f"Source mode: {source_mode}, Target mode: {target_mode}")
@@ -1323,6 +1329,7 @@ def main():
         "eps_success_pct": [],
         "eps_success_mean": [],
         "eps_success_reward_bonus_pct": [],
+        "R_succ_current": [],
     }
     step_norms_history = {
         "velocity_magnitude": [],
@@ -1480,6 +1487,7 @@ def main():
                         batch["reward"] = batch["reward"] * bonus_factor
                         if "mean_episode_return" in task_metrics:
                             task_metrics["mean_episode_return"] *= bonus_factor
+            task_metrics["R_succ_current"] = float(env.R_succ)
 
             # Update policy
             metrics = trainer.update(
@@ -1519,7 +1527,7 @@ def main():
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 print("  Task metrics:")
-                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]:
+                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct", "R_succ_current"]:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 # Log step norms from environment
@@ -1546,6 +1554,7 @@ def main():
                 config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
                 config_copy["env"]["eps_success_reward_linear_w"] = eps_success_reward_linear_w
                 config_copy["env"]["eps_success_reward_match_decay"] = eps_success_reward_match_decay
+                config_copy["env"]["terminate_on_success"] = terminate_on_success
                 config_copy["env"]["perturb_clip"] = perturb_clip
 
                 save_config = {
@@ -1614,6 +1623,7 @@ def main():
             perturb_clip=perturb_clip,
             use_negative_velocity=use_negative_velocity,
             deactivate_velocity=deactivate_velocity,
+            terminate_on_success=terminate_on_success,
             target_mode=target_mode,  # Use same target_mode as training
             seed=args.seed,
             gmm_path=gmm_path,

@@ -17,10 +17,10 @@ class LatentVelocityEnv:
     Action: (a_t ∈ {0,...,d}, Δ_t ∈ R)
     Transition: z_tilde = z + u, v = velocity_decoder(z_tilde, x), z_next = z_tilde + dt * v
     Reward: λ_progress*(d_t - d_{t+1}) - λ_act*I[a≠0] - λ_mag*|Δ| + R_succ*I[success]
-    Termination: ||z - centroid[g]|| < eps_success OR t >= T_max
+    Termination: t >= T_max; optionally terminate on success if terminate_on_success=True.
     
-    Success is terminal/absorbing: when success is reached, done=True immediately,
-    and no bootstrapping occurs past success (V(s_{t+1}) = 0 when done=True).
+    Success reward is awarded at most once per episode, even if the agent remains
+    within the success radius for subsequent steps.
     """
     
     def __init__(
@@ -41,6 +41,7 @@ class LatentVelocityEnv:
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
+        terminate_on_success: bool = False,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -60,6 +61,7 @@ class LatentVelocityEnv:
         self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
+        self.terminate_on_success = terminate_on_success
         self.lambda_off = lambda_off
         
         # Initialize GMM scorer if lambda_off > 0
@@ -80,6 +82,7 @@ class LatentVelocityEnv:
         self.goal_idx: Optional[int] = None
         self.t: int = 0
         self.done: bool = False
+        self.success_awarded: bool = False
         
         # Logging
         self.step_norms: Dict[str, list] = {
@@ -125,6 +128,7 @@ class LatentVelocityEnv:
         self.goal_state = goal_state.to(self.adapter.device) if goal_state is not None else None
         self.t = 0
         self.done = False
+        self.success_awarded = False
         self.step_norms = {
             "velocity_magnitude": [],
             "perturbation_magnitude": [],
@@ -243,14 +247,17 @@ class LatentVelocityEnv:
         d_tp1 = self._compute_distance()  # L2 distance at t+1
         d1_tp1 = torch.norm(self.z - goal_z, p=1) / np.sqrt(self.n_latent)
         
-        # Check success (terminal/absorbing) - use goal_z for consistency
+        # Check success (may or may not terminate) - use goal_z for consistency
         if self.goal_state is not None:
             goal_z_check = self.goal_state
         else:
             goal_z_check = self.centroids[self.goal_idx]
         success = torch.norm(z_next - goal_z_check, p=2) < self.eps_success
-        if success:
+        success_award = success and (not self.success_awarded)
+        if self.terminate_on_success and success:
             self.done = True
+        if success:
+            self.success_awarded = True
         
         # Check timeout
         self.t += 1
@@ -261,7 +268,7 @@ class LatentVelocityEnv:
         state_cost = self.alpha_stay * d_tp1
         action_penalty = self.lambda_act if a_t != 0 else 0.0
         magnitude_penalty = self.lambda_mag * abs(delta_t)
-        success_bonus = self.R_succ if success else 0.0
+        success_bonus = self.R_succ if success_award else 0.0
         
         # Off-manifold penalty
         off_manifold_penalty = 0.0
@@ -289,6 +296,7 @@ class LatentVelocityEnv:
             "distance": d_tp1.item(),
             "sqdist": d_tp1.item() ** 2,  # Squared distance for logging (computed from linear distance)
             "success": success,
+            "success_awarded": success_award,
             "timeout": timeout,
             "nll": nll,  # Store NLL for logging
             "velocity_norm": v_norm,
@@ -327,6 +335,7 @@ class VectorizedLatentVelocityEnv:
         process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
+        terminate_on_success: bool = False,
         gmm_path: Optional[str] = None,
         lambda_off: float = 0.0,
     ):
@@ -347,6 +356,7 @@ class VectorizedLatentVelocityEnv:
         self.perturb_clip = perturb_clip
         self.use_negative_velocity = use_negative_velocity
         self.deactivate_velocity = deactivate_velocity
+        self.terminate_on_success = terminate_on_success
         self.lambda_off = lambda_off
         
         # Initialize GMM scorer if lambda_off > 0
@@ -366,6 +376,7 @@ class VectorizedLatentVelocityEnv:
         self.goal_idx: Optional[torch.Tensor] = None  # (B,)
         self.t: Optional[torch.Tensor] = None  # (B,)
         self.done: Optional[torch.Tensor] = None  # (B,)
+        self.success_awarded: Optional[torch.Tensor] = None  # (B,)
         
         # Logging
         self.step_norms: Dict[str, list] = {
@@ -412,6 +423,7 @@ class VectorizedLatentVelocityEnv:
         self.goal_states = goal_states.to(self.adapter.device) if goal_states is not None else None
         self.t = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.done = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
+        self.success_awarded = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.bool)
         
         # Store per-batch cluster/process indices
         self.cluster_idx = cluster_idx.to(self.adapter.device) if cluster_idx is not None else None
@@ -539,12 +551,15 @@ class VectorizedLatentVelocityEnv:
         d_t = self._compute_distances()  # (B,) L2 distance at t
         d1_t = torch.norm(self.z - goal_z_batch, p=1, dim=1) / np.sqrt(self.n_latent)
         
-        # Check success (terminal/absorbing) - goal_z_batch already set above
+        # Check success (may or may not terminate) - goal_z_batch already set above
         eps_success = self.eps_success
         if torch.is_tensor(eps_success):
             eps_success = eps_success.to(self.adapter.device)
         success = (torch.norm(z_next - goal_z_batch, p=2, dim=1) < eps_success) & active_mask
-        self.done = self.done | success
+        success_award = success & (~self.success_awarded)
+        if self.terminate_on_success:
+            self.done = self.done | success
+        self.success_awarded = self.success_awarded | success
         
         # Only update active envs (absorbing terminal states)
         self.z = torch.where(active_mask.unsqueeze(1), z_next, self.z)
@@ -561,7 +576,7 @@ class VectorizedLatentVelocityEnv:
         state_cost = self.alpha_stay * d_tp1 * active_mask.float()  # Use linear distance for state cost
         action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
         magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
-        success_bonus = self.R_succ * success.float()
+        success_bonus = self.R_succ * success_award.float()
         
         # Off-manifold penalty
         off_manifold_penalty = torch.zeros(B, device=self.adapter.device, dtype=torch.float32)
@@ -596,6 +611,7 @@ class VectorizedLatentVelocityEnv:
             "distances": d_tp1.cpu().numpy(),
             "sqdist": (d_tp1 ** 2).cpu().numpy(),  # Squared distances for logging (computed from linear distance)
             "success": success.cpu().numpy(),
+            "success_awarded": success_award.cpu().numpy(),
             "timeout": timeout.cpu().numpy(),
             "nll": nll_batch.cpu().numpy(),  # Store as numpy for logging
             "velocity_norm": active_v_norm,

@@ -25,6 +25,7 @@ TARGET_MODE="centroid"  # "centroid" or "sample"
 USE_NEGATIVE_VELOCITY=""
 DETERMINISTIC=""
 DEACTIVATE_VELOCITY="--deactivate_velocity"
+TERMINATE_ON_SUCCESS="--terminate_on_success"
 N_ITERATIONS="200"
 EPOCHS="2"
 BATCH_SIZE="256"
@@ -36,15 +37,15 @@ DT="" # default is 0.1
 LAMBDA_PROGRESS="1" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
-R_SUCC="100" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
+R_SUCC="10" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
 EPS_SUCCESS_PCT="0.99"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
-EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.99"
-EPS_SUCCESS_DECAY_FACTOR="0.98"
+EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.90"
+EPS_SUCCESS_DECAY_FACTOR="0.99"
 EPS_SUCCESS_DECAY_REWARD_PCT="0.0" # fraction of reward bonus to apply when eps_success decays
 EPS_SUCCESS_REWARD_MATCH_DECAY=""
-EPS_SUCCESS_REWARD_LINEAR_W="100" # linear increment to R_succ per eps_success decay
+EPS_SUCCESS_REWARD_LINEAR_W="15" # linear increment to R_succ per eps_success decay
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
 ENT_COEF="1e-3"
@@ -150,6 +151,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --deactivate_velocity)
             DEACTIVATE_VELOCITY="--deactivate_velocity"
+            shift
+            ;;
+        --terminate_on_success)
+            TERMINATE_ON_SUCCESS="--terminate_on_success"
             shift
             ;;
         --dt)
@@ -293,6 +298,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --use_negative_velocity    Use negative velocity instead of normal velocity"
             echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
             echo "  --deactivate_velocity       Deactivate velocity effect on next state (default: velocity affects state)"
+            echo "  --terminate_on_success      Terminate episode immediately on success (default: False)"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
             echo "  --dt FLOAT                Time step size (overrides config)"
@@ -475,6 +481,9 @@ if [[ -n "$DETERMINISTIC" ]]; then
 fi
 if [[ -n "$DEACTIVATE_VELOCITY" ]]; then
     PYTHON_ARGS+=("$DEACTIVATE_VELOCITY")
+fi
+if [[ -n "$TERMINATE_ON_SUCCESS" ]]; then
+    PYTHON_ARGS+=("$TERMINATE_ON_SUCCESS")
 fi
 
 # Add training parameters (override config if provided)
