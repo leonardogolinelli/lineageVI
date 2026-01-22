@@ -228,7 +228,7 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]
+    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -316,19 +316,22 @@ def plot_training_curves(
         ax.grid(True, alpha=0.3)
         ax.set_ylim([0, 1])
         
-        # Mean episode return
+        # Reward metrics
         ax = axes[2, 2]
         if "mean_episode_return" in metrics_history:
             ax.plot(metrics_history["mean_episode_return"], label="Episode Return", alpha=0.7, color="brown", linewidth=2)
+        if "mean_step_reward" in metrics_history:
+            ax.plot(metrics_history["mean_step_reward"], label="Mean Step Reward", alpha=0.7, color="darkred", linewidth=2)
+        if "mean_episode_return" in metrics_history or "mean_step_reward" in metrics_history:
             ax.set_xlabel("Iteration")
-            ax.set_ylabel("Return")
-            ax.set_title("Mean Episode Return")
+            ax.set_ylabel("Reward")
+            ax.set_title("Reward Metrics")
             ax.legend()
             ax.grid(True, alpha=0.3)
         
         # Plot mean NLL if available (overlay on episode return if both exist, or use separate subplot)
         if "mean_nll" in metrics_history:
-            if "mean_episode_return" in metrics_history:
+            if "mean_episode_return" in metrics_history or "mean_step_reward" in metrics_history:
                 # Both exist: plot NLL on secondary y-axis
                 ax2 = ax.twinx()
                 ax2.plot(metrics_history["mean_nll"], label="Mean NLL", alpha=0.7, color="purple", linewidth=2, linestyle="--")
@@ -797,6 +800,8 @@ def main():
                         help="Reward bonus percentage applied when eps_success_pct decays (default: 0.0)")
     parser.add_argument("--eps_success_reward_match_decay", action="store_true",
                         help="Increase success reward by the same pct as eps_success_pct decay (default: False)")
+    parser.add_argument("--eps_success_reward_linear_w", type=float, default=0.0,
+                        help="Linear increment to success reward per eps_success decay (default: 0.0)")
     parser.add_argument("--perturb_clip", type=float, default=None,
                         help="Clip applied perturbation magnitude (env-side, default: none)")
     parser.add_argument("--delta_max", type=float, default=None, help="Maximum action magnitude (overrides config and auto-calibration)")
@@ -981,10 +986,16 @@ def main():
     eps_success_decay_factor = args.eps_success_decay_factor
     eps_success_decay_reward_pct = args.eps_success_decay_reward_pct
     eps_success_reward_match_decay = args.eps_success_reward_match_decay
-    if eps_success_decay_reward_pct > 0.0 and eps_success_reward_match_decay:
+    eps_success_reward_linear_w = args.eps_success_reward_linear_w
+    reward_method_count = sum([
+        eps_success_decay_reward_pct > 0.0,
+        eps_success_reward_match_decay,
+        eps_success_reward_linear_w > 0.0,
+    ])
+    if reward_method_count > 1:
         raise ValueError(
-            "eps_success_decay_reward_pct and eps_success_reward_match_decay are mutually exclusive. "
-            "Use only one."
+            "eps_success_decay_reward_pct, eps_success_reward_match_decay, and "
+            "eps_success_reward_linear_w are mutually exclusive. Use only one."
         )
     if not (0.0 < eps_success_pct <= 1.0):
         raise ValueError("eps_success_pct must be in (0, 1]")
@@ -995,11 +1006,14 @@ def main():
             raise ValueError("eps_success_success_rate_threshold must be in [0, 1]")
         if eps_success_decay_reward_pct < 0.0:
             raise ValueError("eps_success_decay_reward_pct must be >= 0")
+        if eps_success_reward_linear_w < 0.0:
+            raise ValueError("eps_success_reward_linear_w must be >= 0")
         print(
             "Eps-success decay enabled: "
             f"pct={eps_success_pct}, threshold={eps_success_success_rate_threshold}, "
             f"factor={eps_success_decay_factor}, reward_pct={eps_success_decay_reward_pct}, "
-            f"reward_match_decay={eps_success_reward_match_decay}"
+            f"reward_match_decay={eps_success_reward_match_decay}, "
+            f"reward_linear_w={eps_success_reward_linear_w}"
         )
     else:
         print(f"Eps-success pct enabled: pct={eps_success_pct}")
@@ -1275,6 +1289,7 @@ def main():
         print(f"Computed source centroid for '{source_lineage}': shape {source_centroid.shape}")
     
     current_eps_success_pct = eps_success_pct
+    decay_count = 0
     print(f"Starting training for {n_iterations} iterations...")
     if source_lineage is not None and target_lineage is not None:
         print(f"Training with fixed source='{source_lineage}' (mode={source_mode}) and target='{target_lineage}' (mode={target_mode})")
@@ -1304,6 +1319,7 @@ def main():
         "L1_magnitude": [],
         "noop_fraction": [],
         "mean_episode_return": [],
+        "mean_step_reward": [],
         "eps_success_pct": [],
         "eps_success_mean": [],
         "eps_success_reward_bonus_pct": [],
@@ -1452,9 +1468,12 @@ def main():
                 if decay_triggered:
                     reward_bonus_pct = eps_success_decay_reward_pct
                     current_eps_success_pct *= eps_success_decay_factor
+                    decay_count += 1
                     if eps_success_reward_match_decay:
                         reward_bonus_pct = (1.0 - eps_success_decay_factor)
                         env.R_succ *= (1.0 + reward_bonus_pct)
+                    if eps_success_reward_linear_w > 0.0:
+                        env.R_succ = R_succ + (eps_success_reward_linear_w * decay_count)
                     task_metrics["eps_success_reward_bonus_pct"] = reward_bonus_pct
                     if eps_success_decay_reward_pct > 0.0:
                         bonus_factor = 1.0 + eps_success_decay_reward_pct
@@ -1500,7 +1519,7 @@ def main():
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 print("  Task metrics:")
-                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]:
+                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_nll", "eps_success_pct", "eps_success_mean", "eps_success_reward_bonus_pct"]:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 # Log step norms from environment
@@ -1525,6 +1544,7 @@ def main():
                 config_copy["env"]["eps_success_success_rate_threshold"] = eps_success_success_rate_threshold
                 config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
                 config_copy["env"]["eps_success_decay_reward_pct"] = eps_success_decay_reward_pct
+                config_copy["env"]["eps_success_reward_linear_w"] = eps_success_reward_linear_w
                 config_copy["env"]["eps_success_reward_match_decay"] = eps_success_reward_match_decay
                 config_copy["env"]["perturb_clip"] = perturb_clip
 

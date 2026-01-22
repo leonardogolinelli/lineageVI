@@ -36,14 +36,15 @@ DT="" # default is 0.1
 LAMBDA_PROGRESS="1" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
-R_SUCC="10" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
+R_SUCC="100" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
 EPS_SUCCESS_PCT="0.99"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
-EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.55"
-EPS_SUCCESS_DECAY_FACTOR="0.99"
+EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.99"
+EPS_SUCCESS_DECAY_FACTOR="0.98"
 EPS_SUCCESS_DECAY_REWARD_PCT="0.0" # fraction of reward bonus to apply when eps_success decays
-EPS_SUCCESS_REWARD_MATCH_DECAY="--eps_success_reward_match_decay"
+EPS_SUCCESS_REWARD_MATCH_DECAY=""
+EPS_SUCCESS_REWARD_LINEAR_W="100" # linear increment to R_succ per eps_success decay
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
 ENT_COEF="1e-3"
@@ -198,6 +199,10 @@ while [[ $# -gt 0 ]]; do
         --eps_success_reward_match_decay)
             EPS_SUCCESS_REWARD_MATCH_DECAY="--eps_success_reward_match_decay"
             shift
+            ;;
+        --eps_success_reward_linear_w)
+            EPS_SUCCESS_REWARD_LINEAR_W="$2"
+            shift 2
             ;;
         --perturb_clip)
             PERTURB_CLIP="$2"
@@ -532,6 +537,9 @@ if [[ -n "$EPS_SUCCESS_DECAY_REWARD_PCT" ]]; then
 fi
 if [[ -n "$EPS_SUCCESS_REWARD_MATCH_DECAY" ]]; then
     PYTHON_ARGS+=(--eps_success_reward_match_decay)
+fi
+if [[ -n "$EPS_SUCCESS_REWARD_LINEAR_W" ]]; then
+    PYTHON_ARGS+=(--eps_success_reward_linear_w "$EPS_SUCCESS_REWARD_LINEAR_W")
 fi
 if [[ -n "$PERTURB_CLIP" ]]; then
     PYTHON_ARGS+=(--perturb_clip "$PERTURB_CLIP")

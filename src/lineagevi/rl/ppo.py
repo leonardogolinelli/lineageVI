@@ -258,6 +258,7 @@ class PPOTrainer:
         - L1_magnitude: mean sum of abs(delta) per episode
         - noop_fraction: fraction of all steps with action == 0
         - mean_episode_return: mean sum of rewards per episode
+        - mean_step_reward: mean reward per timestep across the rollout
         
         Parameters
         ----------
@@ -345,6 +346,9 @@ class PPOTrainer:
         episode_returns = reward.sum(dim=0)  # (B,) - sum of rewards per episode
         mean_episode_return = episode_returns.mean().item()
         
+        # mean_step_reward: mean reward per timestep across the rollout
+        mean_step_reward = reward.mean().item()
+        
         return {
             "success_rate": success_rate,
             "mean_initial_distance": mean_initial_distance,
@@ -356,6 +360,7 @@ class PPOTrainer:
             "L1_magnitude": L1_magnitude,
             "noop_fraction": noop_fraction,
             "mean_episode_return": mean_episode_return,
+            "mean_step_reward": mean_step_reward,
         }
     
     def compute_gae(
