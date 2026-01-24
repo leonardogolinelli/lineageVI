@@ -33,6 +33,9 @@ class ActorCriticPolicy(nn.Module):
         use_t_norm: bool = False,
         allow_noop_action: bool = True,
         hidden_sizes: list = [128, 128],
+        actor_hidden_sizes: Optional[list] = None,
+        critic_hidden_sizes: Optional[list] = None,
+        separate_trunks: bool = False,
         activation: str = "relu",
         delta_clip: Optional[float] = None,
     ):
@@ -47,24 +50,37 @@ class ActorCriticPolicy(nn.Module):
         # Goal conditioning projection for (z_goal - z_t)
         self.goal_proj = nn.Linear(n_latent, goal_cond_dim)
         
-        # Build shared trunk
-        layers = []
-        input_dim = n_latent + goal_cond_dim + (1 if use_t_norm else 0)
-        for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(input_dim, hidden_size))
-            if activation == "relu":
-                layers.append(nn.ReLU())
-            elif activation == "tanh":
-                layers.append(nn.Tanh())
-            else:
-                raise ValueError(f"Unknown activation: {activation}")
-            input_dim = hidden_size
+        def build_trunk(sizes: list) -> nn.Sequential:
+            layers = []
+            input_dim = n_latent + goal_cond_dim + (1 if use_t_norm else 0)
+            for hidden_size in sizes:
+                layers.append(nn.Linear(input_dim, hidden_size))
+                if activation == "relu":
+                    layers.append(nn.ReLU())
+                elif activation == "tanh":
+                    layers.append(nn.Tanh())
+                else:
+                    raise ValueError(f"Unknown activation: {activation}")
+                input_dim = hidden_size
+            return nn.Sequential(*layers)
         
-        self.shared_trunk = nn.Sequential(*layers)
-        trunk_output_dim = hidden_sizes[-1]
+        self.use_separate_trunks = separate_trunks or actor_hidden_sizes is not None or critic_hidden_sizes is not None
+        if self.use_separate_trunks:
+            actor_sizes = actor_hidden_sizes if actor_hidden_sizes is not None else hidden_sizes
+            critic_sizes = critic_hidden_sizes if critic_hidden_sizes is not None else hidden_sizes
+            self.actor_trunk = build_trunk(actor_sizes)
+            self.critic_trunk = build_trunk(critic_sizes)
+            actor_trunk_output_dim = actor_sizes[-1]
+            critic_trunk_output_dim = critic_sizes[-1]
+        else:
+            self.shared_trunk = build_trunk(hidden_sizes)
+            trunk_output_dim = hidden_sizes[-1]
         
         # Categorical head (action selection)
-        self.action_head = nn.Linear(trunk_output_dim, n_latent + 1)  # +1 for no-op
+        self.action_head = nn.Linear(
+            actor_trunk_output_dim if self.use_separate_trunks else trunk_output_dim,
+            n_latent + 1,
+        )  # +1 for no-op
         
         # Action embedding for magnitude conditioning
         self.action_embed_dim = 16
@@ -72,12 +88,16 @@ class ActorCriticPolicy(nn.Module):
         
         # Magnitude head (conditioned on state + action)
         # Input: hidden_state + action_embedding
-        magnitude_input_dim = trunk_output_dim + self.action_embed_dim
+        magnitude_input_dim = (
+            actor_trunk_output_dim if self.use_separate_trunks else trunk_output_dim
+        ) + self.action_embed_dim
         self.magnitude_mu_head = nn.Linear(magnitude_input_dim, 1)  # Single μ output
         self.magnitude_logstd_head = nn.Linear(magnitude_input_dim, 1)  # Single logσ output
         
         # Value head
-        self.value_head = nn.Linear(trunk_output_dim, 1)
+        self.value_head = nn.Linear(
+            critic_trunk_output_dim if self.use_separate_trunks else trunk_output_dim, 1
+        )
         
         # Log-std clamping constants
         self.LOG_STD_MIN = -5.0
@@ -105,7 +125,10 @@ class ActorCriticPolicy(nn.Module):
         magnitude_std : torch.Tensor
             Magnitude stddevs (from clamped log_std) of shape (batch_size,).
         """
-        h = self.shared_trunk(self._encode_obs(obs))  # (B, trunk_output_dim)
+        if self.use_separate_trunks:
+            h = self.actor_trunk(self._encode_obs(obs))
+        else:
+            h = self.shared_trunk(self._encode_obs(obs))
         
         # Embed action
         action_emb = self.action_embedding(action)  # (B, action_embed_dim)
@@ -151,11 +174,16 @@ class ActorCriticPolicy(nn.Module):
         value : torch.Tensor
             Value estimates of shape (batch_size, 1).
         """
-        h = self.shared_trunk(self._encode_obs(obs))
+        if self.use_separate_trunks:
+            h_actor = self.actor_trunk(self._encode_obs(obs))
+            h_critic = self.critic_trunk(self._encode_obs(obs))
+        else:
+            h_actor = self.shared_trunk(self._encode_obs(obs))
+            h_critic = h_actor
         
-        action_logits = self.action_head(h)  # (B, n_latent + 1)
+        action_logits = self.action_head(h_actor)  # (B, n_latent + 1)
         action_logits = self._apply_noop_mask(action_logits)
-        value = self.value_head(h)  # (B, 1)
+        value = self.value_head(h_critic)  # (B, 1)
         
         # Return placeholders for backward compatibility
         # Magnitude params are now action-conditioned, so we can't return them here

@@ -228,7 +228,8 @@ def plot_training_curves(
         print(f"Saved step norms plot → {plot_path}")
     
     # Plot 4: Task metrics
-    task_metric_keys = ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_milestones_reached", "mean_nll", "eps_success_pct", "eps_success_mean", "success_reward_bonus_pct", "success_reward_bonus_w", "R_succ_current"]
+    ppo_metric_keys = {"policy_loss", "value_loss", "entropy", "kl", "clip_fraction"}
+    task_metric_keys = [k for k in metrics_history.keys() if k not in ppo_metric_keys]
     if any(key in metrics_history for key in task_metric_keys):
         # Use 3x3 grid, but if mean_nll exists, we'll use all 9 slots
         fig, axes = plt.subplots(3, 3, figsize=(15, 12))
@@ -382,6 +383,9 @@ def generate_example_visualizations(
     deactivate_velocity: bool = False,
     terminate_on_success: bool = False,
     milestone_rewards: bool = False,
+    reward_mode: str = "plain",
+    progress_weight_p: float = 0.0,
+    progress_weight_c: float = 0.1,
     success_reward_bonus_pct: float = 0.0,
     success_reward_bonus_w: float = 0.0,
     eps_success_decay_factor: float = 0.95,
@@ -494,6 +498,9 @@ def generate_example_visualizations(
         deactivate_velocity=deactivate_velocity,
         terminate_on_success=terminate_on_success,
         milestone_rewards=milestone_rewards,
+        reward_mode=reward_mode,
+        progress_weight_p=progress_weight_p,
+        progress_weight_c=progress_weight_c,
         milestone_decay_factor=eps_success_decay_factor,
         success_reward_bonus_pct=success_reward_bonus_pct,
         success_reward_bonus_w=success_reward_bonus_w,
@@ -794,6 +801,25 @@ def main():
     parser.add_argument("--terminate_on_success", action="store_true", help="Terminate episode immediately on success (default: False)")
     parser.add_argument("--milestone_rewards", action="store_true",
                         help="Enable multi-milestone success rewards within an episode (default: False)")
+    parser.add_argument(
+        "--reward_mode",
+        type=str,
+        default="plain",
+        choices=["plain", "scaled", "milestone", "multi_milestone"],
+        help="Reward mode: plain, scaled, milestone (single), multi_milestone (default: plain)",
+    )
+    parser.add_argument(
+        "--progress_weight_p",
+        type=float,
+        default=0.0,
+        help="Near-goal emphasis exponent p for scaled progress (default: 0.0)",
+    )
+    parser.add_argument(
+        "--progress_weight_c",
+        type=float,
+        default=0.1,
+        help="Near-goal emphasis offset c for scaled progress (default: 0.1)",
+    )
     parser.add_argument("--success_reward_bonus_pct", type=float, default=0.0,
                         help="Reward bonus pct applied on success-rate threshold or milestone (default: 0.0)")
     parser.add_argument("--success_reward_bonus_w", type=float, default=0.0,
@@ -824,6 +850,10 @@ def main():
     parser.add_argument("--actor_lr", type=float, default=None, help="Actor learning rate (overrides lr)")
     parser.add_argument("--critic_lr", type=float, default=None, help="Critic learning rate (overrides lr)")
     parser.add_argument("--ent_coef", type=float, default=None, help="Entropy coefficient for exploration bonus (overrides config, default: 0.01)")
+    parser.add_argument("--ent_coef_final", type=float, default=None,
+                        help="Final entropy coefficient for annealing (default: ent_coef)")
+    parser.add_argument("--ent_anneal_iters", type=int, default=0,
+                        help="Number of iterations to linearly anneal ent_coef to ent_coef_final (default: 0)")
     parser.add_argument("--kl_stop_threshold", type=float, default=0.02,
                         help="Stop PPO epoch if KL exceeds this for 2 consecutive minibatches (default: 0.02)")
     parser.add_argument("--kl_stop_immediate_threshold", type=float, default=0.03,
@@ -847,6 +877,23 @@ def main():
         type=str,
         default=None,
         help="Comma-separated hidden layer sizes for policy MLP (overrides config, default: 128,128)",
+    )
+    parser.add_argument(
+        "--actor_hidden_sizes",
+        type=str,
+        default=None,
+        help="Comma-separated hidden sizes for actor trunk (overrides shared hidden_sizes)",
+    )
+    parser.add_argument(
+        "--critic_hidden_sizes",
+        type=str,
+        default=None,
+        help="Comma-separated hidden sizes for critic trunk (overrides shared hidden_sizes)",
+    )
+    parser.add_argument(
+        "--separate_trunks",
+        action="store_true",
+        help="Use separate actor/critic trunks even if sizes are the same",
     )
     parser.add_argument(
         "--activation",
@@ -882,14 +929,22 @@ def main():
     training_config = config.get("training", {})
 
     # Apply architecture overrides
-    if args.hidden_sizes is not None:
+    def parse_sizes_arg(value: Optional[str], flag: str) -> Optional[list]:
+        if value is None:
+            return None
         try:
-            hidden_sizes_cli = [int(size.strip()) for size in args.hidden_sizes.split(",") if size.strip()]
+            sizes = [int(size.strip()) for size in value.split(",") if size.strip()]
         except ValueError as exc:
-            raise ValueError(f"Invalid --hidden_sizes '{args.hidden_sizes}'. Use comma-separated integers.") from exc
-        if len(hidden_sizes_cli) == 0:
-            raise ValueError("Invalid --hidden_sizes: must provide at least one integer.")
+            raise ValueError(f"Invalid {flag} '{value}'. Use comma-separated integers.") from exc
+        if len(sizes) == 0:
+            raise ValueError(f"Invalid {flag}: must provide at least one integer.")
+        return sizes
+    
+    hidden_sizes_cli = parse_sizes_arg(args.hidden_sizes, "--hidden_sizes")
+    if hidden_sizes_cli is not None:
         policy_config["hidden_sizes"] = hidden_sizes_cli
+    actor_hidden_sizes_cli = parse_sizes_arg(args.actor_hidden_sizes, "--actor_hidden_sizes")
+    critic_hidden_sizes_cli = parse_sizes_arg(args.critic_hidden_sizes, "--critic_hidden_sizes")
     if args.activation is not None:
         policy_config["activation"] = args.activation
     if args.delta_clip is not None:
@@ -988,7 +1043,10 @@ def main():
     # Get terminate_on_success from CLI or config
     terminate_on_success = args.terminate_on_success if args.terminate_on_success else env_config.get("terminate_on_success", False)
     # Get milestone_rewards from CLI or config
-    milestone_rewards = args.milestone_rewards if args.milestone_rewards else env_config.get("milestone_rewards", False)
+    reward_mode = args.reward_mode if args.reward_mode is not None else env_config.get("reward_mode", "plain")
+    if args.milestone_rewards and reward_mode == "plain":
+        reward_mode = "multi_milestone"
+    milestone_rewards = reward_mode == "multi_milestone"
     # Get reward parameters from CLI or config
     lambda_progress = args.lambda_progress if args.lambda_progress is not None else env_config.get("lambda_progress", 1.0)
     lambda_act = args.lambda_act if args.lambda_act is not None else env_config.get("lambda_act", 0.01)
@@ -996,6 +1054,8 @@ def main():
     R_succ = args.R_succ if args.R_succ is not None else env_config.get("R_succ", 10.0)
     alpha_stay = args.alpha_stay if args.alpha_stay is not None else env_config.get("alpha_stay", 0.0)
     perturb_clip = args.perturb_clip if args.perturb_clip is not None else env_config.get("perturb_clip", None)
+    progress_weight_p = args.progress_weight_p if args.progress_weight_p is not None else env_config.get("progress_weight_p", 0.0)
+    progress_weight_c = args.progress_weight_c if args.progress_weight_c is not None else env_config.get("progress_weight_c", 0.0)
     eps_success = args.eps_success if args.eps_success is not None else env_config.get("eps_success", 0.1)
     eps_success_decay_on_success = args.eps_success_decay_on_success
     eps_success_pct = args.eps_success_pct if args.eps_success is None else eps_success
@@ -1007,7 +1067,7 @@ def main():
         raise ValueError("eps_success_pct must be in (0, 1]")
     if milestone_rewards and terminate_on_success:
         raise ValueError("milestone_rewards requires terminate_on_success=False")
-    if milestone_rewards and not (0.0 < eps_success_decay_factor < 1.0):
+    if reward_mode == "multi_milestone" and not (0.0 < eps_success_decay_factor < 1.0):
         raise ValueError("eps_success_decay_factor must be in (0, 1) when milestone_rewards is enabled")
     if success_reward_bonus_pct < 0.0:
         raise ValueError("success_reward_bonus_pct must be >= 0")
@@ -1069,6 +1129,8 @@ def main():
             print(f"Saved GMM to {gmm_path}")
     
     ent_coef = args.ent_coef if args.ent_coef is not None else ppo_config.get("ent_coef", 0.01)
+    ent_coef_final = args.ent_coef_final if args.ent_coef_final is not None else ppo_config.get("ent_coef_final", ent_coef)
+    ent_anneal_iters = args.ent_anneal_iters if args.ent_anneal_iters is not None else ppo_config.get("ent_anneal_iters", 0)
     kl_stop_threshold = args.kl_stop_threshold if args.kl_stop_threshold is not None else ppo_config.get("kl_stop_threshold", 0.02)
     kl_stop_immediate_threshold = args.kl_stop_immediate_threshold if args.kl_stop_immediate_threshold is not None else ppo_config.get("kl_stop_immediate_threshold", 0.03)
     delta_clip_config = policy_config.get("delta_clip", None)
@@ -1091,13 +1153,16 @@ def main():
         deactivate_velocity=deactivate_velocity,
         terminate_on_success=terminate_on_success,
         milestone_rewards=milestone_rewards,
+        reward_mode=reward_mode,
+        progress_weight_p=progress_weight_p,
+        progress_weight_c=progress_weight_c,
         milestone_decay_factor=eps_success_decay_factor,
         success_reward_bonus_pct=success_reward_bonus_pct,
         success_reward_bonus_w=success_reward_bonus_w,
         gmm_path=gmm_path,
         lambda_off=lambda_off,
     )
-    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}, terminate_on_success={terminate_on_success}, milestone_rewards={milestone_rewards}")
+    print(f"Created environment with batch_size={batch_size}, dt={dt}, use_negative_velocity={use_negative_velocity}, deactivate_velocity={deactivate_velocity}, terminate_on_success={terminate_on_success}, reward_mode={reward_mode}")
     print(f"Success threshold: eps_success={eps_success}")
     print(f"Reward parameters: lambda_progress={lambda_progress}, lambda_act={lambda_act}, lambda_mag={lambda_mag}, R_succ={R_succ}, alpha_stay={alpha_stay}")
     print(f"Source mode: {source_mode}, Target mode: {target_mode}")
@@ -1161,6 +1226,9 @@ def main():
     use_t_norm = args.use_t_norm if args.use_t_norm is not None else policy_config.get("use_t_norm", False)
     obs_dim = (2 * n_latent) + (1 if use_t_norm else 0)  # z + (z_goal - z_t) [+ t]
     hidden_sizes = policy_config.get("hidden_sizes", [128, 128])
+    actor_hidden_sizes = actor_hidden_sizes_cli
+    critic_hidden_sizes = critic_hidden_sizes_cli
+    separate_trunks = args.separate_trunks
     activation = policy_config.get("activation", "relu")
     delta_clip = delta_clip_config
     allow_noop_action = not args.disable_noop_action if args.disable_noop_action is not None else policy_config.get("allow_noop_action", True)
@@ -1172,6 +1240,9 @@ def main():
         use_t_norm=use_t_norm,
         allow_noop_action=allow_noop_action,
         hidden_sizes=hidden_sizes,
+        actor_hidden_sizes=actor_hidden_sizes,
+        critic_hidden_sizes=critic_hidden_sizes,
+        separate_trunks=separate_trunks,
         activation=activation,
         delta_clip=delta_clip,
     ).to(device)
@@ -1194,6 +1265,8 @@ def main():
         target_kl=ppo_config.get("target_kl", 0.01),
         vf_coef=ppo_config.get("vf_coef", 0.5),
         ent_coef=ent_coef,
+        ent_coef_final=ent_coef_final,
+        ent_anneal_iters=ent_anneal_iters,
         lr=lr,
         actor_lr=actor_lr,
         critic_lr=critic_lr,
@@ -1316,32 +1389,44 @@ def main():
         print(f"Training uses uniform goal sampling (target_mode={target_mode}). Goals are sampled first, then start cells are sampled from eligible origins (origin != goal).")
     
     # Initialize metrics history
-    metrics_history = {
-        "policy_loss": [],
-        "value_loss": [],
-        "entropy": [],
-        "kl": [],
-        "clip_fraction": [],
-        "mean_nll": [],  # Off-manifold penalty (only populated if lambda_off > 0)
-        # Task metrics
-        "success_rate": [],
-        "mean_initial_distance": [],
-        "mean_final_distance": [],
-        "mean_best_distance": [],
-        "mean_distance_improvement": [],
-        "best_improvement": [],
-        "L0_interventions": [],
-        "L1_magnitude": [],
-        "noop_fraction": [],
-        "mean_episode_return": [],
-        "mean_step_reward": [],
-        "mean_milestones_reached": [],
-        "eps_success_pct": [],
-        "eps_success_mean": [],
-        "success_reward_bonus_pct": [],
-        "success_reward_bonus_w": [],
-        "R_succ_current": [],
-    }
+    ppo_metric_keys = [
+        "policy_loss",
+        "value_loss",
+        "entropy",
+        "kl",
+        "clip_fraction",
+        "mean_adv",
+        "mean_abs_adv",
+        "value_bias",
+        "value_mse",
+        "ent_coef",
+    ]
+    task_metric_keys = [
+        "success_rate",
+        "mean_pct_improvement",
+        "best_pct_improvement",
+        "L0_interventions",
+        "L1_magnitude",
+        "noop_fraction",
+        "mean_episode_return",
+        "mean_step_reward",
+        "mean_progress",
+        "mean_action_penalty",
+        "mean_magnitude_penalty",
+        "mean_success_bonus",
+        "mean_off_manifold_penalty",
+        "eps_success_pct",
+        "eps_success_mean",
+    ]
+    if milestone_rewards:
+        task_metric_keys.append("mean_milestones_reached")
+    if eps_success_decay_on_success:
+        task_metric_keys.extend(["success_reward_bonus_pct", "success_reward_bonus_w"])
+    if not milestone_rewards:
+        task_metric_keys.append("R_succ_current")
+    if lambda_off > 0.0:
+        task_metric_keys.append("mean_nll")
+    metrics_history = {k: [] for k in (ppo_metric_keys + task_metric_keys)}
     step_norms_history = {
         "velocity_magnitude": [],
         "perturbation_magnitude": [],
@@ -1511,6 +1596,7 @@ def main():
                 batch,
                 epochs=args.epochs if args.epochs is not None else training_config.get("epochs", 10),
                 minibatch_size=args.minibatch_size if args.minibatch_size is not None else training_config.get("minibatch_size", 64),
+                iteration=iteration,
             )
 
             # Compute mean NLL if available
@@ -1540,11 +1626,11 @@ def main():
             if iteration % 10 == 0:
                 print(f"\nIteration {iteration} (dt={dt}):")
                 print("  PPO metrics:")
-                for k in ["policy_loss", "value_loss", "entropy", "kl", "clip_fraction"]:
+                for k in ppo_metric_keys:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 print("  Task metrics:")
-                for k in ["success_rate", "mean_initial_distance", "mean_final_distance", "mean_best_distance", "mean_distance_improvement", "best_improvement", "L0_interventions", "L1_magnitude", "noop_fraction", "mean_episode_return", "mean_step_reward", "mean_milestones_reached", "mean_nll", "eps_success_pct", "eps_success_mean", "success_reward_bonus_pct", "success_reward_bonus_w", "R_succ_current"]:
+                for k in task_metric_keys:
                     if k in all_metrics:
                         print(f"    {k}: {all_metrics[k]:.4f}")
                 # Log step norms from environment
@@ -1570,7 +1656,15 @@ def main():
                 config_copy["env"]["eps_success_decay_factor"] = eps_success_decay_factor
                 config_copy["env"]["terminate_on_success"] = terminate_on_success
                 config_copy["env"]["milestone_rewards"] = milestone_rewards
+                config_copy["env"]["reward_mode"] = reward_mode
                 config_copy["env"]["milestone_decay_factor"] = eps_success_decay_factor
+                config_copy["env"]["lambda_progress"] = lambda_progress
+                config_copy["env"]["lambda_act"] = lambda_act
+                config_copy["env"]["lambda_mag"] = lambda_mag
+                config_copy["env"]["R_succ"] = R_succ
+                config_copy["env"]["alpha_stay"] = alpha_stay
+                config_copy["env"]["progress_weight_p"] = progress_weight_p
+                config_copy["env"]["progress_weight_c"] = progress_weight_c
                 config_copy["env"]["success_reward_bonus_pct"] = success_reward_bonus_pct
                 config_copy["env"]["success_reward_bonus_w"] = success_reward_bonus_w
                 config_copy["env"]["perturb_clip"] = perturb_clip
@@ -1581,12 +1675,17 @@ def main():
                     "goal_cond_dim": goal_cond_dim,
                     "use_t_norm": use_t_norm,
                     "hidden_sizes": hidden_sizes,
+                    "actor_hidden_sizes": actor_hidden_sizes,
+                    "critic_hidden_sizes": critic_hidden_sizes,
+                    "separate_trunks": separate_trunks,
                     "allow_noop_action": allow_noop_action,
                     "kl_stop_threshold": kl_stop_threshold,
                     "kl_stop_immediate_threshold": kl_stop_immediate_threshold,
                     "actor_lr": actor_lr,
                     "critic_lr": critic_lr,
                     "delta_max": delta_max_effective,
+                    "ent_coef_final": ent_coef_final,
+                    "ent_anneal_iters": ent_anneal_iters,
                     "delta_max_calibration": {
                         "delta_max_effective": delta_max_effective,
                         "median_drift_norm": median_drift_norm if median_drift_norm is not None else "N/A (explicit delta_max used)",
@@ -1643,6 +1742,9 @@ def main():
             deactivate_velocity=deactivate_velocity,
             terminate_on_success=terminate_on_success,
             milestone_rewards=milestone_rewards,
+            reward_mode=reward_mode,
+            progress_weight_p=progress_weight_p,
+            progress_weight_c=progress_weight_c,
             success_reward_bonus_pct=success_reward_bonus_pct,
             success_reward_bonus_w=success_reward_bonus_w,
             eps_success_decay_factor=eps_success_decay_factor,

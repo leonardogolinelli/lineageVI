@@ -208,6 +208,9 @@ def load_policy_checkpoint(
     obs_dim = config["obs_dim"]
     n_latent = config["n_latent"]
     hidden_sizes = config.get("hidden_sizes", [128, 128])
+    actor_hidden_sizes = config.get("actor_hidden_sizes", None)
+    critic_hidden_sizes = config.get("critic_hidden_sizes", None)
+    separate_trunks = config.get("separate_trunks", False)
     activation = config.get("activation", "relu")
     delta_clip = config.get("delta_clip", None)
     kl_stop_threshold = config.get("kl_stop_threshold", 0.02)
@@ -223,6 +226,9 @@ def load_policy_checkpoint(
         use_t_norm=use_t_norm,
         allow_noop_action=allow_noop_action,
         hidden_sizes=hidden_sizes,
+        actor_hidden_sizes=actor_hidden_sizes,
+        critic_hidden_sizes=critic_hidden_sizes,
+        separate_trunks=separate_trunks,
         activation=activation,
         delta_clip=delta_clip,
     ).to(device)

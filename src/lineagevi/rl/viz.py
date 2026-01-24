@@ -811,6 +811,13 @@ def main():
                         help="Run greedy reachability baseline (default: False)")
     parser.add_argument("--baseline_delta_max", type=float, default=None,
                         help="Delta max for reachability baseline (default: delta_clip from checkpoint or 1.0)")
+    parser.add_argument("--reward_mode", type=str, default=None,
+                        choices=["plain", "scaled", "milestone", "multi_milestone"],
+                        help="Reward mode override (default: use checkpoint config)")
+    parser.add_argument("--progress_weight_p", type=float, default=None,
+                        help="Near-goal emphasis exponent p for scaled progress (default: use checkpoint config)")
+    parser.add_argument("--progress_weight_c", type=float, default=None,
+                        help="Near-goal emphasis offset c for scaled progress (default: use checkpoint config)")
     
     args = parser.parse_args()
     
@@ -896,6 +903,9 @@ def main():
     T_max_viz = max(T_max_viz, args.T)
     
     # Create environment (shared across all experiments)
+    reward_mode = args.reward_mode if args.reward_mode is not None else env_config.get("reward_mode", "plain")
+    progress_weight_p = args.progress_weight_p if args.progress_weight_p is not None else env_config.get("progress_weight_p", 0.0)
+    progress_weight_c = args.progress_weight_c if args.progress_weight_c is not None else env_config.get("progress_weight_c", 0.1)
     env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -909,6 +919,9 @@ def main():
         R_succ=env_config.get("R_succ", 10.0),
         use_negative_velocity=use_negative_velocity,
         deactivate_velocity=args.deactivate_velocity,
+        reward_mode=reward_mode,
+        progress_weight_p=progress_weight_p,
+        progress_weight_c=progress_weight_c,
     )
     
     # Get lineage labels for coloring (shared across all experiments)

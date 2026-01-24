@@ -5,9 +5,22 @@ set -e  # Exit on error
 
 
 # Architecture parameters
-HIDDEN_SIZES="128, 128" # default is 128,128
-ACTIVATION="" # default is relu
-DELTA_CLIP="" # default is none
+# Trunk hidden sizes (shared): dims + layers via comma-separated list
+# HIDDEN_SIZES="128,128" # default: 2 layers, 128 units each
+HIDDEN_SIZES=""
+# Actor hidden sizes: dims + layers via comma-separated list
+# ACTOR_HIDDEN_SIZES="128,128" # default: use shared hidden_sizes
+ACTOR_HIDDEN_SIZES=""
+# Critic hidden sizes: dims + layers via comma-separated list
+# CRITIC_HIDDEN_SIZES="128,128" # default: use shared hidden_sizes
+CRITIC_HIDDEN_SIZES=""
+# Separate actor/critic trunks even if sizes match
+SEPARATE_TRUNKS=""
+# Activation: relu or tanh
+# ACTIVATION="relu" # default: relu
+ACTIVATION=""
+# DELTA_CLIP="1.0" # default: none
+DELTA_CLIP=""
 
 # Default values
 CONDA_ENV="test3"
@@ -26,8 +39,8 @@ USE_NEGATIVE_VELOCITY=""
 DETERMINISTIC=""
 DEACTIVATE_VELOCITY="--deactivate_velocity"
 TERMINATE_ON_SUCCESS=""
-MILESTONE_REWARDS="--milestone_rewards"
-N_ITERATIONS="200"
+REWARD_MODE="scaled" # reward_mode: plain | scaled | milestone | multi_milestone
+N_ITERATIONS="1000"
 EPOCHS="2"
 BATCH_SIZE="256"
 T_ROLLOUT="1000"
@@ -35,26 +48,29 @@ T_MAX="1000"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="1" # default is 1.0
+LAMBDA_PROGRESS="5000" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
 R_SUCC="10" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
-EPS_SUCCESS_PCT="0.99"
+PROGRESS_WEIGHT_P="1"
+PROGRESS_WEIGHT_C="0.05"
+EPS_SUCCESS_PCT="0.85"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
-EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.90"
+EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.99"
 EPS_SUCCESS_DECAY_FACTOR="0.99"
- 
 SUCCESS_REWARD_BONUS_PCT="0.0" # reward bonus pct when success-rate threshold or milestone is reached
-SUCCESS_REWARD_BONUS_W="15" # linear reward bonus when success-rate threshold or milestone is reached
+SUCCESS_REWARD_BONUS_W="10" # linear reward bonus when success-rate threshold or milestone is reached
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
-ENT_COEF="1e-3"
+ENT_COEF="1e-3" # formerly 1e-3
+ENT_COEF_FINAL=""
+ENT_ANNEAL_ITERS="0"  # number of training iterations to anneal ent_coef to ent_coef_final. One update per iteration.
 KL_STOP_THRESHOLD="0.02" # default is 0.02
 KL_STOP_IMMEDIATE_THRESHOLD="0.03" # default is 0.03
 LR="3e-4" # default is 3e-4
 ACTOR_LR="3e-5" # default is LR
-CRITIC_LR="" # default is LR
+CRITIC_LR="3e-3" # default is LR
 GOAL_COND_DIM="32" # default is 32
 DISABLE_NOOP_ACTION=""
 USE_T_NORM=""
@@ -64,8 +80,6 @@ LAMBDA_OFF="0"
 N_VIZ_TRAJECTORIES="10"
 VIZ_EMBEDDING="pca"
 SKIP_VIZ=""
-
-
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -158,9 +172,9 @@ while [[ $# -gt 0 ]]; do
             TERMINATE_ON_SUCCESS="--terminate_on_success"
             shift
             ;;
-        --milestone_rewards)
-            MILESTONE_REWARDS="--milestone_rewards"
-            shift
+        --reward_mode)
+            REWARD_MODE="$2"
+            shift 2
             ;;
         --dt)
             DT="$2"
@@ -176,6 +190,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --lambda_mag)
             LAMBDA_MAG="$2"
+            shift 2
+            ;;
+        --progress_weight_p)
+            PROGRESS_WEIGHT_P="$2"
+            shift 2
+            ;;
+        --progress_weight_c)
+            PROGRESS_WEIGHT_C="$2"
             shift 2
             ;;
         --R_succ)
@@ -222,6 +244,14 @@ while [[ $# -gt 0 ]]; do
             ENT_COEF="$2"
             shift 2
             ;;
+        --ent_coef_final)
+            ENT_COEF_FINAL="$2"
+            shift 2
+            ;;
+        --ent_anneal_iters)
+            ENT_ANNEAL_ITERS="$2"
+            shift 2
+            ;;
         --kl_stop_threshold)
             KL_STOP_THRESHOLD="$2"
             shift 2
@@ -266,6 +296,18 @@ while [[ $# -gt 0 ]]; do
             HIDDEN_SIZES="$2"
             shift 2
             ;;
+        --actor_hidden_sizes)
+            ACTOR_HIDDEN_SIZES="$2"
+            shift 2
+            ;;
+        --critic_hidden_sizes)
+            CRITIC_HIDDEN_SIZES="$2"
+            shift 2
+            ;;
+        --separate_trunks)
+            SEPARATE_TRUNKS="--separate_trunks"
+            shift
+            ;;
         --activation)
             ACTIVATION="$2"
             shift 2
@@ -300,13 +342,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --deterministic            Use deterministic policy for visualization (default: False, uses stochastic sampling)"
             echo "  --deactivate_velocity       Deactivate velocity effect on next state (default: velocity affects state)"
             echo "  --terminate_on_success      Terminate episode immediately on success (default: False)"
-            echo "  --milestone_rewards         Enable multi-milestone success rewards (default: False)"
+            echo "  --reward_mode MODE          Reward mode: plain, scaled, milestone, multi_milestone (default: plain)"
             echo ""
             echo "ENVIRONMENT PARAMETERS (override config):"
             echo "  --dt FLOAT                Time step size (overrides config)"
             echo "  --lambda_progress FLOAT   Progress reward scaling factor (overrides config, default: 1.0)"
             echo "  --lambda_act FLOAT        Action penalty coefficient (overrides config)"
             echo "  --lambda_mag FLOAT         Magnitude penalty coefficient (overrides config)"
+            echo "  --progress_weight_p FLOAT  Near-goal emphasis exponent p (default: 0.0)"
+            echo "  --progress_weight_c FLOAT  Near-goal emphasis offset c (default: 0.1)"
             echo "  --R_succ FLOAT            Success reward bonus (overrides config)"
             echo "  --alpha_stay FLOAT        State cost coefficient for staying near goal (overrides config, default: 0.0)"
             echo "  --eps_success_decay_on_success  Decay eps_success percentage when success rate exceeds threshold"
@@ -318,6 +362,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --perturb_clip FLOAT      Clip applied perturbation magnitude (env-side, default: none)"
             echo "  --gamma FLOAT             Discount factor for future rewards (overrides config, default: 0.99)"
             echo "  --ent_coef FLOAT          Entropy coefficient for exploration bonus (overrides config, default: 0.01)"
+            echo "  --ent_coef_final FLOAT     Final entropy coefficient for annealing (default: ent_coef)"
+            echo "  --ent_anneal_iters N       Iterations to anneal ent_coef to ent_coef_final (default: 0)"
             echo "  --kl_stop_threshold FLOAT  Stop PPO epoch if KL exceeds this twice (default: 0.02)"
             echo "  --kl_stop_immediate_threshold FLOAT  Stop PPO epoch if KL exceeds this once (default: 0.03)"
             echo "  --goal_cond_dim INT       Goal conditioning projection dim (default: 32)"
@@ -339,6 +385,9 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "ARCHITECTURE PARAMETERS:"
             echo "  --hidden_sizes LIST        Comma-separated hidden sizes (default: 128,128)"
+            echo "  --actor_hidden_sizes LIST  Comma-separated actor hidden sizes (default: shared)"
+            echo "  --critic_hidden_sizes LIST Comma-separated critic hidden sizes (default: shared)"
+            echo "  --separate_trunks          Use separate actor/critic trunks even if sizes match"
             echo "  --activation NAME          Activation function: relu or tanh (default: relu)"
             echo "  --delta_clip FLOAT         Clip magnitude to [-x, x] (default: none)"
             echo ""
@@ -487,8 +536,8 @@ fi
 if [[ -n "$TERMINATE_ON_SUCCESS" ]]; then
     PYTHON_ARGS+=("$TERMINATE_ON_SUCCESS")
 fi
-if [[ -n "$MILESTONE_REWARDS" ]]; then
-    PYTHON_ARGS+=("$MILESTONE_REWARDS")
+if [[ -n "$REWARD_MODE" ]]; then
+    PYTHON_ARGS+=(--reward_mode "$REWARD_MODE")
 fi
 
 # Add training parameters (override config if provided)
@@ -528,6 +577,12 @@ fi
 if [[ -n "$LAMBDA_MAG" ]]; then
     PYTHON_ARGS+=(--lambda_mag "$LAMBDA_MAG")
 fi
+if [[ -n "$PROGRESS_WEIGHT_P" ]]; then
+    PYTHON_ARGS+=(--progress_weight_p "$PROGRESS_WEIGHT_P")
+fi
+if [[ -n "$PROGRESS_WEIGHT_C" ]]; then
+    PYTHON_ARGS+=(--progress_weight_c "$PROGRESS_WEIGHT_C")
+fi
 if [[ -n "$R_SUCC" ]]; then
     PYTHON_ARGS+=(--R_succ "$R_SUCC")
 fi
@@ -560,6 +615,12 @@ if [[ -n "$GAMMA" ]]; then
 fi
 if [[ -n "$ENT_COEF" ]]; then
     PYTHON_ARGS+=(--ent_coef "$ENT_COEF")
+fi
+if [[ -n "$ENT_COEF_FINAL" ]]; then
+    PYTHON_ARGS+=(--ent_coef_final "$ENT_COEF_FINAL")
+fi
+if [[ -n "$ENT_ANNEAL_ITERS" ]]; then
+    PYTHON_ARGS+=(--ent_anneal_iters "$ENT_ANNEAL_ITERS")
 fi
 if [[ -n "$KL_STOP_THRESHOLD" ]]; then
     PYTHON_ARGS+=(--kl_stop_threshold "$KL_STOP_THRESHOLD")
@@ -605,6 +666,15 @@ if [[ -n "$SKIP_VIZ" ]]; then
 fi
 if [[ -n "$HIDDEN_SIZES" ]]; then
     PYTHON_ARGS+=(--hidden_sizes "$HIDDEN_SIZES")
+fi
+if [[ -n "$ACTOR_HIDDEN_SIZES" ]]; then
+    PYTHON_ARGS+=(--actor_hidden_sizes "$ACTOR_HIDDEN_SIZES")
+fi
+if [[ -n "$CRITIC_HIDDEN_SIZES" ]]; then
+    PYTHON_ARGS+=(--critic_hidden_sizes "$CRITIC_HIDDEN_SIZES")
+fi
+if [[ -n "$SEPARATE_TRUNKS" ]]; then
+    PYTHON_ARGS+=("$SEPARATE_TRUNKS")
 fi
 if [[ -n "$ACTIVATION" ]]; then
     PYTHON_ARGS+=(--activation "$ACTIVATION")

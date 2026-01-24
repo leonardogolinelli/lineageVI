@@ -5,7 +5,7 @@ set -e  # Exit on error
 
 # Default values
 CONDA_ENV="test3"
-RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260119_221705"
+RL_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/rl_20260123_225521"
 LINEAGEVI_OUTPUT_DIR="/Users/lgolinelli/git/lineageVI/test_outputs/lineagevi_20260117_201810"
 LINEAGE_KEY="leiden"
 CHECKPOINT=""
@@ -27,6 +27,12 @@ INTERVENTION_METHOD="heatmap"
 N_VIZ_TRAJECTORIES="10"
 REACHABILITY_TEST="--reachability_test"
 BASELINE_DELTA_MAX=""
+REWARD_MODE="scaled"
+PROGRESS_WEIGHT_P="2"
+PROGRESS_WEIGHT_C="0.05"
+REWARD_MODE=""
+PROGRESS_WEIGHT_P=""
+PROGRESS_WEIGHT_C=""
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,6 +129,18 @@ while [[ $# -gt 0 ]]; do
             BASELINE_DELTA_MAX="$2"
             shift 2
             ;;
+        --reward_mode)
+            REWARD_MODE="$2"
+            shift 2
+            ;;
+        --progress_weight_p)
+            PROGRESS_WEIGHT_P="$2"
+            shift 2
+            ;;
+        --progress_weight_c)
+            PROGRESS_WEIGHT_C="$2"
+            shift 2
+            ;;
         --conda_env)
             CONDA_ENV="$2"
             shift 2
@@ -156,6 +174,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --n_viz_trajectories N      Number of trajectory visualizations to generate (default: 1)"
             echo "  --reachability_test         Run greedy reachability baseline (default: off)"
             echo "  --baseline_delta_max FLOAT  Delta max for reachability baseline (default: delta_clip or 1.0)"
+            echo "  --reward_mode MODE          Reward mode override (default: checkpoint config)"
+            echo "  --progress_weight_p FLOAT   Near-goal emphasis exponent p (default: checkpoint config)"
+            echo "  --progress_weight_c FLOAT   Near-goal emphasis offset c (default: checkpoint config)"
             echo "  --conda_env ENV             Conda environment name (default: test3)"
             echo ""
             echo "EXAMPLES:"
@@ -329,6 +350,15 @@ if [[ -n "$REACHABILITY_TEST" ]]; then
 fi
 if [[ -n "$BASELINE_DELTA_MAX" ]]; then
     PYTHON_ARGS+=(--baseline_delta_max "$BASELINE_DELTA_MAX")
+fi
+if [[ -n "$REWARD_MODE" ]]; then
+    PYTHON_ARGS+=(--reward_mode "$REWARD_MODE")
+fi
+if [[ -n "$PROGRESS_WEIGHT_P" ]]; then
+    PYTHON_ARGS+=(--progress_weight_p "$PROGRESS_WEIGHT_P")
+fi
+if [[ -n "$PROGRESS_WEIGHT_C" ]]; then
+    PYTHON_ARGS+=(--progress_weight_c "$PROGRESS_WEIGHT_C")
 fi
 
 # Run the visualization script

@@ -31,6 +31,8 @@ class PPOTrainer:
         target_kl: float = 0.01,
         vf_coef: float = 0.5,
         ent_coef: float = 0.01,
+        ent_coef_final: Optional[float] = None,
+        ent_anneal_iters: int = 0,
         kl_stop_threshold: float = 0.02,
         kl_stop_immediate_threshold: float = 0.03,
         lr: float = 3e-4,
@@ -47,6 +49,9 @@ class PPOTrainer:
         self.target_kl = target_kl
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
+        self.ent_coef_initial = ent_coef
+        self.ent_coef_final = ent_coef if ent_coef_final is None else ent_coef_final
+        self.ent_anneal_iters = max(0, int(ent_anneal_iters))
         self.max_grad_norm = max_grad_norm
         self.kl_stop_threshold = kl_stop_threshold
         self.kl_stop_immediate_threshold = kl_stop_immediate_threshold
@@ -136,6 +141,11 @@ class PPOTrainer:
         log_prob_list = []
         value_list = []
         nll_list = []
+        progress_list = []
+        action_penalty_list = []
+        magnitude_penalty_list = []
+        success_bonus_list = []
+        off_manifold_penalty_list = []
         
         # Collect rollouts
         for t in range(T_rollout):
@@ -166,6 +176,21 @@ class PPOTrainer:
                     nll_list.append(torch.from_numpy(nll_val).float())
                 else:
                     nll_list.append(torch.tensor(nll_val, dtype=torch.float32))
+            if "progress" in info_next:
+                progress_val = info_next["progress"]
+                progress_list.append(torch.from_numpy(progress_val).float() if isinstance(progress_val, np.ndarray) else torch.tensor(progress_val, dtype=torch.float32))
+            if "action_penalty" in info_next:
+                action_penalty_val = info_next["action_penalty"]
+                action_penalty_list.append(torch.from_numpy(action_penalty_val).float() if isinstance(action_penalty_val, np.ndarray) else torch.tensor(action_penalty_val, dtype=torch.float32))
+            if "magnitude_penalty" in info_next:
+                magnitude_penalty_val = info_next["magnitude_penalty"]
+                magnitude_penalty_list.append(torch.from_numpy(magnitude_penalty_val).float() if isinstance(magnitude_penalty_val, np.ndarray) else torch.tensor(magnitude_penalty_val, dtype=torch.float32))
+            if "success_bonus" in info_next:
+                success_bonus_val = info_next["success_bonus"]
+                success_bonus_list.append(torch.from_numpy(success_bonus_val).float() if isinstance(success_bonus_val, np.ndarray) else torch.tensor(success_bonus_val, dtype=torch.float32))
+            if "off_manifold_penalty" in info_next:
+                off_manifold_penalty_val = info_next["off_manifold_penalty"]
+                off_manifold_penalty_list.append(torch.from_numpy(off_manifold_penalty_val).float() if isinstance(off_manifold_penalty_val, np.ndarray) else torch.tensor(off_manifold_penalty_val, dtype=torch.float32))
             
             # Update obs for next iteration
             obs = obs_next
@@ -238,6 +263,16 @@ class PPOTrainer:
         if len(nll_list) > 0:
             nll_batch = torch.stack(nll_list, dim=0)  # (T, B)
             batch["nll"] = nll_batch
+        if len(progress_list) > 0:
+            batch["progress"] = torch.stack(progress_list, dim=0)  # (T, B)
+        if len(action_penalty_list) > 0:
+            batch["action_penalty"] = torch.stack(action_penalty_list, dim=0)  # (T, B)
+        if len(magnitude_penalty_list) > 0:
+            batch["magnitude_penalty"] = torch.stack(magnitude_penalty_list, dim=0)  # (T, B)
+        if len(success_bonus_list) > 0:
+            batch["success_bonus"] = torch.stack(success_bonus_list, dim=0)  # (T, B)
+        if len(off_manifold_penalty_list) > 0:
+            batch["off_manifold_penalty"] = torch.stack(off_manifold_penalty_list, dim=0)  # (T, B)
         
         return batch
     
@@ -260,6 +295,11 @@ class PPOTrainer:
         - mean_episode_return: mean sum of rewards per episode
         - mean_step_reward: mean reward per timestep across the rollout
         - mean_milestones_reached: mean number of milestones reached per episode (milestone mode only)
+        - mean_progress: mean progress term per step
+        - mean_action_penalty: mean action penalty per step
+        - mean_magnitude_penalty: mean magnitude penalty per step
+        - mean_success_bonus: mean success bonus per step
+        - mean_off_manifold_penalty: mean off-manifold penalty per step
         
         Parameters
         ----------
@@ -329,6 +369,11 @@ class PPOTrainer:
         best_improvements = initial_distances - best_distances  # (B,)
         best_improvement = best_improvements.mean().item()
         
+        # Percent improvements relative to initial distance
+        eps = 1e-8
+        mean_pct_improvement = ((initial_distances - final_distances) / (initial_distances + eps)).mean().item()
+        best_pct_improvement = ((initial_distances - best_distances) / (initial_distances + eps)).max().item()
+        
         # L0_interventions: mean number of timesteps with action != 0 per episode
         interventions = (action != 0).long()  # (T, B) - 1 if intervention, 0 if no-op
         L0_per_episode = interventions.sum(dim=0).float()  # (B,) - count per episode
@@ -369,6 +414,12 @@ class PPOTrainer:
             milestones_reached = levels.max(dim=0)[0]  # (B,)
             mean_milestones_reached = milestones_reached.float().mean().item()
         
+        mean_progress = batch["progress"].mean().item() if "progress" in batch else 0.0
+        mean_action_penalty = batch["action_penalty"].mean().item() if "action_penalty" in batch else 0.0
+        mean_magnitude_penalty = batch["magnitude_penalty"].mean().item() if "magnitude_penalty" in batch else 0.0
+        mean_success_bonus = batch["success_bonus"].mean().item() if "success_bonus" in batch else 0.0
+        mean_off_manifold_penalty = batch["off_manifold_penalty"].mean().item() if "off_manifold_penalty" in batch else 0.0
+        
         return {
             "success_rate": success_rate,
             "mean_initial_distance": mean_initial_distance,
@@ -376,12 +427,19 @@ class PPOTrainer:
             "mean_best_distance": mean_best_distance,
             "mean_distance_improvement": mean_distance_improvement,
             "best_improvement": best_improvement,
+            "mean_pct_improvement": mean_pct_improvement,
+            "best_pct_improvement": best_pct_improvement,
             "L0_interventions": L0_interventions,
             "L1_magnitude": L1_magnitude,
             "noop_fraction": noop_fraction,
             "mean_episode_return": mean_episode_return,
             "mean_step_reward": mean_step_reward,
             "mean_milestones_reached": mean_milestones_reached,
+            "mean_progress": mean_progress,
+            "mean_action_penalty": mean_action_penalty,
+            "mean_magnitude_penalty": mean_magnitude_penalty,
+            "mean_success_bonus": mean_success_bonus,
+            "mean_off_manifold_penalty": mean_off_manifold_penalty,
         }
     
     def compute_gae(
@@ -444,6 +502,7 @@ class PPOTrainer:
         batch: Dict[str, torch.Tensor],
         epochs: int = 10,
         minibatch_size: int = 64,
+        iteration: Optional[int] = None,
     ) -> Dict[str, float]:
         """
         Update policy using PPO.
@@ -462,8 +521,15 @@ class PPOTrainer:
         metrics : dict
             Training metrics.
         """
+        # Update entropy coefficient if annealing is enabled
+        if self.ent_anneal_iters > 0 and iteration is not None:
+            frac = min(max(iteration / float(self.ent_anneal_iters), 0.0), 1.0)
+            self.ent_coef = (1.0 - frac) * self.ent_coef_initial + frac * self.ent_coef_final
+        
         # Compute advantages and returns
         advantages, returns = self.compute_gae(batch)
+        mean_adv = advantages.mean().item()
+        mean_abs_adv = advantages.abs().mean().item()
         
         # Flatten batch for minibatching
         T, B = batch["obs"].shape[:2]
@@ -582,6 +648,18 @@ class PPOTrainer:
             if avg_kl > self.target_kl:
                 break
         
+        # Value calibration (V vs returns)
+        with torch.no_grad():
+            value_pred = batch["value"].flatten()
+            returns_flat = returns.detach().cpu()
+            value_bias = (value_pred - returns_flat).mean().item()
+            value_mse = ((value_pred - returns_flat) ** 2).mean().item()
+        
         # Average metrics
         final_metrics = {k: np.mean(v) for k, v in metrics.items()}
+        final_metrics["mean_adv"] = mean_adv
+        final_metrics["mean_abs_adv"] = mean_abs_adv
+        final_metrics["value_bias"] = value_bias
+        final_metrics["value_mse"] = value_mse
+        final_metrics["ent_coef"] = float(self.ent_coef)
         return final_metrics
