@@ -197,6 +197,7 @@ class ActorCriticPolicy(nn.Module):
         self,
         obs: torch.Tensor,
         deterministic: bool = False,
+        n_actions: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample action from policy.
@@ -221,31 +222,43 @@ class ActorCriticPolicy(nn.Module):
         """
         action_logits, _, _, _ = self.forward(obs)
         
-        # Sample discrete action
+        # Sample discrete action(s)
         if deterministic:
             action = torch.argmax(action_logits, dim=1)  # (B,)
+            if n_actions > 1:
+                action = action.unsqueeze(1).repeat(1, n_actions)  # (B, K)
         else:
             action_dist = dist.Categorical(logits=action_logits)
-            action = action_dist.sample()  # (B,)
+            if n_actions == 1:
+                action = action_dist.sample()  # (B,)
+            else:
+                action = action_dist.sample((n_actions,)).transpose(0, 1)  # (B, K)
         
         # Sample magnitude conditioned on state and chosen action
         # If action = 0, magnitude is 0 (no-op)
         batch_size = obs.shape[0]
-        action_mask = (action > 0).float()  # (B,)
-        
-        # Get magnitude params for chosen action (conditioned on state + action)
-        magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
-        
-        # Sample magnitude directly from normal distribution (only if action > 0)
-        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
-        delta = magnitude_dist.sample()  # (B,)
+        if action.dim() == 1:
+            action_mask = (action > 0).float()  # (B,)
+            # Get magnitude params for chosen action (conditioned on state + action)
+            magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
+            # Sample magnitude directly from normal distribution (only if action > 0)
+            magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+            delta = magnitude_dist.sample()  # (B,)
+            delta = delta * action_mask
+        else:
+            _, k_actions = action.shape
+            action_flat = action.reshape(-1)  # (B*K,)
+            obs_exp = obs.unsqueeze(1).repeat(1, k_actions, 1).reshape(-1, obs.shape[1])  # (B*K, obs_dim)
+            action_mask = (action_flat > 0).float()  # (B*K,)
+            magnitude_mu, magnitude_std = self._get_magnitude_params(obs_exp, action_flat)  # (B*K,)
+            magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+            delta_flat = magnitude_dist.sample()  # (B*K,)
+            delta_flat = delta_flat * action_mask
+            delta = delta_flat.reshape(batch_size, k_actions)  # (B, K)
         
         # Clip magnitude if configured
         if self.delta_clip is not None:
             delta = torch.clamp(delta, -self.delta_clip, self.delta_clip)
-        
-        # Zero out magnitude for no-op actions
-        delta = delta * action_mask
         
         # Compute log probability
         log_prob = self.log_prob(obs, action, delta)
@@ -279,20 +292,24 @@ class ActorCriticPolicy(nn.Module):
         
         # Categorical log prob
         action_dist = dist.Categorical(logits=action_logits)
-        log_prob_cat = action_dist.log_prob(action)  # (B,)
-        
-        # Magnitude log prob (only if action > 0)
-        action_mask = (action > 0).float()  # (B,)
-        
-        # Get μ and σ for chosen action (conditioned on state + action)
-        magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
-        
-        # Gaussian log prob of delta (directly from normal distribution)
-        magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
-        log_prob_mag = magnitude_dist.log_prob(delta)  # (B,)
-        
-        # Total log prob: categorical + magnitude (only if action > 0)
-        log_prob = log_prob_cat + action_mask * log_prob_mag
+        if action.dim() == 1:
+            log_prob_cat = action_dist.log_prob(action)  # (B,)
+            action_mask = (action > 0).float()  # (B,)
+            magnitude_mu, magnitude_std = self._get_magnitude_params(obs, action)  # (B,)
+            magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+            log_prob_mag = magnitude_dist.log_prob(delta)  # (B,)
+            log_prob = log_prob_cat + action_mask * log_prob_mag
+        else:
+            batch_size, k_actions = action.shape
+            log_prob_cat = action_dist.log_prob(action)  # (B, K)
+            action_flat = action.reshape(-1)  # (B*K,)
+            obs_exp = obs.unsqueeze(1).repeat(1, k_actions, 1).reshape(-1, obs.shape[1])  # (B*K, obs_dim)
+            action_mask = (action_flat > 0).float()  # (B*K,)
+            magnitude_mu, magnitude_std = self._get_magnitude_params(obs_exp, action_flat)  # (B*K,)
+            magnitude_dist = dist.Normal(magnitude_mu, magnitude_std)
+            delta_flat = delta.reshape(-1)  # (B*K,)
+            log_prob_mag = magnitude_dist.log_prob(delta_flat)  # (B*K,)
+            log_prob = log_prob_cat.sum(dim=1) + (action_mask * log_prob_mag).reshape(batch_size, k_actions).sum(dim=1)
         
         return log_prob
     

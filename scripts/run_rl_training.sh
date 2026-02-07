@@ -48,13 +48,14 @@ T_MAX="1000"
 MINIBATCH_SIZE="2048"
 SAVE_FREQ="25"
 DT="" # default is 0.1
-LAMBDA_PROGRESS="5000" # default is 1.0
+LAMBDA_PROGRESS="10000" # default is 1.0
 LAMBDA_ACT="1e-3" # default is 0.02
 LAMBDA_MAG="1e-3" # default is 0.15
 R_SUCC="10" # default is 20.0 # INCREASE IT BASED ON EPS_SUCCESS_PCT AND EPS_SUCCESS_DECAY_FACTOR
 ALPHA_STAY="0" # default is 0.0 (state cost for staying near goal)
-PROGRESS_WEIGHT_P="1"
+PROGRESS_WEIGHT_P="2"
 PROGRESS_WEIGHT_C="0.05"
+ACTIONS_PER_STEP="1"
 EPS_SUCCESS_PCT="0.85"
 EPS_SUCCESS_DECAY_ON_SUCCESS="--eps_success_decay_on_success"
 EPS_SUCCESS_SUCCESS_RATE_THRESHOLD="0.99"
@@ -63,13 +64,13 @@ SUCCESS_REWARD_BONUS_PCT="0.0" # reward bonus pct when success-rate threshold or
 SUCCESS_REWARD_BONUS_W="10" # linear reward bonus when success-rate threshold or milestone is reached
 PERTURB_CLIP="1" # env-side perturbation clip (default: none)
 GAMMA=".995" # default is 0.99     1 IS USUALLY TOO NOISY
-ENT_COEF="1e-3" # formerly 1e-3
-ENT_COEF_FINAL=""
-ENT_ANNEAL_ITERS="0"  # number of training iterations to anneal ent_coef to ent_coef_final. One update per iteration.
-KL_STOP_THRESHOLD="0.02" # default is 0.02
+ENT_COEF="1e-1" # formerly 1e-3
+ENT_COEF_FINAL="1e-3"
+ENT_ANNEAL_ITERS="500"  # number of training iterations to anneal ent_coef to ent_coef_final. One update per iteration.
+KL_STOP_THRESHOLD="0.02" # default is 0.
 KL_STOP_IMMEDIATE_THRESHOLD="0.03" # default is 0.03
 LR="3e-4" # default is 3e-4
-ACTOR_LR="3e-5" # default is LR
+ACTOR_LR="5e-5" # default is LR
 CRITIC_LR="3e-3" # default is LR
 GOAL_COND_DIM="32" # default is 32
 DISABLE_NOOP_ACTION=""
@@ -198,6 +199,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --progress_weight_c)
             PROGRESS_WEIGHT_C="$2"
+            shift 2
+            ;;
+        --actions_per_step)
+            ACTIONS_PER_STEP="$2"
             shift 2
             ;;
         --R_succ)
@@ -582,6 +587,9 @@ if [[ -n "$PROGRESS_WEIGHT_P" ]]; then
 fi
 if [[ -n "$PROGRESS_WEIGHT_C" ]]; then
     PYTHON_ARGS+=(--progress_weight_c "$PROGRESS_WEIGHT_C")
+fi
+if [[ -n "$ACTIONS_PER_STEP" ]]; then
+    PYTHON_ARGS+=(--actions_per_step "$ACTIONS_PER_STEP")
 fi
 if [[ -n "$R_SUCC" ]]; then
     PYTHON_ARGS+=(--R_succ "$R_SUCC")

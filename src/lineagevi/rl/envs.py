@@ -236,13 +236,28 @@ class LatentVelocityEnv:
             return self._get_obs(), 0.0, True, {"distance": self._compute_distance().item()}
         
         a_t, delta_t = action
+        if torch.is_tensor(a_t):
+            a_vec = a_t.flatten().to(self.adapter.device).long()
+        else:
+            a_vec = torch.as_tensor(np.atleast_1d(a_t), device=self.adapter.device, dtype=torch.long)
+        if torch.is_tensor(delta_t):
+            d_vec = delta_t.flatten().to(self.adapter.device).float()
+        else:
+            d_vec = torch.as_tensor(np.atleast_1d(delta_t), device=self.adapter.device, dtype=torch.float32)
         if self.perturb_clip is not None:
-            delta_t = float(np.clip(delta_t, -self.perturb_clip, self.perturb_clip))
+            d_vec = torch.clamp(d_vec, -self.perturb_clip, self.perturb_clip)
         
-        # Apply perturbation
+        # Apply perturbations (sum if repeated dims)
         u = torch.zeros(self.n_latent, device=self.adapter.device)
-        if a_t > 0 and a_t <= self.n_latent:
-            u[a_t - 1] = delta_t  # a_t=1 maps to dim 0, etc.
+        action_penalty = 0.0
+        magnitude_penalty = 0.0
+        for idx in range(a_vec.numel()):
+            a_i = int(a_vec[idx].item())
+            d_i = float(d_vec[idx].item())
+            if a_i > 0 and a_i <= self.n_latent:
+                u[a_i - 1] += d_i  # a_i=1 maps to dim 0, etc.
+                action_penalty += self.lambda_act
+                magnitude_penalty += self.lambda_mag * abs(d_i)
         
         z_tilde = self.z + u
         
@@ -320,8 +335,7 @@ class LatentVelocityEnv:
             progress = self.lambda_progress * progress_raw
         d0 = float(self.d0) if self.d0 is not None else float(d_t.item())
         state_cost = self.alpha_stay * (d_t / (d0 + 1e-8))
-        action_penalty = self.lambda_act if a_t != 0 else 0.0
-        magnitude_penalty = self.lambda_mag * abs(delta_t)
+        # action_penalty / magnitude_penalty already computed per draw
         if self.milestone_rewards:
             n_new_levels = max(0, milestone_level - prev_level)
             k_start = prev_level + 1
@@ -608,13 +622,25 @@ class VectorizedLatentVelocityEnv:
         # Mask out already-done episodes
         active_mask = ~self.done
         
-        # Apply perturbations
+        # Apply perturbations (sum if repeated dims)
         u = torch.zeros(B, self.n_latent, device=self.adapter.device)
-        # Create indices for scatter: (B,)
-        dim_indices = (a_t - 1).clamp(min=0, max=self.n_latent - 1)
-        # Only apply perturbation if a_t > 0
-        perturb_mask = (a_t > 0) & active_mask
-        u[perturb_mask, dim_indices[perturb_mask]] = delta_t[perturb_mask]
+        if a_t.dim() == 1:
+            dim_indices = (a_t - 1).clamp(min=0, max=self.n_latent - 1)
+            perturb_mask = (a_t > 0) & active_mask
+            u[perturb_mask, dim_indices[perturb_mask]] = delta_t[perturb_mask]
+            action_penalty = self.lambda_act * perturb_mask.float()
+            magnitude_penalty = self.lambda_mag * delta_t.abs() * perturb_mask.float()
+        else:
+            k_actions = a_t.shape[1]
+            action_mask = (a_t > 0) & active_mask.unsqueeze(1)  # (B, K)
+            for k in range(k_actions):
+                a_k = a_t[:, k]
+                d_k = delta_t[:, k]
+                dim_indices = (a_k - 1).clamp(min=0, max=self.n_latent - 1)
+                mask = (a_k > 0) & active_mask
+                u[mask, dim_indices[mask]] += d_k[mask]
+            action_penalty = self.lambda_act * action_mask.float().sum(dim=1)
+            magnitude_penalty = self.lambda_mag * (delta_t.abs() * action_mask.float()).sum(dim=1)
         
         z_tilde = self.z + u
         
@@ -693,8 +719,7 @@ class VectorizedLatentVelocityEnv:
             progress = self.lambda_progress * progress_raw
         denom = self.d0 if self.d0 is not None else d_t
         state_cost = self.alpha_stay * (d_t / (denom + 1e-8)) * active_mask.float()  # Use linear distance for state cost
-        action_penalty = self.lambda_act * (a_t != 0).float() * active_mask.float()
-        magnitude_penalty = self.lambda_mag * delta_t.abs() * active_mask.float()
+        # action_penalty / magnitude_penalty already computed per draw
         if self.milestone_rewards:
             n_new_levels = torch.clamp(milestone_level - current_level, min=0)
             k_start = current_level + 1

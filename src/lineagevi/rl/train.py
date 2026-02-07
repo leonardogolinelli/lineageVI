@@ -828,6 +828,7 @@ def main():
     parser.add_argument("--lambda_progress", type=float, default=None, help="Progress reward scaling factor (overrides config)")
     parser.add_argument("--lambda_act", type=float, default=None, help="Action penalty coefficient (overrides config)")
     parser.add_argument("--lambda_mag", type=float, default=None, help="Magnitude penalty coefficient (overrides config)")
+    parser.add_argument("--actions_per_step", type=int, default=None, help="Number of action draws per step (default: 1)")
     parser.add_argument("--R_succ", type=float, default=None, help="Success reward bonus (overrides config)")
     parser.add_argument("--alpha_stay", type=float, default=None, help="State cost coefficient for staying near goal (overrides config, default: 0.0)")
     parser.add_argument("--eps_success", type=float, default=None, help="Success radius as fraction of initial distance (overrides config, default: 0.1)")
@@ -1056,6 +1057,7 @@ def main():
     perturb_clip = args.perturb_clip if args.perturb_clip is not None else env_config.get("perturb_clip", None)
     progress_weight_p = args.progress_weight_p if args.progress_weight_p is not None else env_config.get("progress_weight_p", 0.0)
     progress_weight_c = args.progress_weight_c if args.progress_weight_c is not None else env_config.get("progress_weight_c", 0.0)
+    actions_per_step = args.actions_per_step if args.actions_per_step is not None else env_config.get("actions_per_step", 1)
     eps_success = args.eps_success if args.eps_success is not None else env_config.get("eps_success", 0.1)
     eps_success_decay_on_success = args.eps_success_decay_on_success
     eps_success_pct = args.eps_success_pct if args.eps_success is None else eps_success
@@ -1274,6 +1276,7 @@ def main():
         kl_stop_threshold=kl_stop_threshold,
         kl_stop_immediate_threshold=kl_stop_immediate_threshold,
         device=device,
+        actions_per_step=actions_per_step,
     )
     print("Created PPO trainer")
     
@@ -1668,6 +1671,7 @@ def main():
                 config_copy["env"]["success_reward_bonus_pct"] = success_reward_bonus_pct
                 config_copy["env"]["success_reward_bonus_w"] = success_reward_bonus_w
                 config_copy["env"]["perturb_clip"] = perturb_clip
+                config_copy["env"]["actions_per_step"] = actions_per_step
 
                 save_config = {
                     "obs_dim": obs_dim,

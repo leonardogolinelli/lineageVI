@@ -40,6 +40,7 @@ class PPOTrainer:
         critic_lr: Optional[float] = None,
         max_grad_norm: float = 0.5,
         device: Optional[torch.device] = None,
+        actions_per_step: int = 1,
     ):
         self.policy = policy
         self.env = env
@@ -59,6 +60,7 @@ class PPOTrainer:
         self.critic_lr = lr if critic_lr is None else critic_lr
         
         self.device = device if device is not None else next(policy.parameters()).device
+        self.actions_per_step = max(1, int(actions_per_step))
         
         # Optimizer (optionally separate actor/critic lrs)
         if self.actor_lr == self.critic_lr:
@@ -153,7 +155,10 @@ class PPOTrainer:
             obs_tensor = torch.from_numpy(obs) if isinstance(obs, np.ndarray) else obs
             obs_tensor = obs_tensor.to(self.device).float()
             
-            action, delta, raw_delta, log_prob = self.policy.sample(obs_tensor)
+            action, delta, raw_delta, log_prob = self.policy.sample(
+                obs_tensor,
+                n_actions=self.actions_per_step,
+            )
             value = self.policy.value(obs_tensor).squeeze(-1)  # (B,)
             
             # Step environment (env handles device internally)
@@ -374,18 +379,26 @@ class PPOTrainer:
         mean_pct_improvement = ((initial_distances - final_distances) / (initial_distances + eps)).mean().item()
         best_pct_improvement = ((initial_distances - best_distances) / (initial_distances + eps)).max().item()
         
-        # L0_interventions: mean number of timesteps with action != 0 per episode
-        interventions = (action != 0).long()  # (T, B) - 1 if intervention, 0 if no-op
-        L0_per_episode = interventions.sum(dim=0).float()  # (B,) - count per episode
+        # L0_interventions: mean number of interventions per episode
+        if action.dim() == 3:
+            # (T, B, K)
+            interventions = (action != 0).long()
+            L0_per_episode = interventions.sum(dim=(0, 2)).float()  # (B,)
+            L1_per_episode = delta.abs().sum(dim=(0, 2))  # (B,)
+            noop_count = (action == 0).long().sum().item()
+            total_steps = action.numel()
+        else:
+            interventions = (action != 0).long()  # (T, B)
+            L0_per_episode = interventions.sum(dim=0).float()  # (B,)
+            L1_per_episode = delta.abs().sum(dim=0)  # (B,)
+            noop_count = (action == 0).long().sum().item()
+            total_steps = T * B
         L0_interventions = L0_per_episode.mean().item()
         
         # L1_magnitude: mean sum of abs(delta) per episode
-        L1_per_episode = delta.abs().sum(dim=0)  # (B,) - sum of |delta| per episode
         L1_magnitude = L1_per_episode.mean().item()
         
-        # noop_fraction: fraction of all steps with action == 0
-        noop_count = (action == 0).long().sum().item()  # Total no-op steps
-        total_steps = T * B
+        # noop_fraction: fraction of all action draws that are no-op
         noop_fraction = noop_count / total_steps if total_steps > 0 else 0.0
         
         # mean_episode_return: mean sum of rewards per episode
@@ -537,9 +550,17 @@ class PPOTrainer:
         
         # Detach all batch tensors to avoid gradient issues when reusing across epochs
         obs_flat = batch["obs"].detach().reshape(N, -1)  # (N, obs_dim)
-        action_flat = batch["action"].detach().reshape(N)  # (N,)
-        delta_flat = batch["delta"].detach().reshape(N)  # (N,)
-        raw_delta_flat = batch["raw_delta"].detach().reshape(N)  # (N,)
+        action = batch["action"].detach()
+        delta = batch["delta"].detach()
+        raw_delta = batch["raw_delta"].detach()
+        if action.dim() == 3:
+            action_flat = action.reshape(N, action.shape[-1])  # (N, K)
+            delta_flat = delta.reshape(N, delta.shape[-1])  # (N, K)
+            raw_delta_flat = raw_delta.reshape(N, raw_delta.shape[-1])  # (N, K)
+        else:
+            action_flat = action.reshape(N)  # (N,)
+            delta_flat = delta.reshape(N)  # (N,)
+            raw_delta_flat = raw_delta.reshape(N)  # (N,)
         log_prob_old_flat = batch["log_prob"].detach().reshape(N)  # (N,)
         value_old_flat = batch["value"].detach().reshape(N)  # (N,)
         

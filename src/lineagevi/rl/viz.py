@@ -183,6 +183,7 @@ def inspect_policy(
     policy,
     obs: torch.Tensor,
     n_samples: int = 100,
+    actions_per_step: int = 1,
 ) -> dict:
     """
     Inspect policy behavior: action probabilities, magnitude distributions, entropy.
@@ -239,9 +240,13 @@ def inspect_policy(
         actions_sampled = []
         deltas_sampled = []
         for _ in range(n_samples):
-            action, delta, _, _ = policy.sample(obs_batch, deterministic=False)
-            actions_sampled.append(action.item())
-            deltas_sampled.append(delta.item())
+            action, delta, _, _ = policy.sample(obs_batch, deterministic=False, n_actions=actions_per_step)
+            if action.numel() == 1:
+                actions_sampled.append(action.item())
+                deltas_sampled.append(delta.item())
+            else:
+                actions_sampled.extend(action.flatten().cpu().numpy().tolist())
+                deltas_sampled.extend(delta.flatten().cpu().numpy().tolist())
         
         actions_sampled = np.array(actions_sampled)
         deltas_sampled = np.array(deltas_sampled)
@@ -280,6 +285,7 @@ def rollout_agent(
     process_idx: Optional[torch.Tensor] = None,
     deterministic: bool = True,
     deterministic_action: bool = False,
+    actions_per_step: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Roll out agent trajectory using policy.
@@ -337,7 +343,7 @@ def rollout_agent(
         obs_tensor = obs_tensor.to(device).float()
         
         with torch.no_grad():
-            if deterministic_action:
+            if actions_per_step == 1 and deterministic_action:
                 # Argmax action, sampled magnitude
                 action_logits, _, _, _ = policy.forward(obs_tensor.unsqueeze(0))
                 action = torch.argmax(action_logits, dim=1).item()
@@ -353,7 +359,7 @@ def rollout_agent(
                 delta_clip = getattr(policy, "delta_clip", None)
                 if delta_clip is not None:
                     delta = float(np.clip(delta, -delta_clip, delta_clip))
-            elif deterministic:
+            elif actions_per_step == 1 and deterministic:
                 # Deterministic: argmax for action, mean for magnitude
                 action_logits, magnitude_mu, _, _ = policy.forward(obs_tensor.unsqueeze(0))
                 action = torch.argmax(action_logits, dim=1).item()
@@ -371,9 +377,13 @@ def rollout_agent(
                 if delta_clip is not None:
                     delta = float(np.clip(delta, -delta_clip, delta_clip))
             else:
-                action, delta_tensor, _, _ = policy.sample(obs_tensor.unsqueeze(0), deterministic=False)
-                action = action.item()
-                delta = delta_tensor.item()
+                # For k>1 or stochastic sampling, use policy sampler
+                action, delta_tensor, _, _ = policy.sample(
+                    obs_tensor.unsqueeze(0),
+                    deterministic=deterministic or deterministic_action,
+                    n_actions=actions_per_step,
+                )
+                delta = delta_tensor.squeeze(0)
         
         # Step environment
         obs_next, reward, done, info_next = env.step((action, delta))
@@ -383,8 +393,14 @@ def rollout_agent(
         # Compute distance to actual goal
         distance = torch.norm(z_current - z_goal, p=2).item()
         distances.append(distance)
-        actions.append(action)
-        deltas.append(delta)
+        if torch.is_tensor(action):
+            actions.append(action.cpu().numpy())
+        else:
+            actions.append(action)
+        if torch.is_tensor(delta):
+            deltas.append(delta.cpu().numpy())
+        else:
+            deltas.append(delta)
         
         if done:
             break
@@ -818,6 +834,8 @@ def main():
                         help="Near-goal emphasis exponent p for scaled progress (default: use checkpoint config)")
     parser.add_argument("--progress_weight_c", type=float, default=None,
                         help="Near-goal emphasis offset c for scaled progress (default: use checkpoint config)")
+    parser.add_argument("--actions_per_step", type=int, default=None,
+                        help="Number of action draws per step (default: use checkpoint config or 1)")
     
     args = parser.parse_args()
     
@@ -906,6 +924,7 @@ def main():
     reward_mode = args.reward_mode if args.reward_mode is not None else env_config.get("reward_mode", "plain")
     progress_weight_p = args.progress_weight_p if args.progress_weight_p is not None else env_config.get("progress_weight_p", 0.0)
     progress_weight_c = args.progress_weight_c if args.progress_weight_c is not None else env_config.get("progress_weight_c", 0.1)
+    actions_per_step = args.actions_per_step if args.actions_per_step is not None else env_config.get("actions_per_step", 1)
     env = LatentVelocityEnv(
         adapter=adapter,
         centroids=centroids,
@@ -1078,7 +1097,7 @@ def main():
             obs_init_tensor = torch.from_numpy(obs_init) if isinstance(obs_init, np.ndarray) else obs_init
             obs_init_tensor = obs_init_tensor.to(device).float()
             
-            policy_info = inspect_policy(policy, obs_init_tensor, n_samples=1000)
+            policy_info = inspect_policy(policy, obs_init_tensor, n_samples=1000, actions_per_step=actions_per_step)
             
             print(f"  Action entropy: {policy_info['action_entropy']:.4f} (max: {np.log(policy.n_latent + 1):.4f})")
             print(f"  Top 5 action probabilities:")
@@ -1119,6 +1138,7 @@ def main():
             env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx,
             deterministic=args.deterministic,
             deterministic_action=args.deterministic_action,
+            actions_per_step=actions_per_step,
         )
         
         # Compute metrics

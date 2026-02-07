@@ -26,6 +26,7 @@ def evaluate_episode(
     cluster_idx: Optional[torch.Tensor] = None,
     process_idx: Optional[torch.Tensor] = None,
     max_steps: int = 200,
+    actions_per_step: int = 1,
 ) -> Dict:
     """
     Run a single evaluation episode.
@@ -56,14 +57,20 @@ def evaluate_episode(
         obs_tensor = obs_tensor.to(next(policy.parameters()).device).float()
         
         with torch.no_grad():
-            action, delta, _, _ = policy.sample(obs_tensor, deterministic=False)
+            action, delta, _, _ = policy.sample(obs_tensor, deterministic=False, n_actions=actions_per_step)
         
         # Step environment
-        obs_next, reward, done, info_next = env.step((action.item(), delta.item()))
+        obs_next, reward, done, info_next = env.step((action, delta))
         
         # Store trajectory
-        trajectory["actions"].append(action.item())
-        trajectory["deltas"].append(delta.item())
+        if torch.is_tensor(action):
+            trajectory["actions"].append(action.cpu().numpy())
+        else:
+            trajectory["actions"].append(action)
+        if torch.is_tensor(delta):
+            trajectory["deltas"].append(delta.cpu().numpy())
+        else:
+            trajectory["deltas"].append(delta)
         trajectory["rewards"].append(reward)
         trajectory["distances"].append(info_next["distance"])
         trajectory["z"].append(env.z.cpu().numpy())
@@ -154,6 +161,7 @@ def main():
     
     # Get environment config from checkpoint
     env_config = config.get("env", {})
+    actions_per_step = env_config.get("actions_per_step", 1)
     velocity_mode = env_config.get("velocity_mode", "decode_x")
     
     # Get use_negative_velocity from CLI or config
@@ -246,7 +254,15 @@ def main():
             
             # Run episode
             episode_info, trajectory = evaluate_episode(
-                env, policy, z0, goal_idx, x0, cluster_idx, process_idx, max_steps=args.max_steps
+                env,
+                policy,
+                z0,
+                goal_idx,
+                x0,
+                cluster_idx,
+                process_idx,
+                max_steps=args.max_steps,
+                actions_per_step=actions_per_step,
             )
             
             all_episodes.append(episode_info)
