@@ -327,8 +327,6 @@ def load_model(
             "n_hidden": "n_hidden",
             "cluster_key": "cluster_key",
             "cluster_embedding_dim": "cluster_embedding_dim",
-            "cls_encoding_key": "cls_encoding_key",
-            "cls_embedding_dim": "cls_embedding_dim",
         }
         for config_key, kwarg_key in config_mapping.items():
             if config_key in saved_config and saved_config[config_key] is not None:
@@ -337,11 +335,6 @@ def load_model(
     
     # Load state_dict to infer any remaining parameters
     state = torch.load(model_path, map_location=map_location)
-    
-    # Infer cls_embedding_dim from state_dict if not in config/kwargs
-    if "cls_embedding_dim" not in kwargs and "cls_embedding.embeddings.weight" in state:
-        cls_embedding_dim = state["cls_embedding.embeddings.weight"].shape[1]
-        kwargs["cls_embedding_dim"] = cls_embedding_dim
     
     # Infer cluster_embedding_dim and cluster_key from state_dict if present
     # Check for both old and new key formats
@@ -622,9 +615,12 @@ def compute_cluster_embedding_similarity(
     >>> # Compute similarity matrix from AnnData
     >>> similarity_df = lineagevi.utils.compute_cluster_embedding_similarity(adata)
     >>> 
-    >>> # Plot as heatmap
-    >>> import lineagevi.plots as lv_plots
-    >>> fig, ax = lv_plots.plot_cluster_alignment_matrix(similarity_df, title='Cluster Embedding Similarity')
+    >>> # Plot as heatmap (e.g. with seaborn)
+    >>> import seaborn as sns
+    >>> import matplotlib.pyplot as plt
+    >>> fig, ax = plt.subplots(figsize=(8, 6))
+    >>> sns.heatmap(similarity_df, cmap='RdBu_r', center=0, annot=True, ax=ax)
+    >>> ax.set_title('Cluster Embedding Similarity')
     >>> 
     >>> # Use custom embeddings
     >>> embeddings = np.random.randn(10, 32)  # 10 clusters, 32-dim embeddings

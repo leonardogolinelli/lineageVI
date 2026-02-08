@@ -28,8 +28,6 @@ UNSPLICED_KEY="Mu"
 SPLICED_KEY="Ms"
 NN_KEY="indices"
 CLUSTER_EMBEDDING_DIM=8
-CLS_ENCODING_KEY=""
-CLS_EMBEDDING_DIM=8
 SEED=1
 
 # Training
@@ -120,14 +118,6 @@ while [[ $# -gt 0 ]]; do
             CLUSTER_EMBEDDING_DIM="$2"
             shift 2
             ;;
-        --cls_encoding_key)
-            CLS_ENCODING_KEY="$2"
-            shift 2
-            ;;
-        --cls_embedding_dim)
-            CLS_EMBEDDING_DIM="$2"
-            shift 2
-            ;;
         # Training
         --K)
             K="$2"
@@ -211,8 +201,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --spliced_key KEY        Spliced layer key (default: spliced)"
             echo "  --nn_key KEY             Neighbor indices key (default: indices)"
             echo "  --cluster_embedding_dim N Cluster embedding dim (default: 8)"
-            echo "  --cls_encoding_key KEY    CLS encoding key in adata.obs"
-            echo "  --cls_embedding_dim N     CLS embedding dim (default: 8)"
             echo ""
             echo "TRAINING OPTIONS:"
             echo "  --K N                    Number of neighbors for loss (default: 10)"
@@ -351,10 +339,6 @@ PYTHON_ARGS+=(--unspliced_key "$UNSPLICED_KEY")
 PYTHON_ARGS+=(--spliced_key "$SPLICED_KEY")
 PYTHON_ARGS+=(--nn_key "$NN_KEY")
 PYTHON_ARGS+=(--cluster_embedding_dim "$CLUSTER_EMBEDDING_DIM")
-if [[ -n "$CLS_ENCODING_KEY" ]]; then
-    PYTHON_ARGS+=(--cls_encoding_key "$CLS_ENCODING_KEY")
-fi
-PYTHON_ARGS+=(--cls_embedding_dim "$CLS_EMBEDDING_DIM")
 if [[ -n "$SEED" ]]; then
     PYTHON_ARGS+=(--seed "$SEED")
 fi

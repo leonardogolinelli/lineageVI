@@ -56,8 +56,6 @@ def main():
     parser.add_argument("--spliced_key", type=str, default="spliced", help="Spliced layer key")
     parser.add_argument("--nn_key", type=str, default="indices", help="Neighbor indices key")
     parser.add_argument("--cluster_embedding_dim", type=int, default=8, help="Cluster embedding dim")
-    parser.add_argument("--cls_encoding_key", type=str, help="CLS encoding key in adata.obs")
-    parser.add_argument("--cls_embedding_dim", type=int, default=8, help="CLS embedding dim")
     def seed_type(x):
         """Convert string to int or None."""
         if x is None or x == "" or (isinstance(x, str) and x.lower() == "none"):
@@ -123,8 +121,6 @@ def main():
         seed=args.seed,
         cluster_key=args.cluster_key,
         cluster_embedding_dim=args.cluster_embedding_dim,
-        cls_encoding_key=args.cls_encoding_key,
-        cls_embedding_dim=args.cls_embedding_dim,
     )
     
     # Train model

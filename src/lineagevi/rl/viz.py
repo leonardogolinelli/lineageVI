@@ -70,11 +70,10 @@ def rollout_baseline(
     T: int,
     x0: Optional[torch.Tensor] = None,
     cluster_idx: Optional[torch.Tensor] = None,
-    process_idx: Optional[torch.Tensor] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Roll out baseline trajectory (no perturbations, just velocity flow).
-    
+
     Parameters
     ----------
     env : LatentVelocityEnv
@@ -91,9 +90,7 @@ def rollout_baseline(
         Initial gene expression.
     cluster_idx : torch.Tensor, optional
         Cluster index.
-    process_idx : torch.Tensor, optional
-        Process index.
-    
+
     Returns
     -------
     z_trajectory : np.ndarray
@@ -101,13 +98,13 @@ def rollout_baseline(
     distances : np.ndarray
         Distances to goal of shape (T+1,).
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
-    
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, goal_state=z_goal)
+
     z_trajectory = [z0.cpu().numpy()]
     # Compute distance to actual goal (not just centroid)
     initial_dist = torch.norm(z0 - z_goal, p=2).item()
     distances = [initial_dist]
-    
+
     for t in range(T):
         # No perturbation: action = 0, delta = 0
         obs_next, reward, done, info_next = env.step((0, 0.0))
@@ -134,14 +131,13 @@ def rollout_reachability_baseline(
     delta_max: float,
     x0: Optional[torch.Tensor] = None,
     cluster_idx: Optional[torch.Tensor] = None,
-    process_idx: Optional[torch.Tensor] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Greedy coordinate-descent baseline for reachability.
-    
+
     Picks the coordinate with largest absolute error and applies a clipped step.
     """
-    obs, info = env.reset(z0, goal_idx=0, x0=x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
+    obs, info = env.reset(z0, goal_idx=0, x0=x0, cluster_idx=cluster_idx, goal_state=z_goal)
     
     z_trajectory = [z0.cpu().numpy()]
     initial_dist = torch.norm(z0 - z_goal, p=2).item()
@@ -282,7 +278,6 @@ def rollout_agent(
     T: int,
     x0: Optional[torch.Tensor] = None,
     cluster_idx: Optional[torch.Tensor] = None,
-    process_idx: Optional[torch.Tensor] = None,
     deterministic: bool = True,
     deterministic_action: bool = False,
     actions_per_step: int = 1,
@@ -308,8 +303,6 @@ def rollout_agent(
         Initial gene expression.
     cluster_idx : torch.Tensor, optional
         Cluster index.
-    process_idx : torch.Tensor, optional
-        Process index.
     deterministic : bool
         If True, use argmax for discrete action and mean for magnitude.
     deterministic_action : bool
@@ -326,17 +319,17 @@ def rollout_agent(
     deltas : np.ndarray
         Perturbation magnitudes of shape (T,).
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
-    
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, goal_state=z_goal)
+
     z_trajectory = [z0.cpu().numpy()]
     # Compute distance to actual goal (not just centroid)
     initial_dist = torch.norm(z0 - z_goal, p=2).item()
     distances = [initial_dist]
     actions = []
     deltas = []
-    
+
     device = next(policy.parameters()).device
-    
+
     for t in range(T):
         # Get action from policy
         obs_tensor = torch.from_numpy(obs) if isinstance(obs, np.ndarray) else obs
@@ -894,21 +887,14 @@ def main():
     # Create adapter
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode=velocity_mode)
     
-    # Get cluster/process indices
+    # Get cluster indices
     cluster_indices = None
-    process_indices = None
     if vae.model.cluster_key is not None:
         cluster_labels = adata.obs[vae.model.cluster_key]
         cluster_indices = torch.tensor([
             vae.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
         ], dtype=torch.long, device=device)
-    
-    cls_encoding_key = vae.model.cls_encoding_key
-    process_labels = adata.obs[cls_encoding_key]
-    process_indices = torch.tensor([
-        vae.model.process_to_idx.get(str(label), 0) for label in process_labels
-    ], dtype=torch.long, device=device)
-    
+
     # Build embedding (shared across all experiments)
     print(f"Building {args.embedding.upper()} embedding...")
     Z_all = z_all.cpu().numpy()
@@ -1037,42 +1023,26 @@ def main():
                     s = torch.from_numpy(s_mean).float().to(device)
                     x0 = torch.cat([u, s], dim=0)
         
-        # Get cluster/process indices for start cell
+        # Get cluster indices for start cell
         if start_cell_idx is not None:
             cluster_idx_val = cluster_indices[start_cell_idx].item() if cluster_indices is not None else None
-            process_idx_val = process_indices[start_cell_idx].item() if process_indices is not None else None
         else:
-            # When using centroid mode, compute mode of cluster/process indices from source lineage
             if args.source_lineage is not None:
                 source_mask = (adata.obs[args.lineage_key] == args.source_lineage).values
                 if cluster_indices is not None:
                     source_cluster_indices = cluster_indices[source_mask].cpu().numpy()
-                    if len(source_cluster_indices) > 0:
-                        cluster_idx_val = int(np.bincount(source_cluster_indices).argmax())
-                    else:
-                        cluster_idx_val = None
+                    cluster_idx_val = int(np.bincount(source_cluster_indices).argmax()) if len(source_cluster_indices) > 0 else None
                 else:
                     cluster_idx_val = None
-                if process_indices is not None:
-                    source_process_indices = process_indices[source_mask].cpu().numpy()
-                    if len(source_process_indices) > 0:
-                        process_idx_val = int(np.bincount(source_process_indices).argmax())
-                    else:
-                        process_idx_val = None
-                else:
-                    process_idx_val = None
             else:
                 cluster_idx_val = None
-                process_idx_val = None
-        
-        # Convert to scalar tensors for rollout functions (model expects tensors, handles 0-dim by unsqueezing)
+
         cluster_idx = torch.tensor(cluster_idx_val, dtype=torch.long, device=device) if cluster_idx_val is not None else None
-        process_idx = torch.tensor(process_idx_val, dtype=torch.long, device=device) if process_idx_val is not None else None
-        
+
         # Roll out baseline trajectory
         print("Rolling out baseline trajectory...")
         z_baseline, distances_baseline = rollout_baseline(
-            env, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx
+            env, z0, goal_idx, z_goal, args.T, x0, cluster_idx
         )
 
         if args.reachability_test:
@@ -1085,7 +1055,7 @@ def main():
             
             print(f"Running reachability baseline (delta_max={baseline_delta_max})...")
             _, distances_greedy, _, _ = rollout_reachability_baseline(
-                env, z0, z_goal, args.T, baseline_delta_max, x0, cluster_idx, process_idx
+                env, z0, z_goal, args.T, baseline_delta_max, x0, cluster_idx
             )
             best_distance = float(np.min(distances_greedy))
             print(f"Reachability baseline best distance: {best_distance:.4f}")
@@ -1093,7 +1063,7 @@ def main():
         # Inspect policy at initial state (first experiment only)
         if example_idx == 0:
             print("\nInspecting policy at initial state...")
-            obs_init, _ = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_state=z_goal)
+            obs_init, _ = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, goal_state=z_goal)
             obs_init_tensor = torch.from_numpy(obs_init) if isinstance(obs_init, np.ndarray) else obs_init
             obs_init_tensor = obs_init_tensor.to(device).float()
             
@@ -1135,7 +1105,7 @@ def main():
         # Roll out agent trajectory
         print(f"\nRolling out agent trajectory (deterministic={args.deterministic}, deterministic_action={args.deterministic_action})...")
         z_agent, distances_agent, actions, deltas = rollout_agent(
-            env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx,
+            env, policy, z0, goal_idx, z_goal, args.T, x0, cluster_idx,
             deterministic=args.deterministic,
             deterministic_action=args.deterministic_action,
             actions_per_step=actions_per_step,

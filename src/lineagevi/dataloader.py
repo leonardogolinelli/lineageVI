@@ -4,7 +4,7 @@ import numpy as np
 import scipy.sparse as sp
 import scanpy as sc
 import random
-from typing import Optional
+from typing import Optional, Union, Sequence
 
 class RegimeDataset(Dataset):
     """
@@ -56,16 +56,15 @@ class RegimeDataset(Dataset):
         nn_key: str = 'indices',
         cluster_key: Optional[str] = None,
         cluster_to_idx: Optional[dict] = None,
-        cls_encoding_key: Optional[str] = None,
-        process_to_idx: Optional[dict] = None,
+        indices: Optional[Union[Sequence[int], np.ndarray]] = None,
     ):
         self.adata        = adata
         self.K            = K
+        self.subset_indices = np.asarray(indices, dtype=np.int64) if indices is not None else None
         self.unspliced_key = unspliced_key
         self.spliced_key  = spliced_key
         self.latent_key   = latent_key
         self.cluster_key  = cluster_key
-        self.cls_encoding_key = cls_encoding_key
 
         # kNN indices from adata.uns['indices']
         indices = adata.uns.get(nn_key)
@@ -92,26 +91,15 @@ class RegimeDataset(Dataset):
         else:
             self.cluster_indices = None
 
-        # Process indices (always present - use 'cls_encoding' if cls_encoding_key not provided)
-        if cls_encoding_key is None or cls_encoding_key not in adata.obs.columns:
-            # Use 'cls_encoding' column (created during model initialization)
-            if 'cls_encoding' not in adata.obs.columns:
-                # Fallback: create 'cls_encoding' with 'Unspecified'
-                adata.obs['cls_encoding'] = 'Unspecified'
-            process_labels = adata.obs['cls_encoding']
-        else:
-            process_labels = adata.obs[cls_encoding_key]
-        
-        if process_to_idx is None:
-            raise ValueError("process_to_idx is required")
-        
-        # Map process labels to indices
-        process_idx_array = np.array([process_to_idx.get(str(label), 0) for label in process_labels])
-        self.process_indices = torch.from_numpy(process_idx_array.astype(np.int64))
-
         # will load latent z at switch to regime 2
         self.latent_data = None
         self.first_regime = True
+
+    def _effective_len(self) -> int:
+        return len(self.subset_indices) if self.subset_indices is not None else len(self.x)
+
+    def _effective_idx(self, i: int) -> int:
+        return int(self.subset_indices[i]) if self.subset_indices is not None else i
 
     def set_regime(self, first: bool):
         """
@@ -134,30 +122,30 @@ class RegimeDataset(Dataset):
             self.latent_data = torch.from_numpy(np.asarray(z, dtype=np.float32))
 
     def __len__(self):
-        return len(self.x)
+        return self._effective_len()
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, i: int):
+        idx = self._effective_idx(i)
         # exclude self (position 0), take next K neighbors
         neigh_idx = self.nn_indices[idx, 1:self.K+1]
         x_neigh   = self.x[neigh_idx]  # (K, G)
-        process_idx = self.process_indices[idx]  # Always present
 
         if self.first_regime:
             x = self.x[idx]
             if self.cluster_indices is not None:
                 cluster_idx = self.cluster_indices[idx]
-                return x, idx, x_neigh, cluster_idx, process_idx
+                return x, idx, x_neigh, cluster_idx
             else:
-                return x, idx, x_neigh, process_idx      # you only need x and its neighs
+                return x, idx, x_neigh
         else:
             x       = self.x[idx]
             z       = self.latent_data[idx]
             z_neigh = self.latent_data[neigh_idx]
             if self.cluster_indices is not None:
                 cluster_idx = self.cluster_indices[idx]
-                return x, idx, x_neigh, z, z_neigh, cluster_idx, process_idx
+                return x, idx, x_neigh, z, z_neigh, cluster_idx
             else:
-                return x, idx, x_neigh, z, z_neigh, process_idx
+                return x, idx, x_neigh, z, z_neigh
 
 def make_dataloader(
     adata: sc.AnnData,
@@ -173,8 +161,7 @@ def make_dataloader(
     seed: Optional[int] = None,
     cluster_key: Optional[str] = None,
     cluster_to_idx: Optional[dict] = None,
-    cls_encoding_key: Optional[str] = None,
-    process_to_idx: Optional[dict] = None,
+    indices: Optional[Union[Sequence[int], np.ndarray]] = None,
 ) -> DataLoader:
     """
     Create a PyTorch DataLoader for LineageVI training.
@@ -239,8 +226,7 @@ def make_dataloader(
         nn_key=nn_key,
         cluster_key=cluster_key,
         cluster_to_idx=cluster_to_idx,
-        cls_encoding_key=cls_encoding_key,
-        process_to_idx=process_to_idx,
+        indices=indices,
     )
     ds.set_regime(first_regime)
 

@@ -119,11 +119,10 @@ class VelocityVAEAdapter:
         z: torch.Tensor,
         x: Optional[torch.Tensor] = None,
         cluster_indices: Optional[torch.Tensor] = None,
-        process_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute gene program velocities from latent states.
-        
+
         Parameters
         ----------
         z : torch.Tensor
@@ -134,10 +133,7 @@ class VelocityVAEAdapter:
         cluster_indices : torch.Tensor, optional
             Cluster indices of shape (batch_size,).
             Required if model uses cluster embeddings.
-        process_indices : torch.Tensor, optional
-            Process indices of shape (batch_size,).
-            Required (model always uses CLS embeddings).
-        
+
         Returns
         -------
         torch.Tensor
@@ -182,7 +178,7 @@ class VelocityVAEAdapter:
         # Compute velocity with no gradients
         with torch.no_grad():
             _, velocity_gp, _, _, _ = self.model._forward_velocity_decoder(
-                z, x, cluster_indices, process_indices
+                z, x, cluster_indices
             )
         
         return velocity_gp  # (batch_size, n_latent)

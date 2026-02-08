@@ -369,7 +369,6 @@ def generate_example_visualizations(
     lineage_key: str,
     output_dir: Path,
     cluster_indices: Optional[torch.Tensor],
-    process_indices: Optional[torch.Tensor],
     n_examples: int = 3,
     embedding_method: str = "pca",
     T_rollout: int = 50,
@@ -425,8 +424,6 @@ def generate_example_visualizations(
         Output directory.
     cluster_indices : torch.Tensor, optional
         Cluster indices.
-    process_indices : torch.Tensor, optional
-        Process indices.
     n_examples : int
         Number of example trajectories to visualize.
     embedding_method : str
@@ -579,38 +576,24 @@ def generate_example_visualizations(
                 # Fallback to centroid if no cells found
                 z_goal = centroids[goal_idx].to(device)
         
-        # Get cluster/process indices for start cell
+        # Get cluster indices for start cell
         if start_cell_idx is not None:
             cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
-            process_idx = process_indices[start_cell_idx] if process_indices is not None else None
         else:
-            # When using centroid, use representative cluster/process indices from source lineage
+            # When using centroid, use representative cluster indices from source lineage
             if source_lineage is not None:
                 source_mask = adata.obs[lineage_key] == source_lineage
                 source_cell_idx_array = np.where(source_mask)[0]
-                
                 if cluster_indices is not None:
-                    # Use the most common cluster index from source lineage
                     source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
                     unique, counts = np.unique(source_cluster_values, return_counts=True)
                     mode_cluster = unique[np.argmax(counts)]
                     cluster_idx = torch.tensor(int(mode_cluster), dtype=torch.long, device=device)
                 else:
                     cluster_idx = None
-                
-                if process_indices is not None:
-                    # Use the most common process index from source lineage
-                    source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
-                    unique, counts = np.unique(source_process_values, return_counts=True)
-                    mode_process = unique[np.argmax(counts)]
-                    process_idx = torch.tensor(int(mode_process), dtype=torch.long, device=device)
-                else:
-                    process_idx = None
             else:
-                # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
                 cluster_idx = cluster_indices[0] if cluster_indices is not None else None
-                process_idx = process_indices[0] if process_indices is not None else None
-        
+
         # Get initial x if needed
         x0 = None
         if adapter.velocity_mode == "fixed_x":
@@ -633,12 +616,12 @@ def generate_example_visualizations(
         
         # Roll out baseline trajectory
         z_baseline, distances_baseline = rollout_baseline(
-            single_env, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx, process_idx
+            single_env, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx
         )
-        
+
         # Roll out agent trajectory
         z_agent, distances_agent, actions, deltas = rollout_agent(
-            single_env, policy, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx, process_idx,
+            single_env, policy, z0, goal_idx, z_goal, T_rollout, x0, cluster_idx,
             deterministic=deterministic
         )
         
@@ -1019,22 +1002,15 @@ def main():
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode=velocity_mode)
     print(f"Created adapter with velocity_mode='{velocity_mode}'")
     
-    # Get cluster/process indices if model uses them
+    # Get cluster indices if model uses them
     cluster_indices = None
-    process_indices = None
     if vae.model.cluster_key is not None:
         cluster_labels = adata.obs[vae.model.cluster_key]
         cluster_indices = torch.tensor([
             vae.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
         ], dtype=torch.long, device=device)
-    
-    cls_encoding_key = vae.model.cls_encoding_key
-    process_labels = adata.obs[cls_encoding_key]
-    process_indices = torch.tensor([
-        vae.model.process_to_idx.get(str(label), 0) for label in process_labels
-    ], dtype=torch.long, device=device)
-    
-    # Create environment (cluster/process indices now passed per-reset, not in constructor)
+
+    # Create environment (cluster indices passed per-reset, not in constructor)
     batch_size = args.batch_size if args.batch_size is not None else training_config.get("batch_size", 64)
     dt = args.dt if args.dt is not None else env_config.get("dt", 0.1)
     # Get use_negative_velocity from CLI or config
@@ -1190,18 +1166,12 @@ def main():
         
         # Compute velocities using adapter (same as environment)
         with torch.no_grad():
-            # Get cluster/process indices for sampled cells
-            cluster_idx_sample = None
-            process_idx_sample = None
-            if cluster_indices is not None:
-                cluster_idx_sample = cluster_indices[sample_indices]
-            if process_indices is not None:
-                process_idx_sample = process_indices[sample_indices]
-            
+            # Get cluster indices for sampled cells
+            cluster_idx_sample = cluster_indices[sample_indices] if cluster_indices is not None else None
+
             v_sample = adapter.velocity(
                 z_sample,
                 cluster_indices=cluster_idx_sample,
-                process_indices=process_idx_sample,
             )  # (N_SAMPLE, n_latent)
             
             # Apply negative velocity if requested (same as environment)
@@ -1497,39 +1467,24 @@ def main():
             initial_distances = torch.norm(z0 - goal_z_batch, p=2, dim=1)
             env.eps_success = current_eps_success_pct * initial_distances
 
-            # Get per-cell cluster/process indices for sampled cells
+            # Get per-cell cluster indices for sampled cells
             cluster_idx_batch = None
-            process_idx_batch = None
             if cell_indices is not None:
                 if cluster_indices is not None:
                     cluster_idx_batch = cluster_indices[cell_indices]
-                if process_indices is not None:
-                    process_idx_batch = process_indices[cell_indices]
             else:
-                # When using centroid, use representative cluster/process indices from source lineage
+                # When using centroid, use representative cluster indices from source lineage
                 if source_lineage is not None:
                     source_mask = adata.obs[args.lineage_key] == source_lineage
                     source_cell_idx_array = np.where(source_mask)[0]
-
                     if cluster_indices is not None:
-                        # Use the most common cluster index from source lineage
                         source_cluster_values = cluster_indices[source_cell_idx_array].cpu().numpy()
                         unique, counts = np.unique(source_cluster_values, return_counts=True)
                         mode_cluster = unique[np.argmax(counts)]
                         cluster_idx_batch = torch.full((batch_size,), int(mode_cluster), dtype=torch.long, device=device)
-
-                    if process_indices is not None:
-                        # Use the most common process index from source lineage
-                        source_process_values = process_indices[source_cell_idx_array].cpu().numpy()
-                        unique, counts = np.unique(source_process_values, return_counts=True)
-                        mode_process = unique[np.argmax(counts)]
-                        process_idx_batch = torch.full((batch_size,), int(mode_process), dtype=torch.long, device=device)
                 else:
-                    # Fallback: use first cell's indices (shouldn't happen if source_lineage is set)
                     if cluster_indices is not None:
                         cluster_idx_batch = torch.full((batch_size,), cluster_indices[0].item(), dtype=torch.long, device=device)
-                    if process_indices is not None:
-                        process_idx_batch = torch.full((batch_size,), process_indices[0].item(), dtype=torch.long, device=device)
 
             # Get initial x if needed for fixed_x mode
             x0 = None
@@ -1553,7 +1508,7 @@ def main():
                     x0 = torch.cat([u, s], dim=1)  # (B, 2*n_genes)
 
             # Collect rollouts
-            batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, process_idx_batch, goal_states=goal_states)
+            batch = trainer.collect_rollouts(z0, goal_idx, T_rollout, x0, cluster_idx_batch, goal_states=goal_states)
 
             # Compute task metrics
             task_metrics = trainer.compute_task_metrics(batch)
@@ -1732,7 +1687,6 @@ def main():
             lineage_key=args.lineage_key,
             output_dir=output_dir,
             cluster_indices=cluster_indices,
-            process_indices=process_indices,
             n_examples=args.n_viz_trajectories,
             embedding_method=args.viz_embedding,
             T_rollout=T_rollout,

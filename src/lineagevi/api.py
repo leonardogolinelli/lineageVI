@@ -44,15 +44,7 @@ class LineageVI:
         will be learned and used in velocity prediction.
     cluster_embedding_dim : int, default 32
         Dimension of cluster embeddings. Used when cluster_key is provided.
-    cls_encoding_key : str, optional
-        Key in adata.obs for CLS encoding (biological processes). If provided, process-specific CLS
-        embeddings will be learned. If None or non-existent, a 'cls_encoding' column
-        will be created with all cells assigned to 'Unspecified' (single global CLS embedding).
-    cls_embedding_dim : int, default 32
-        Dimension of CLS (classification) embedding. The CLS embedding learns
-        process-specific global dynamics and is used in velocity prediction.
-        It is learned only in regime 2 (velocity prediction) and frozen in regime 1.
-    
+
     Attributes
     ----------
     adata : AnnData
@@ -96,19 +88,15 @@ class LineageVI:
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,
-        cls_encoding_key: Optional[str] = None,
-        cls_embedding_dim: int = 32,
     ):
         self.adata = adata
         self.model = LineageVIModel(
-            adata, 
-            n_hidden=n_hidden, 
-            mask_key=mask_key, 
+            adata,
+            n_hidden=n_hidden,
+            mask_key=mask_key,
             seed=seed,
             cluster_key=cluster_key,
             cluster_embedding_dim=cluster_embedding_dim,
-            cls_encoding_key=cls_encoding_key,
-            cls_embedding_dim=cls_embedding_dim,
         )
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
@@ -129,9 +117,21 @@ class LineageVI:
         K: int = 10,
         batch_size: int = 1024,
         lr: float = 1e-3,
+        lr_regime1: Optional[float] = None,
+        lr_regime2: Optional[float] = None,
         epochs1: int = 50,
         epochs2: int = 50,
         seeds: Tuple[int, int, int] = (0, 1, 2),
+        train_size: Optional[float] = None,
+        velocity_loss_weight_gene: float = 1.0,
+        velocity_loss_weight_gp: float = 1.0,
+        kl_weight_schedule: str = "none",
+        kl_weight: float = 1e-5,
+        kl_weight_min: float = 0.0,
+        kl_weight_max: float = 1e-5,
+        kl_weight_n_cycles: int = 2,
+        kl_cyclical_style: str = "triangle",
+        kl_cycle_ramp_frac: float = 0.5,
         output_dir: Optional[str] = None,
         verbose: int = 1,
         monitor_genes: Optional[List[str]] = None,
@@ -152,13 +152,42 @@ class LineageVI:
         batch_size : int, default 1024
             Batch size for training.
         lr : float, default 1e-3
-            Learning rate for optimization.
+            Default learning rate for both regimes (used when lr_regime1/lr_regime2 are not set).
+        lr_regime1 : float, optional
+            Learning rate for regime 1 (expression reconstruction). If None, uses lr.
+        lr_regime2 : float, optional
+            Learning rate for regime 2 (velocity prediction). If None, uses lr.
         epochs1 : int, default 50
             Number of epochs for regime 1 (expression reconstruction).
         epochs2 : int, default 50
             Number of epochs for regime 2 (velocity prediction).
         seeds : Tuple[int, int, int], default (0, 1, 2)
             Random seeds for (model initialization, regime 1, regime 2).
+        train_size : float, optional
+            Fraction of cells to use for training (0 < train_size < 1). The rest is used
+            for validation and both training and validation losses are logged each epoch.
+            If None, all cells are used for training and no validation loss is computed.
+        velocity_loss_weight_gene : float, default 1.0
+            Weight for the gene-level velocity loss (expression space).
+        velocity_loss_weight_gp : float, default 1.0
+            Weight for the gene program velocity loss (latent space).
+        kl_weight_schedule : str, default "none"
+            Schedule for KL weight in regime 1: "none" (constant), "linear" (anneal from
+            kl_weight_min to kl_weight_max), or "cyclical" (see kl_cyclical_style).
+        kl_weight : float, default 1e-5
+            Constant KL weight when kl_weight_schedule is "none".
+        kl_weight_min : float, default 0.0
+            Minimum KL weight for "linear" and "cyclical" schedules.
+        kl_weight_max : float, default 1e-5
+            Maximum KL weight for "linear" and "cyclical" schedules.
+        kl_weight_n_cycles : int, default 2
+            Number of cycles for "cyclical" schedule (ignored otherwise).
+        kl_cyclical_style : str, default "triangle"
+            When kl_weight_schedule is "cyclical": "triangle" (min->max->min per cycle)
+            or "fu" (ramp min->max over first kl_cycle_ramp_frac of each cycle, then hold at max).
+        kl_cycle_ramp_frac : float, default 0.5
+            For "linear": fraction of total epochs used for ramp min->max, then hold at max (1 = ramp all epochs).
+            For "fu" cyclical: fraction of each cycle used for ramp; remainder hold at max.
         output_dir : str, optional
             Directory to save model weights. Defaults to current directory.
         verbose : int, default 1
@@ -180,8 +209,10 @@ class LineageVI:
         -------
         Dict[str, List[float]]
             Training history with keys:
-            - 'regime1_loss': List of reconstruction losses for regime 1
-            - 'regime2_velocity_loss': List of velocity losses for regime 2
+            - 'regime1_loss', 'regime1_recon_loss', 'regime1_kl_loss': regime 1 training losses
+            - 'regime2_velocity_loss', 'regime2_velocity_loss_gene', 'regime2_velocity_loss_gp': regime 2 training losses
+            - 'regime1_val_loss', 'regime1_val_recon_loss', 'regime1_val_kl_loss': regime 1 validation (if train_size set)
+            - 'regime2_velocity_val_loss', 'regime2_velocity_val_loss_gene', 'regime2_velocity_val_loss_gp': regime 2 validation (if train_size set)
         
         Notes
         -----
@@ -193,11 +224,16 @@ class LineageVI:
         >>> # Basic training
         >>> history = linvi.fit()
         >>> 
+        >>> # Training with train/validation split (logs train and val loss)
+        >>> history = linvi.fit(train_size=0.9)
+        >>> 
         >>> # Custom training parameters
         >>> history = linvi.fit(
         ...     epochs1=100, epochs2=100, 
         ...     lr=5e-4, batch_size=512
         ... )
+        >>> # Separate learning rates per regime
+        >>> history = linvi.fit(lr_regime1=1e-3, lr_regime2=5e-4)
         >>> 
         >>> # Training with monitoring
         >>> history = linvi.fit(
@@ -223,9 +259,21 @@ class LineageVI:
             K=K,
             batch_size=batch_size,
             lr=lr,
+            lr_regime1=lr_regime1,
+            lr_regime2=lr_regime2,
             epochs1=epochs1,
             epochs2=epochs2,
             seeds=seeds,
+            train_size=train_size,
+            velocity_loss_weight_gene=velocity_loss_weight_gene,
+            velocity_loss_weight_gp=velocity_loss_weight_gp,
+            kl_weight_schedule=kl_weight_schedule,
+            kl_weight=kl_weight,
+            kl_weight_min=kl_weight_min,
+            kl_weight_max=kl_weight_max,
+            kl_weight_n_cycles=kl_weight_n_cycles,
+            kl_cyclical_style=kl_cyclical_style,
+            kl_cycle_ramp_frac=kl_cycle_ramp_frac,
             output_dir=(output_dir or "."),
             monitor_genes=monitor_genes,
             monitor_negative_velo=monitor_negative_velo,
@@ -519,200 +567,6 @@ class LineageVI:
             spliced_key=spliced_key,
         )
     
-    def compute_cluster_alignment(
-        self,
-        adata: Optional[sc.AnnData] = None,
-        source_cluster: str = None,
-        target_cluster: str = None,
-        *,
-        cluster_key: str = 'clusters',
-        use_gp_space: bool = False,
-        velocity_key: Optional[str] = None,
-        state_key: Optional[str] = None,
-        aggregation: str = 'mean',
-    ) -> float:
-        """
-        Compute alignment metric: how much do velocities in source_cluster
-        point toward target_cluster's state.
-        
-        This metric measures the directional alignment between velocity vectors
-        of cells in the source cluster and the direction from those cells to
-        the target cluster's centroid.
-        
-        Parameters
-        ----------
-        adata : AnnData, optional
-            Single-cell data with computed velocities and states.
-            If None, uses self.adata.
-        source_cluster : str
-            Name of the source cluster (cells with velocities).
-        target_cluster : str
-            Name of the target cluster (direction target).
-        cluster_key : str, default 'clusters'
-            Key in adata.obs containing cluster labels.
-        use_gp_space : bool, default False
-            If True, use gene program space (GP velocities and GP states).
-            If False, use gene expression space (gene velocities and spliced states).
-        velocity_key : str, optional
-            Key for velocities:
-            - If use_gp_space=True: key in adata.obsm (default: 'velocity_gp')
-            - If use_gp_space=False: key in adata.layers (default: 'velocity')
-        state_key : str, optional
-            Key for current states:
-            - If use_gp_space=True: key in adata.obsm (default: 'mean')
-            - If use_gp_space=False: key in adata.layers (default: 'Ms')
-        aggregation : str, default 'mean'
-            How to aggregate alignment scores across cells in source cluster:
-            - 'mean': Simple mean of all cell alignments
-            - 'weighted_mean': Velocity magnitude-weighted mean
-        
-        Returns
-        -------
-        float
-            Alignment score in [-1, 1]:
-            - 1.0: Perfect alignment (all velocities point toward target)
-            - 0.0: Orthogonal (no alignment)
-            - -1.0: Opposite direction (velocities point away from target)
-        
-        Examples
-        --------
-        >>> # Compute alignment in gene expression space
-        >>> alignment = linvi.compute_cluster_alignment(
-        ...     source_cluster='Alpha',
-        ...     target_cluster='Beta'
-        ... )
-        >>> 
-        >>> # Compute alignment in gene program space
-        >>> alignment_gp = linvi.compute_cluster_alignment(
-        ...     source_cluster='Alpha',
-        ...     target_cluster='Beta',
-        ...     use_gp_space=True
-        ... )
-        >>> 
-        >>> # Use weighted mean aggregation
-        >>> alignment_weighted = linvi.compute_cluster_alignment(
-        ...     source_cluster='Alpha',
-        ...     target_cluster='Beta',
-        ...     aggregation='weighted_mean'
-        ... )
-        """
-        return self.model.compute_cluster_alignment(
-            (adata or self.adata),
-            source_cluster=source_cluster,
-            target_cluster=target_cluster,
-            cluster_key=cluster_key,
-            use_gp_space=use_gp_space,
-            velocity_key=velocity_key,
-            state_key=state_key,
-            aggregation=aggregation,
-        )
-    
-    def compute_cluster_alignment_matrix(
-        self,
-        adata: Optional[sc.AnnData] = None,
-        *,
-        cluster_key: str = 'clusters',
-        use_gp_space: bool = False,
-        velocity_key: Optional[str] = None,
-        state_key: Optional[str] = None,
-        aggregation: str = 'mean',
-        normalize: bool = False,
-    ) -> pd.DataFrame:
-        """
-        Compute alignment matrix for all cluster pairs.
-        
-        Each entry (i, j) represents how much velocities in cluster i point
-        toward cluster j's state.
-        
-        Parameters
-        ----------
-        adata : AnnData, optional
-            Single-cell data with computed velocities and states.
-            If None, uses self.adata.
-        cluster_key : str, default 'clusters'
-            Key in adata.obs containing cluster labels.
-        use_gp_space : bool, default False
-            If True, use gene program space. If False, use gene expression space.
-        velocity_key : str, optional
-            Key for velocities:
-            - If use_gp_space=True: key in adata.obsm (default: 'velocity_gp')
-            - If use_gp_space=False: key in adata.layers (default: 'velocity')
-        state_key : str, optional
-            Key for states:
-            - If use_gp_space=True: key in adata.obsm (default: 'mean')
-            - If use_gp_space=False: key in adata.layers (default: 'Ms')
-        aggregation : str, default 'mean'
-            Aggregation method: 'mean' or 'weighted_mean'.
-        normalize : bool, default False
-            If True, normalize each row (source cluster) using softmax so that
-            alignment scores sum to 1. This converts alignment scores into a
-            probability distribution over target clusters for each source cluster.
-            Softmax preserves relative differences better than simple normalization
-            and avoids many scores becoming zero.
-        
-        Returns
-        -------
-        alignment_df : pd.DataFrame
-            Square DataFrame of shape (n_clusters, n_clusters) where:
-            - Rows (index) = source clusters
-            - Columns = target clusters (column labels appear at top when visualizing)
-            - Values = alignment scores in [-1, 1] (or normalized probabilities if normalize=True)
-            - Diagonal and failed pairs are NaN
-        
-        Examples
-        --------
-        >>> # Compute alignment matrix in gene expression space
-        >>> df = linvi.compute_cluster_alignment_matrix()
-        >>> 
-        >>> # Find which cluster Alpha points toward
-        >>> target_cluster = df.loc['Alpha'].idxmax()
-        >>> alignment = df.loc['Alpha', target_cluster]
-        >>> print(f"Alpha → {target_cluster}: {alignment:.3f}")
-        >>> 
-        >>> # Access specific alignment
-        >>> alignment_ab = df.loc['Alpha', 'Beta']
-        >>> 
-        >>> # Get normalized probability distribution over targets for Alpha
-        >>> df_normalized = linvi.compute_cluster_alignment_matrix(normalize=True)
-        >>> alpha_probs = df_normalized.loc['Alpha']  # Probability distribution over targets
-        >>> 
-        >>> # Visualize the alignment matrix (raw scores)
-        >>> import seaborn as sns
-        >>> import matplotlib.pyplot as plt
-        >>> fig, ax = plt.subplots(figsize=(10, 8))
-        >>> sns.heatmap(df, cmap='RdBu_r', center=0, annot=True, fmt='.2f', 
-        ...             xticklabels=True, yticklabels=True, ax=ax)
-        >>> ax.set_xlabel('Target Cluster')
-        >>> ax.set_ylabel('Source Cluster')
-        >>> ax.set_title('Cluster Alignment Matrix')
-        >>> plt.tight_layout()
-        >>> plt.show()
-        >>> 
-        >>> # Visualize normalized matrix (probabilities) with labels on top
-        >>> # High probability = red, low probability = blue (using 'RdBu_r' colormap)
-        >>> fig, ax = plt.subplots(figsize=(10, 8))
-        >>> # 'RdBu_r' maps: low values (0) → blue, high values (1) → red
-        >>> sns.heatmap(df_normalized, cmap='RdBu_r', vmin=0, vmax=1, 
-        ...             annot=True, fmt='.3f', xticklabels=True, yticklabels=True, ax=ax)
-        >>> # Move x-axis ticks and labels to top
-        >>> ax.xaxis.tick_top()
-        >>> ax.xaxis.set_label_position('top')
-        >>> # Rotate x-axis labels vertically
-        >>> plt.setp(ax.xaxis.get_majorticklabels(), rotation=90)
-        >>> ax.set_title('Normalized Cluster Alignment Matrix (Probabilities)')
-        >>> plt.tight_layout()
-        >>> plt.show()
-        """
-        return self.model.compute_cluster_alignment_matrix(
-            (adata or self.adata),
-            cluster_key=cluster_key,
-            use_gp_space=use_gp_space,
-            velocity_key=velocity_key,
-            state_key=state_key,
-            aggregation=aggregation,
-            normalize=normalize,
-        )
-    
     def _recompute_velocities_from_mean(self, adata: sc.AnnData):
         """
         Recompute velocities from a given mean (latent representation) without running the encoder.
@@ -757,21 +611,14 @@ class LineageVI:
             cluster_indices = torch.tensor([
                 self.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
             ], dtype=torch.long, device=device)
-        
-        # Get process indices (always present)
-        cls_encoding_key = self.model.cls_encoding_key
-        process_labels = adata.obs[cls_encoding_key]
-        process_indices = torch.tensor([
-            self.model.process_to_idx.get(str(label), 0) for label in process_labels
-        ], dtype=torch.long, device=device)
-        
+
         # Set model to velocity regime
         self.model.first_regime = False
-        
+
         # Compute velocities from the perturbed mean
         with torch.no_grad():
             velocity, velocity_gp, alpha, beta, gamma = self.model._forward_velocity_decoder(
-                z, mu_ms, cluster_indices, process_indices
+                z, mu_ms, cluster_indices
             )
         
         # Convert to numpy and save
@@ -850,23 +697,16 @@ class LineageVI:
         gp_uns_key: str = 'terms',
         source_cluster: Optional[str] = None,
         target_cluster: Optional[str] = None,
-        use_gp_space: bool = False,
-        normalize: bool = True,
-        aggregation: str = 'weighted_mean',
         compute_embedding_similarity: bool = True,
-        velocity_key: Optional[str] = None,
-        state_key: Optional[str] = None,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> Dict[str, Optional[pd.DataFrame]]:
         """
-        Evaluate how perturbations affect cluster alignment and embedding similarity.
+        Evaluate how perturbations affect cluster embedding similarity.
         
-        This method computes baseline metrics, applies a perturbation, recomputes
-        model outputs, and then computes post-perturbation metrics to quantify the
-        effects of the perturbation on:
-        - Directional alignment (how velocities point toward clusters)
-        - Cluster embedding similarity (cosine similarity between cluster embeddings)
-          Only computed for cluster label switching perturbations (cluster embeddings are
-          model parameters, independent of input data for GP/gene perturbations).
+        This method applies a perturbation, recomputes model outputs when needed,
+        and optionally computes cluster embedding similarity (cosine similarity
+        between cluster embeddings). Only meaningful for cluster label switching
+        perturbations (for GP/gene perturbations, cluster embeddings are model
+        parameters and do not change with input data).
         
         Parameters
         ----------
@@ -895,28 +735,15 @@ class LineageVI:
             Original cluster label to switch from (required if perturbation_type='cluster_labels').
         target_cluster : str, optional
             Target cluster label to switch to (required if perturbation_type='cluster_labels').
-        use_gp_space : bool, default False
-            If True, compute alignment in gene program space.
-        normalize : bool, default True
-            If True, normalize alignment scores using softmax.
-        aggregation : str, default 'weighted_mean'
-            Aggregation method: 'mean' or 'weighted_mean'.
         compute_embedding_similarity : bool, default True
-            If True, compute embedding similarity changes. Only meaningful for 
-            cluster label switching perturbations (for GP/gene perturbations, 
-            cluster embeddings are unchanged).
-        velocity_key : str, optional
-            Key for velocities (see compute_cluster_alignment_matrix for defaults).
-        state_key : str, optional
-            Key for states (see compute_cluster_alignment_matrix for defaults).
+            If True, compute embedding similarity. Only meaningful for
+            cluster label switching (for GP/gene perturbations, cluster
+            embeddings are unchanged).
         
         Returns
         -------
         results : dict
             Dictionary containing:
-            - 'baseline_alignment': DataFrame (baseline alignment matrix)
-            - 'perturbed_alignment': DataFrame (post-perturbation alignment matrix)
-            - 'alignment_delta': DataFrame (difference: perturbed - baseline)
             - 'baseline_similarity': DataFrame (baseline embedding similarity, if computed)
             - 'perturbed_similarity': DataFrame (post-perturbation similarity, if computed)
             - 'similarity_delta': DataFrame (difference: perturbed - baseline, if computed)
@@ -930,7 +757,7 @@ class LineageVI:
         ...     group_to_perturb='Alpha',
         ...     gps_to_perturb=['GP_1', 'GP_2'],
         ...     perturb_value=1.0,
-        ...     compute_embedding_similarity=False  # Cluster embeddings unchanged
+        ...     compute_embedding_similarity=False
         ... )
         >>> 
         >>> # Evaluate cluster label switching effects
@@ -939,14 +766,7 @@ class LineageVI:
         ...     perturbation_type='cluster_labels',
         ...     source_cluster='Alpha',
         ...     target_cluster='Beta',
-        ...     compute_embedding_similarity=True  # Cluster embeddings change
-        ... )
-        >>> 
-        >>> # Visualize alignment changes
-        >>> import lineagevi.plots as lv_plots
-        >>> fig, ax = lv_plots.plot_cluster_alignment_matrix(
-        ...     results['alignment_delta'],
-        ...     title='Alignment Change After Perturbation'
+        ...     compute_embedding_similarity=True
         ... )
         """
         if adata is None:
@@ -957,20 +777,7 @@ class LineageVI:
         if group_to_perturb is None:
             raise ValueError("group_to_perturb must be provided")
         
-        # 1. Compute baseline metrics
-        print("Computing baseline metrics...")
-        baseline_alignment = self.compute_cluster_alignment_matrix(
-            adata,
-            cluster_key=groupby_key,
-            use_gp_space=use_gp_space,
-            normalize=normalize,
-            aggregation=aggregation,
-            velocity_key=velocity_key,
-            state_key=state_key,
-        )
-        
-        # For GP/gene perturbations, cluster embeddings are unchanged (they're model parameters)
-        # Only compute similarity for cluster label switching
+        # 1. Compute baseline embedding similarity (only for cluster_labels)
         baseline_similarity = None
         if compute_embedding_similarity and perturbation_type == 'cluster_labels':
             baseline_similarity = utils.compute_cluster_embedding_similarity(adata)
@@ -1141,34 +948,18 @@ class LineageVI:
                     embeddings[source_idx].copy_(original_source_emb)
                     embeddings[target_idx].copy_(original_target_emb)
         
-        # 5. Compute post-perturbation metrics
-        print("Computing post-perturbation metrics...")
-        perturbed_alignment = self.compute_cluster_alignment_matrix(
-            adata_perturbed,
-            cluster_key=groupby_key,
-            use_gp_space=use_gp_space,
-            normalize=normalize,
-            aggregation=aggregation,
-            velocity_key=velocity_key,
-            state_key=state_key,
-        )
-        
+        # 5. Compute post-perturbation embedding similarity
         perturbed_similarity = None
         if compute_embedding_similarity and perturbation_type == 'cluster_labels':
+            print("Computing post-perturbation metrics...")
             perturbed_similarity = utils.compute_cluster_embedding_similarity(adata_perturbed)
         
-        # 6. Compute differences
-        print("Computing differences...")
-        alignment_delta = perturbed_alignment - baseline_alignment
-        
+        # 6. Compute similarity difference
         similarity_delta = None
-        if compute_embedding_similarity and perturbation_type == 'cluster_labels':
+        if compute_embedding_similarity and perturbation_type == 'cluster_labels' and baseline_similarity is not None and perturbed_similarity is not None:
             similarity_delta = perturbed_similarity - baseline_similarity
         
         return {
-            'baseline_alignment': baseline_alignment,
-            'perturbed_alignment': perturbed_alignment,
-            'alignment_delta': alignment_delta,
             'baseline_similarity': baseline_similarity,
             'perturbed_similarity': perturbed_similarity,
             'similarity_delta': similarity_delta,

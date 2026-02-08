@@ -74,21 +74,14 @@ def main():
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode="decode_x")
     print("Created adapter")
     
-    # Get cluster/process indices if model uses them
+    # Get cluster indices if model uses them
     cluster_indices = None
-    process_indices = None
     if vae.model.cluster_key is not None:
         cluster_labels = adata.obs[vae.model.cluster_key]
         cluster_indices = torch.tensor([
             vae.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
         ], dtype=torch.long, device=device)
-    
-    cls_encoding_key = vae.model.cls_encoding_key
-    process_labels = adata.obs[cls_encoding_key]
-    process_indices = torch.tensor([
-        vae.model.process_to_idx.get(str(label), 0) for label in process_labels
-    ], dtype=torch.long, device=device)
-    
+
     # Create environment
     env = VectorizedLatentVelocityEnv(
         adapter=adapter,
@@ -175,20 +168,14 @@ def main():
         # Get latent states for sampled cells
         z0 = z_all[cell_indices]
         
-        # Get per-cell indices
-        cluster_idx_batch = None
-        process_idx_batch = None
-        if cluster_indices is not None:
-            cluster_idx_batch = cluster_indices[cell_indices]
-        if process_indices is not None:
-            process_idx_batch = process_indices[cell_indices]
-        
+        # Get per-cell cluster indices
+        cluster_idx_batch = cluster_indices[cell_indices] if cluster_indices is not None else None
+
         # Collect rollouts
         batch = trainer.collect_rollouts(
-            z0, goal_idx, args.T_rollout, 
-            x0=None, 
-            cluster_idx=cluster_idx_batch, 
-            process_idx=process_idx_batch
+            z0, goal_idx, args.T_rollout,
+            x0=None,
+            cluster_idx=cluster_idx_batch,
         )
         
         # Update policy

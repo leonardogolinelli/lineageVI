@@ -86,7 +86,6 @@ class PPOTrainer:
         T_rollout: int,
         x0: Optional[torch.Tensor] = None,
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
-        process_idx: Optional[torch.Tensor] = None,  # (B,)
         goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for sample mode
     ) -> Dict[str, torch.Tensor]:
         """
@@ -104,9 +103,7 @@ class PPOTrainer:
             Initial gene expression for fixed_x mode.
         cluster_idx : torch.Tensor, optional
             Cluster indices of shape (batch_size,).
-        process_idx : torch.Tensor, optional
-            Process indices of shape (batch_size,).
-        
+
         Returns
         -------
         batch : dict
@@ -124,7 +121,7 @@ class PPOTrainer:
         batch_size = z0.shape[0]
         
         # Reset environment
-        obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx, goal_states=goal_states)
+        obs, info = self.env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, goal_states=goal_states)
         
         # Capture per-episode eps_success if present
         eps_success = self.env.eps_success

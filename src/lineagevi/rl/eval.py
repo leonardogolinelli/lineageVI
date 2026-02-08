@@ -24,7 +24,6 @@ def evaluate_episode(
     goal_idx: int,
     x0: Optional[torch.Tensor] = None,
     cluster_idx: Optional[torch.Tensor] = None,
-    process_idx: Optional[torch.Tensor] = None,
     max_steps: int = 200,
     actions_per_step: int = 1,
 ) -> Dict:
@@ -36,7 +35,7 @@ def evaluate_episode(
     episode_info : dict
         Episode statistics.
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx)
     
     trajectory = {
         "z": [z0.cpu().numpy()],
@@ -170,21 +169,14 @@ def main():
     # Create adapter
     adapter = VelocityVAEAdapter(vae.model, device, velocity_mode=velocity_mode)
     
-    # Get cluster/process indices if model uses them
+    # Get cluster indices if model uses them
     cluster_indices = None
-    process_indices = None
     if vae.model.cluster_key is not None:
         cluster_labels = adata.obs[vae.model.cluster_key]
         cluster_indices = torch.tensor([
             vae.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
         ], dtype=torch.long, device=device)
-    
-    cls_encoding_key = vae.model.cls_encoding_key
-    process_labels = adata.obs[cls_encoding_key]
-    process_indices = torch.tensor([
-        vae.model.process_to_idx.get(str(label), 0) for label in process_labels
-    ], dtype=torch.long, device=device)
-    
+
     # Create environment (single episode, indices passed per-reset)
     env = LatentVelocityEnv(
         adapter=adapter,
@@ -239,10 +231,9 @@ def main():
             # Use target goal
             goal_idx = target_goal_idx
             
-            # Get per-episode cluster/process indices
+            # Get per-episode cluster indices
             cluster_idx = cluster_indices[cell_idx] if cluster_indices is not None else None
-            process_idx = process_indices[cell_idx] if process_indices is not None else None
-            
+
             # Get initial x if needed
             x0 = None
             if velocity_mode == "fixed_x":
@@ -260,7 +251,6 @@ def main():
                 goal_idx,
                 x0,
                 cluster_idx,
-                process_idx,
                 max_steps=args.max_steps,
                 actions_per_step=actions_per_step,
             )

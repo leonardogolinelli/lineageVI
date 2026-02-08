@@ -38,7 +38,6 @@ class LatentVelocityEnv:
         alpha_stay: float = 0.0,
         perturb_clip: Optional[float] = None,
         cluster_indices: Optional[torch.Tensor] = None,
-        process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
         terminate_on_success: bool = False,
@@ -99,10 +98,9 @@ class LatentVelocityEnv:
         
         # Goal encoding: difference vector (z_goal - z_t)
         
-        # Cluster and process indices (fixed for episode)
+        # Cluster indices (fixed for episode)
         self.cluster_indices = cluster_indices
-        self.process_indices = process_indices
-        
+
         # Episode state
         self.z: Optional[torch.Tensor] = None
         self.goal_idx: Optional[int] = None
@@ -125,7 +123,6 @@ class LatentVelocityEnv:
         goal_idx: int,
         x0: Optional[torch.Tensor] = None,
         cluster_idx: Optional[torch.Tensor] = None,
-        process_idx: Optional[torch.Tensor] = None,
         goal_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """
@@ -141,9 +138,7 @@ class LatentVelocityEnv:
             Initial gene expression for fixed_x mode.
         cluster_idx : torch.Tensor, optional
             Cluster index (scalar tensor or int).
-        process_idx : torch.Tensor, optional
-            Process index (scalar tensor or int).
-        
+
         Returns
         -------
         obs : torch.Tensor
@@ -165,10 +160,9 @@ class LatentVelocityEnv:
             "state_change": [],
         }
         
-        # Store per-episode cluster/process indices
+        # Store per-episode cluster indices
         self.cluster_indices = cluster_idx
-        self.process_indices = process_idx
-        
+
         # Store goal state if provided (for sample mode), otherwise use centroid
         self.goal_state = None  # Will be set in reset if provided
         
@@ -268,7 +262,6 @@ class LatentVelocityEnv:
             v = self.adapter.velocity(
                 z_tilde.unsqueeze(0),
                 cluster_indices=self.cluster_indices,
-                process_indices=self.process_indices,
             ).squeeze(0)  # (n_latent,)
             
             # Apply negative velocity if requested
@@ -417,7 +410,6 @@ class VectorizedLatentVelocityEnv:
         alpha_stay: float = 0.0,
         perturb_clip: Optional[float] = None,
         cluster_indices: Optional[torch.Tensor] = None,
-        process_indices: Optional[torch.Tensor] = None,
         use_negative_velocity: bool = False,
         deactivate_velocity: bool = False,
         terminate_on_success: bool = False,
@@ -474,8 +466,7 @@ class VectorizedLatentVelocityEnv:
         # Goal encoding: difference vector (z_goal - z_t)
         
         self.cluster_indices = cluster_indices
-        self.process_indices = process_indices
-        
+
         # Batch state: (B, ...)
         self.z: Optional[torch.Tensor] = None  # (B, n_latent)
         self.goal_idx: Optional[torch.Tensor] = None  # (B,)
@@ -498,7 +489,6 @@ class VectorizedLatentVelocityEnv:
         goal_idx: torch.Tensor,  # (B,)
         x0: Optional[torch.Tensor] = None,  # (B, 2*n_genes) or (2*n_genes,)
         cluster_idx: Optional[torch.Tensor] = None,  # (B,)
-        process_idx: Optional[torch.Tensor] = None,  # (B,)
         goal_states: Optional[torch.Tensor] = None,  # (B, n_latent) - optional goal states for sample mode
     ) -> Tuple[torch.Tensor, Dict]:
         """
@@ -514,9 +504,7 @@ class VectorizedLatentVelocityEnv:
             Initial gene expression for fixed_x mode.
         cluster_idx : torch.Tensor, optional
             Cluster indices of shape (batch_size,).
-        process_idx : torch.Tensor, optional
-            Process indices of shape (batch_size,).
-        
+
         Returns
         -------
         obs : torch.Tensor
@@ -534,10 +522,9 @@ class VectorizedLatentVelocityEnv:
         self.milestone_level = torch.zeros(self.batch_size, device=self.adapter.device, dtype=torch.long)
         self.d0 = None
         
-        # Store per-batch cluster/process indices
+        # Store per-batch cluster indices
         self.cluster_idx = cluster_idx.to(self.adapter.device) if cluster_idx is not None else None
-        self.process_idx = process_idx.to(self.adapter.device) if process_idx is not None else None
-        
+
         self.step_norms = {
             "velocity_magnitude": [],
             "perturbation_magnitude": [],
@@ -651,7 +638,6 @@ class VectorizedLatentVelocityEnv:
             v = self.adapter.velocity(
                 z_tilde,
                 cluster_indices=self.cluster_idx,
-                process_indices=self.process_idx,
             )  # (B, n_latent)
             
             # Apply negative velocity if requested

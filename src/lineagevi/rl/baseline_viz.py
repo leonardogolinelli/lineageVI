@@ -69,11 +69,10 @@ def rollout_baseline(
     T: int,
     x0: Optional[torch.Tensor] = None,
     cluster_idx: Optional[torch.Tensor] = None,
-    process_idx: Optional[torch.Tensor] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Roll out baseline trajectory (no perturbations, just velocity flow).
-    
+
     Parameters
     ----------
     env : LatentVelocityEnv
@@ -90,9 +89,7 @@ def rollout_baseline(
         Initial gene expression.
     cluster_idx : torch.Tensor, optional
         Cluster index.
-    process_idx : torch.Tensor, optional
-        Process index.
-    
+
     Returns
     -------
     z_trajectory : np.ndarray
@@ -100,7 +97,7 @@ def rollout_baseline(
     distances : np.ndarray
         Distances to goal of shape (T+1,).
     """
-    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx, process_idx=process_idx)
+    obs, info = env.reset(z0, goal_idx, x0, cluster_idx=cluster_idx)
     
     z_trajectory = [z0.cpu().numpy()]
     # Compute distance to actual goal (not just centroid)
@@ -365,19 +362,12 @@ def main():
     
     # Get cluster/process indices
     cluster_indices = None
-    process_indices = None
     if vae.model.cluster_key is not None:
         cluster_labels = adata.obs[vae.model.cluster_key]
         cluster_indices = torch.tensor([
             vae.model.cluster_to_idx.get(str(label), 0) for label in cluster_labels
         ], dtype=torch.long, device=device)
-    
-    cls_encoding_key = vae.model.cls_encoding_key
-    process_labels = adata.obs[cls_encoding_key]
-    process_indices = torch.tensor([
-        vae.model.process_to_idx.get(str(label), 0) for label in process_labels
-    ], dtype=torch.long, device=device)
-    
+
     # Select start cell based on source_lineage and source_mode
     rng = np.random.RandomState(args.seed)
     if args.source_lineage is not None:
@@ -457,14 +447,13 @@ def main():
         s = torch.from_numpy(np.asarray(adata.layers[spliced_key][start_cell_idx])).float().to(device)
         x0 = torch.cat([u, s], dim=0)  # (2*n_genes,)
     
-    # Get cluster/process indices for start cell
+    # Get cluster indices for start cell
     cluster_idx = cluster_indices[start_cell_idx] if cluster_indices is not None else None
-    process_idx = process_indices[start_cell_idx] if process_indices is not None else None
-    
+
     # Roll out baseline trajectory
     print(f"Rolling out baseline trajectory for T={args.T} steps (T_max={T_max})...")
     z_trajectory, distances = rollout_baseline(
-        env, z0, goal_idx, z_goal, args.T, x0, cluster_idx, process_idx
+        env, z0, goal_idx, z_goal, args.T, x0, cluster_idx
     )
     
     print(f"Trajectory length: {len(z_trajectory)} steps")
