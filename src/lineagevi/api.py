@@ -125,18 +125,17 @@ class LineageVI:
         train_size: Optional[float] = None,
         velocity_loss_weight_gene: float = 1.0,
         velocity_loss_weight_gp: float = 1.0,
-        kl_weight_schedule: str = "none",
+        kl_weight_schedule: str = "linear",
         kl_weight: float = 1e-5,
         kl_weight_min: float = 0.0,
-        kl_weight_max: float = 1e-5,
-        kl_weight_n_cycles: int = 2,
-        kl_cyclical_style: str = "triangle",
-        kl_cycle_ramp_frac: float = 0.5,
+        kl_weight_max: float = 1e-1,
+        kl_cycle_ramp_frac: float = 0.2,
         output_dir: Optional[str] = None,
         verbose: int = 1,
         monitor_genes: Optional[List[str]] = None,
         monitor_negative_velo: bool = True,
         monitor_every_epochs: int = 1,
+        show_metrics: bool = True,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -171,23 +170,17 @@ class LineageVI:
             Weight for the gene-level velocity loss (expression space).
         velocity_loss_weight_gp : float, default 1.0
             Weight for the gene program velocity loss (latent space).
-        kl_weight_schedule : str, default "none"
-            Schedule for KL weight in regime 1: "none" (constant), "linear" (anneal from
-            kl_weight_min to kl_weight_max), or "cyclical" (see kl_cyclical_style).
+        kl_weight_schedule : str, default "linear"
+            Schedule for KL weight in regime 1: "none" (constant kl_weight), or "linear"
+            (anneal from kl_weight_min to kl_weight_max over first kl_cycle_ramp_frac of epochs, then hold at max).
         kl_weight : float, default 1e-5
             Constant KL weight when kl_weight_schedule is "none".
         kl_weight_min : float, default 0.0
-            Minimum KL weight for "linear" and "cyclical" schedules.
-        kl_weight_max : float, default 1e-5
-            Maximum KL weight for "linear" and "cyclical" schedules.
-        kl_weight_n_cycles : int, default 2
-            Number of cycles for "cyclical" schedule (ignored otherwise).
-        kl_cyclical_style : str, default "triangle"
-            When kl_weight_schedule is "cyclical": "triangle" (min->max->min per cycle)
-            or "fu" (ramp min->max over first kl_cycle_ramp_frac of each cycle, then hold at max).
-        kl_cycle_ramp_frac : float, default 0.5
+            Minimum KL weight for "linear" schedule.
+        kl_weight_max : float, default 1e-1
+            Maximum KL weight for "linear" schedule.
+        kl_cycle_ramp_frac : float, default 0.2
             For "linear": fraction of total epochs used for ramp min->max, then hold at max (1 = ramp all epochs).
-            For "fu" cyclical: fraction of each cycle used for ramp; remainder hold at max.
         output_dir : str, optional
             Directory to save model weights. Defaults to current directory.
         verbose : int, default 1
@@ -204,6 +197,9 @@ class LineageVI:
             Generate monitoring plots every N epochs. Plots are always generated at
             epoch 0 (before training starts) and the last epoch of each regime if 
             monitor_genes is provided.
+        show_metrics : bool, default True
+            If True, display the training loss curves plot as cell output (in addition to saving).
+            If False, only save plots to disk.
         
         Returns
         -------
@@ -271,13 +267,12 @@ class LineageVI:
             kl_weight=kl_weight,
             kl_weight_min=kl_weight_min,
             kl_weight_max=kl_weight_max,
-            kl_weight_n_cycles=kl_weight_n_cycles,
-            kl_cyclical_style=kl_cyclical_style,
             kl_cycle_ramp_frac=kl_cycle_ramp_frac,
             output_dir=(output_dir or "."),
             monitor_genes=monitor_genes,
             monitor_negative_velo=monitor_negative_velo,
             monitor_every_epochs=monitor_every_epochs,
+            show_metrics=show_metrics,
         )
         self.adata = engine.adata
         return history    
@@ -683,285 +678,4 @@ class LineageVI:
             source_cluster=source_cluster,
             target_cluster=target_cluster,
         )
-    
-    def evaluate_perturbation_effects(
-        self,
-        adata: Optional[sc.AnnData] = None,
-        *,
-        perturbation_type: str = 'gps',
-        groupby_key: str = 'clusters',
-        group_to_perturb: str = None,
-        perturb_value: float = 1.0,
-        genes_to_perturb: Optional[List[str]] = None,
-        gps_to_perturb: Optional[List[str]] = None,
-        gp_uns_key: str = 'terms',
-        source_cluster: Optional[str] = None,
-        target_cluster: Optional[str] = None,
-        compute_embedding_similarity: bool = True,
-    ) -> Dict[str, Optional[pd.DataFrame]]:
-        """
-        Evaluate how perturbations affect cluster embedding similarity.
-        
-        This method applies a perturbation, recomputes model outputs when needed,
-        and optionally computes cluster embedding similarity (cosine similarity
-        between cluster embeddings). Only meaningful for cluster label switching
-        perturbations (for GP/gene perturbations, cluster embeddings are model
-        parameters and do not change with input data).
-        
-        Parameters
-        ----------
-        adata : AnnData, optional
-            Single-cell data to perturb. If None, uses self.adata.
-        perturbation_type : str, default 'gps'
-            Type of perturbation:
-            - 'gps': Perturb gene program activations
-            - 'genes': Perturb gene expression
-            - 'cluster_labels': Switch cluster labels from source_cluster to target_cluster
-        groupby_key : str, default 'clusters'
-            Key in adata.obs containing group information.
-        group_to_perturb : str, optional
-            Name of group to perturb (required for 'gps' and 'genes' perturbations).
-        perturb_value : float, default 1.0
-            For GP perturbations: value to replace gene program activation with.
-            For gene perturbations: value to add to expression.
-            Not used for cluster label switching.
-        genes_to_perturb : list, optional
-            List of gene names to perturb (required if perturbation_type='genes').
-        gps_to_perturb : list, optional
-            List of gene program names to perturb (required if perturbation_type='gps').
-        gp_uns_key : str, default 'terms'
-            Key in adata.uns containing gene program names (for GP perturbations).
-        source_cluster : str, optional
-            Original cluster label to switch from (required if perturbation_type='cluster_labels').
-        target_cluster : str, optional
-            Target cluster label to switch to (required if perturbation_type='cluster_labels').
-        compute_embedding_similarity : bool, default True
-            If True, compute embedding similarity. Only meaningful for
-            cluster label switching (for GP/gene perturbations, cluster
-            embeddings are unchanged).
-        
-        Returns
-        -------
-        results : dict
-            Dictionary containing:
-            - 'baseline_similarity': DataFrame (baseline embedding similarity, if computed)
-            - 'perturbed_similarity': DataFrame (post-perturbation similarity, if computed)
-            - 'similarity_delta': DataFrame (difference: perturbed - baseline, if computed)
-        
-        Examples
-        --------
-        >>> # Evaluate GP perturbation effects
-        >>> results = vae.evaluate_perturbation_effects(
-        ...     adata,
-        ...     perturbation_type='gps',
-        ...     group_to_perturb='Alpha',
-        ...     gps_to_perturb=['GP_1', 'GP_2'],
-        ...     perturb_value=1.0,
-        ...     compute_embedding_similarity=False
-        ... )
-        >>> 
-        >>> # Evaluate cluster label switching effects
-        >>> results = vae.evaluate_perturbation_effects(
-        ...     adata,
-        ...     perturbation_type='cluster_labels',
-        ...     source_cluster='Alpha',
-        ...     target_cluster='Beta',
-        ...     compute_embedding_similarity=True
-        ... )
-        """
-        if adata is None:
-            adata = self.adata
-            if adata is None:
-                raise ValueError("adata must be provided either as parameter or via self.adata")
-        
-        if group_to_perturb is None:
-            raise ValueError("group_to_perturb must be provided")
-        
-        # 1. Compute baseline embedding similarity (only for cluster_labels)
-        baseline_similarity = None
-        if compute_embedding_similarity and perturbation_type == 'cluster_labels':
-            baseline_similarity = utils.compute_cluster_embedding_similarity(adata)
-        elif compute_embedding_similarity and perturbation_type in ['gps', 'genes']:
-            print("Note: Skipping cluster embedding similarity for GP/gene perturbations "
-                  "(cluster embeddings are model parameters, independent of input data).")
-        
-        # 2. Validate that genes/GPs exist before applying perturbation
-        if perturbation_type == 'genes':
-            if genes_to_perturb is None:
-                raise ValueError("genes_to_perturb must be provided when perturbation_type='genes'")
-            
-            # Convert to list if single string
-            if isinstance(genes_to_perturb, str):
-                genes_to_perturb = [genes_to_perturb]
-            
-            # Validate that all genes exist in adata
-            available_genes = set(adata.var_names)
-            missing_genes = [g for g in genes_to_perturb if g not in available_genes]
-            if missing_genes:
-                raise ValueError(
-                    f"The following genes are not present in adata.var_names: {missing_genes}. "
-                    f"Available genes: {list(available_genes)[:10]}..." if len(available_genes) > 10 else f"Available genes: {list(available_genes)}"
-                )
-        
-        elif perturbation_type == 'gps':
-            if gps_to_perturb is None:
-                raise ValueError("gps_to_perturb must be provided when perturbation_type='gps'")
-            
-            # Convert to list if single string
-            if isinstance(gps_to_perturb, str):
-                gps_to_perturb = [gps_to_perturb]
-            
-            # Validate that GP key exists in adata.uns
-            if gp_uns_key not in adata.uns:
-                raise KeyError(
-                    f"Gene program key '{gp_uns_key}' not found in adata.uns. "
-                    f"Available uns keys: {list(adata.uns.keys())}"
-                )
-            
-            # Validate that all GPs exist
-            available_gps = set(adata.uns[gp_uns_key])
-            missing_gps = [gp for gp in gps_to_perturb if gp not in available_gps]
-            if missing_gps:
-                raise ValueError(
-                    f"The following gene programs are not present in adata.uns['{gp_uns_key}']: {missing_gps}. "
-                    f"Available gene programs: {list(available_gps)[:10]}..." if len(available_gps) > 10 else f"Available gene programs: {list(available_gps)}"
-                )
-        elif perturbation_type == 'cluster_labels':
-            if source_cluster is None or target_cluster is None:
-                raise ValueError(
-                    "Both source_cluster and target_cluster must be provided when perturbation_type='cluster_labels'"
-                )
-            # Validate clusters exist in model
-            if self.model.cluster_embedding is None:
-                raise ValueError("Cluster embeddings are not enabled in this model")
-            if self.model.cluster_to_idx is None:
-                raise ValueError("Model does not have cluster_to_idx mapping")
-            available_clusters = set(self.model.cluster_to_idx.keys())
-            if source_cluster not in available_clusters:
-                raise ValueError(
-                    f"Source cluster '{source_cluster}' not found in model. "
-                    f"Available clusters: {list(available_clusters)}"
-                )
-            if target_cluster not in available_clusters:
-                raise ValueError(
-                    f"Target cluster '{target_cluster}' not found in model. "
-                    f"Available clusters: {list(available_clusters)}"
-                )
-        else:
-            raise ValueError(
-                f"perturbation_type must be 'genes', 'gps', or 'cluster_labels', got '{perturbation_type}'"
-            )
-        
-        # 3. Apply perturbation (work on a copy)
-        adata_perturbed = copy.deepcopy(adata)
-        
-        if perturbation_type == 'genes':
-            print(f"Applying gene perturbation to group '{group_to_perturb}'...")
-            self.perturb_genes(
-                adata_perturbed,
-                groupby_key=groupby_key,
-                group_to_perturb=group_to_perturb,
-                genes_to_perturb=genes_to_perturb,
-                perturb_value=perturb_value,
-            )
-            # Recompute model outputs after gene perturbation
-            print("Recomputing model outputs after perturbation...")
-            self.get_model_outputs(adata_perturbed, save_to_adata=True)
-        
-        elif perturbation_type == 'gps':
-            print(f"Applying GP perturbation to group '{group_to_perturb}'...")
-            # For GP perturbations, we need to modify the latent representation directly
-            # Get group indices
-            group_idxs = self.model._get_group_idxs(adata_perturbed, groupby_key=groupby_key)
-            cell_idx = group_idxs[group_to_perturb]
-            
-            # Get GP indices
-            gp_idx = self.model._get_gp_idxs(adata_perturbed, gp_uns_key, gps_to_perturb)
-            
-            # Modify the latent representation (mean) in adata.obsm
-            if 'mean' not in adata_perturbed.obsm:
-                raise ValueError(
-                    "adata.obsm['mean'] not found. Please run get_model_outputs(adata, save_to_adata=True) first."
-                )
-            
-            # Apply perturbation: replace GP activation values
-            # Make a deep copy of the array to ensure we're not modifying the original
-            mean_perturbed = np.array(adata_perturbed.obsm['mean'], copy=True)
-            
-            # Convert cell_idx to numpy array if needed
-            if isinstance(cell_idx, (int, np.integer)):
-                cell_idx = np.array([cell_idx])
-            elif not isinstance(cell_idx, np.ndarray):
-                cell_idx = np.array(cell_idx)
-            
-            # Convert gp_idx to numpy array if needed
-            if isinstance(gp_idx, (int, np.integer)):
-                gp_idx = np.array([gp_idx])
-            elif not isinstance(gp_idx, np.ndarray):
-                gp_idx = np.array(gp_idx)
-            
-            # Use broadcasting to set perturbation value for all cells and GPs
-            # mean_perturbed[cell_idx[:, None], gp_idx] broadcasts (n_cells, 1) with (n_gps,)
-            # to set values for all combinations
-            mean_perturbed[np.ix_(cell_idx, gp_idx)] = perturb_value
-            
-            # Assign the modified copy back to the perturbed adata
-            adata_perturbed.obsm['mean'] = mean_perturbed
-            
-            # For GP perturbations, we need to manually recompute velocities from the perturbed mean
-            # without running get_model_outputs (which would recompute mean from Mu/Ms)
-            print("Recomputing velocities from perturbed GP activations...")
-            self._recompute_velocities_from_mean(adata_perturbed)
-        
-        elif perturbation_type == 'cluster_labels':
-            print(f"Swapping cluster embeddings: '{source_cluster}' <-> '{target_cluster}'...")
-            # Perturb cluster embeddings (this function handles swapping and restoring)
-            # Note: perturb_cluster_labels restores embeddings automatically, so we need to
-            # manually swap again for post-perturbation metrics, or we can use the perturbed outputs
-            # For now, let's swap, compute metrics, then restore
-            # Actually, we should compute baseline first, then swap and compute perturbed
-            
-            # The function already computes everything we need, but we need baseline too
-            # So we'll compute baseline first, then call perturb_cluster_labels which will
-            # compute differences. But we need the actual perturbed outputs for alignment matrix.
-            
-            # For now, let's manually swap for this evaluation
-            # Save original embeddings
-            source_idx = self.model.cluster_to_idx[source_cluster]
-            target_idx = self.model.cluster_to_idx[target_cluster]
-            embeddings = self.model.cluster_embedding.embeddings.weight
-            original_source_emb = embeddings[source_idx].clone()
-            original_target_emb = embeddings[target_idx].clone()
-            
-            try:
-                # Swap embeddings
-                with torch.no_grad():
-                    embeddings[source_idx].copy_(original_target_emb)
-                    embeddings[target_idx].copy_(original_source_emb)
-                
-                # Recompute model outputs with swapped cluster embeddings
-                print("Recomputing model outputs after cluster embedding swap...")
-                self.get_model_outputs(adata_perturbed, save_to_adata=True)
-            finally:
-                # Restore original embeddings
-                with torch.no_grad():
-                    embeddings[source_idx].copy_(original_source_emb)
-                    embeddings[target_idx].copy_(original_target_emb)
-        
-        # 5. Compute post-perturbation embedding similarity
-        perturbed_similarity = None
-        if compute_embedding_similarity and perturbation_type == 'cluster_labels':
-            print("Computing post-perturbation metrics...")
-            perturbed_similarity = utils.compute_cluster_embedding_similarity(adata_perturbed)
-        
-        # 6. Compute similarity difference
-        similarity_delta = None
-        if compute_embedding_similarity and perturbation_type == 'cluster_labels' and baseline_similarity is not None and perturbed_similarity is not None:
-            similarity_delta = perturbed_similarity - baseline_similarity
-        
-        return {
-            'baseline_similarity': baseline_similarity,
-            'perturbed_similarity': perturbed_similarity,
-            'similarity_delta': similarity_delta,
-        }
-    
+

@@ -264,7 +264,7 @@ def preprocess_for_lineagevi(
     
     # Extract neighbor indices for model
     print(f"Extracting {K_neighbors} nearest neighbors...")
-    compute_nearest_neighbors(adata, K=K_neighbors, neighbors_key='neighbors', indices_key='indices')
+    get_neighbor_indices(adata, K=K_neighbors, neighbors_key='neighbors', indices_key='indices')
     print(f"  Neighbor indices stored in adata.uns['indices']")
     
     print(f"Preprocessing complete! Final data: {adata.n_obs} cells, {adata.n_vars} genes")
@@ -441,6 +441,13 @@ def build_gp_adata(
         z_arr  = np.asarray(adata.obsm["z"])            # (cells, L)
         lv_arr = np.asarray(adata.obsm["logvar"])       # (cells, L)
 
+        if v_gp.size > 0 and np.allclose(v_gp, 0.0):
+            raise ValueError(
+                "adata.obsm['velocity_gp'] is all zeros. scvelo.tl.velocity_graph will fail. "
+                "Re-run get_model_outputs(adata, save_to_adata=True) so that velocity_gp is "
+                "computed from gene velocity and gene decoder weights (no kernel restart needed)."
+            )
+
         # Build GP-space AnnData
         adata_gp = sc.AnnData(X=mu.astype(np.float32))
         adata_gp.obs = adata.obs.copy()
@@ -466,7 +473,7 @@ def build_gp_adata(
         return adata_gp
 
 
-def compute_nearest_neighbors(
+def get_neighbor_indices(
     adata: sc.AnnData,
     K: Optional[int] = None,
     *,
@@ -502,7 +509,7 @@ def compute_nearest_neighbors(
     >>> sc.pp.neighbors(adata, n_neighbors=20)
     >>> 
     >>> # Extract indices from scanpy's neighbor graph
-    >>> lineagevi.utils.compute_nearest_neighbors(adata, K=20)
+    >>> lineagevi.utils.get_neighbor_indices(adata, K=20)
     >>> # Access indices: adata.uns['indices']
     
     Notes

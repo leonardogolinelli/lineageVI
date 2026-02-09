@@ -249,6 +249,7 @@ class LineageVIModel(nn.Module):
                 velocity_decoder_input.append(cluster_emb)
             z_with_embeddings = torch.cat(velocity_decoder_input, dim=1)
             velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_embeddings, x)
+            velocity_gp = self._velocity_gp_from_gene_velocity(velocity)
         else:
             velocity = velocity_gp = alpha = beta = gamma = None
 
@@ -361,6 +362,16 @@ class LineageVIModel(nn.Module):
         x_rec = self.gene_decoder(z)
         return x_rec
 
+    def _velocity_gp_from_gene_velocity(self, velocity: torch.Tensor) -> torch.Tensor:
+        """
+        Compute gene program velocity as projection of (spliced) gene velocity
+        onto gene decoder weights: velocity_gp = velocity_s @ W^T, where W is
+        the masked gene decoder weight (G, L).
+        """
+        vel_s = velocity[:, self.n_genes:]  # (B, G)
+        w = self.gene_decoder.linear.weight * self.gene_decoder.mask  # (G, L)
+        return vel_s @ w  # (B, G) @ (G, L) = (B, L)
+
     def _forward_velocity_decoder(self, z, x, cluster_indices: Optional[torch.Tensor] = None):
         """
         Forward pass through the velocity decoder only.
@@ -403,6 +414,7 @@ class LineageVIModel(nn.Module):
             velocity_decoder_input.append(cluster_emb)
         z_with_embeddings = torch.cat(velocity_decoder_input, dim=1)
         velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_embeddings, x)
+        velocity_gp = self._velocity_gp_from_gene_velocity(velocity)
         return velocity, velocity_gp, alpha, beta, gamma
     
     def latent_enrich(
@@ -765,7 +777,7 @@ class LineageVIModel(nn.Module):
                 warnings.warn(
                     f"Nearest neighbor indices not found in adata.uns['{nn_key}']. "
                     f"Skipping velocity magnitude rescaling. "
-                    f"Run lineagevi.utils.compute_nearest_neighbors(adata) first.",
+                    f"Run lineagevi.utils.get_neighbor_indices(adata) first.",
                     UserWarning
                 )
             else:
@@ -890,8 +902,12 @@ class LineageVIModel(nn.Module):
                             gp_consistency_scores = torch.zeros(n_cells, device=vel_mean.device, dtype=vel_mean.dtype)
                             
                             for i in range(n_cells):
-                                # Get cell's GP velocity direction
+                                # Get cell's GP velocity direction (skip normalize if zero to avoid NaN)
                                 vgp_i = velgp_mean[i]  # (L,)
+                                vgp_norm_val = vgp_i.norm(p=2).item()
+                                if vgp_norm_val < 1e-9:
+                                    gp_consistency_scores[i] = 0.0
+                                    continue
                                 vgp_i_norm = F.normalize(vgp_i.unsqueeze(0), p=2, dim=1).squeeze(0)  # (L,)
                                 
                                 # Get neighbor indices
@@ -1042,6 +1058,17 @@ class LineageVIModel(nn.Module):
         LV  = logvar_all.numpy().astype(np.float32)
 
         if Vgp is not None:
+            if Vgp.size > 0 and (np.abs(Vgp).max() < 1e-12 or np.allclose(Vgp, 0.0)):
+                import warnings
+                warnings.warn(
+                    "velocity_gp is effectively all zeros. Possible causes: (1) get_model_outputs was not re-run "
+                    "after updating the code that computes velocity_gp from gene velocity; (2) gene-level velocity "
+                    "or gene decoder weights are zero. Re-run get_model_outputs(adata, save_to_adata=True) with "
+                    "the updated lineagevi; if using a saved checkpoint, ensure the full model (including gene decoder) "
+                    "is loaded.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             adata.obsm["velocity_gp"] = Vgp
         if Z is not None:
             adata.obsm["z"] = Z

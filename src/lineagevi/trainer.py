@@ -19,54 +19,26 @@ def _kl_weight_from_schedule(
     kl_weight: float,
     kl_weight_min: float,
     kl_weight_max: float,
-    n_cycles: int,
-    cyclical_style: str = "triangle",
-    cycle_ramp_frac: float = 0.5,
+    cycle_ramp_frac: float = 0.2,
 ) -> float:
     """
     Compute KL weight for a given epoch under the chosen schedule.
     epoch is 1-based (1 .. total_epochs).
-    - "linear": ramp min->max over first cycle_ramp_frac of total epochs, then hold at max.
-      (cycle_ramp_frac=1 gives ramp over all epochs.)
-    When schedule is "cyclical", cyclical_style can be:
-    - "triangle": weight goes min->max->min within each cycle (symmetric triangle).
-    - "fu": ramp min->max over first cycle_ramp_frac of each cycle, then hold at max.
+    - "none": constant kl_weight (fixed).
+    - "linear": ramp from kl_weight_min to kl_weight_max over first cycle_ramp_frac
+      of total epochs, then hold at max (cycle_ramp_frac=1 gives ramp over all epochs).
     """
     if schedule == "none":
         return kl_weight
     if schedule == "linear":
         if total_epochs <= 1:
             return kl_weight_max
-        # Ramp over first cycle_ramp_frac of epochs, then hold at max (if ramp_frac < 1)
         R = max(1e-9, min(1.0, cycle_ramp_frac))
         ramp_epochs = max(1, int(total_epochs * R))
         if epoch <= ramp_epochs:
-            if ramp_epochs <= 1:
-                frac = 1.0
-            else:
-                frac = (epoch - 1) / (ramp_epochs - 1)
+            frac = 1.0 if ramp_epochs <= 1 else (epoch - 1) / (ramp_epochs - 1)
         else:
             frac = 1.0
-        return kl_weight_min + (kl_weight_max - kl_weight_min) * frac
-    if schedule == "cyclical":
-        if total_epochs <= 1 or n_cycles <= 0:
-            return kl_weight_max
-        period = total_epochs / n_cycles
-        t = epoch - 1  # 0-based
-        pos_in_period = (t % period) / period  # in [0, 1)
-        if cyclical_style == "fu":
-            # Ramp over first cycle_ramp_frac of period, then hold at max
-            R = max(1e-9, min(1.0, cycle_ramp_frac))
-            if pos_in_period <= R:
-                frac = pos_in_period / R
-            else:
-                frac = 1.0
-            return kl_weight_min + (kl_weight_max - kl_weight_min) * frac
-        # default: "triangle"
-        if pos_in_period < 0.5:
-            frac = 2.0 * pos_in_period
-        else:
-            frac = 2.0 * (1.0 - pos_in_period)
         return kl_weight_min + (kl_weight_max - kl_weight_min) * frac
     return kl_weight
 
@@ -161,16 +133,15 @@ class _Trainer:
         lr_regime2: Optional[float] = None,
         velocity_loss_weight_gene: float = 1.0,
         velocity_loss_weight_gp: float = 1.0,
-        kl_weight_schedule: str = "none",
+        kl_weight_schedule: str = "linear",
         kl_weight: float = 1e-5,
         kl_weight_min: float = 0.0,
-        kl_weight_max: float = 1e-5,
-        kl_weight_n_cycles: int = 2,
-        kl_cyclical_style: str = "triangle",
-        kl_cycle_ramp_frac: float = 0.5,
+        kl_weight_max: float = 1e-1,
+        kl_cycle_ramp_frac: float = 0.2,
         monitor_genes: Optional[List[str]] = None,
         monitor_negative_velo: bool = True,
         monitor_every_epochs: int = 1,
+        show_metrics: bool = True,
     ) -> Dict[str, List[float]]:
         """
         Train the LineageVI model using two-regime training.
@@ -206,23 +177,17 @@ class _Trainer:
             Weight for the gene-level velocity loss (expression space).
         velocity_loss_weight_gp : float, default 1.0
             Weight for the gene program velocity loss (latent space).
-        kl_weight_schedule : str, default "none"
-            Schedule for KL weight in regime 1: "none" (constant), "linear" (anneal from
-            kl_weight_min to kl_weight_max), or "cyclical" (see kl_cyclical_style: "triangle" or "fu").
+        kl_weight_schedule : str, default "linear"
+            Schedule for KL weight in regime 1: "none" (constant kl_weight), or "linear"
+            (anneal from kl_weight_min to kl_weight_max over first kl_cycle_ramp_frac of epochs, then hold at max).
         kl_weight : float, default 1e-5
             Constant KL weight when kl_weight_schedule is "none".
         kl_weight_min : float, default 0.0
-            Minimum KL weight for "linear" and "cyclical" schedules.
-        kl_weight_max : float, default 1e-5
-            Maximum KL weight for "linear" and "cyclical" schedules.
-        kl_weight_n_cycles : int, default 2
-            Number of cycles for "cyclical" schedule (ignored otherwise).
-        kl_cyclical_style : str, default "triangle"
-            When kl_weight_schedule is "cyclical": "triangle" (min->max->min per cycle)
-            or "fu" (ramp min->max over first kl_cycle_ramp_frac of each cycle, then hold at max).
-        kl_cycle_ramp_frac : float, default 0.5
+            Minimum KL weight for "linear" schedule.
+        kl_weight_max : float, default 1e-1
+            Maximum KL weight for "linear" schedule.
+        kl_cycle_ramp_frac : float, default 0.2
             For "linear": fraction of total epochs used for ramp min->max, then hold at max (1 = ramp all epochs).
-            For "fu" cyclical: fraction of each cycle used for ramp; remainder hold at max. In (0, 1].
         monitor_genes : List[str], optional
             List of gene names to monitor during training. Phase plane plots will be
             generated for these genes during both regimes and saved to
@@ -232,6 +197,8 @@ class _Trainer:
         monitor_every_epochs : int, default 1
             Generate monitoring plots every N epochs. Plots are always generated at
             epoch 0 and the last epoch of each regime if monitor_genes is provided.
+        show_metrics : bool, default True
+            If True, display the loss curves plot as cell output in addition to saving.
         
         Returns
         -------
@@ -298,13 +265,9 @@ class _Trainer:
         # ------- Regime 1 -------
         loader1 = _make_loader(True, train_indices, shuffle=True, seed=seeds[1])
         val_loader1 = _make_loader(True, val_indices, shuffle=False, seed=None) if val_indices is not None else None
-        if kl_weight_schedule not in ("none", "linear", "cyclical"):
+        if kl_weight_schedule not in ("none", "linear"):
             raise ValueError(
-                f"kl_weight_schedule must be 'none', 'linear', or 'cyclical', got {kl_weight_schedule!r}"
-            )
-        if kl_cyclical_style not in ("triangle", "fu"):
-            raise ValueError(
-                f"kl_cyclical_style must be 'triangle' or 'fu', got {kl_cyclical_style!r}"
+                f"kl_weight_schedule must be 'none' or 'linear', got {kl_weight_schedule!r}"
             )
         lr1 = lr_regime1 if lr_regime1 is not None else lr
         lr2 = lr_regime2 if lr_regime2 is not None else lr
@@ -314,8 +277,6 @@ class _Trainer:
             kl_weight=kl_weight,
             kl_weight_min=kl_weight_min,
             kl_weight_max=kl_weight_max,
-            kl_weight_n_cycles=kl_weight_n_cycles,
-            kl_cyclical_style=kl_cyclical_style,
             kl_cycle_ramp_frac=kl_cycle_ramp_frac,
             monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs,
         )
@@ -351,7 +312,7 @@ class _Trainer:
             history["regime2_velocity_val_loss_gp"] = r2_val_gp
 
         # Plot loss curves over epochs
-        self._plot_loss_curves(history, output_dir)
+        self._plot_loss_curves(history, output_dir, show_metrics=show_metrics)
 
         # Save model weights and configuration
         import json
@@ -398,13 +359,11 @@ class _Trainer:
         lr: float,
         epochs: int,
         val_loader: Optional[object] = None,
-        kl_weight_schedule: str = "none",
+        kl_weight_schedule: str = "linear",
         kl_weight: float = 1e-5,
         kl_weight_min: float = 0.0,
-        kl_weight_max: float = 1e-5,
-        kl_weight_n_cycles: int = 2,
-        kl_cyclical_style: str = "triangle",
-        kl_cycle_ramp_frac: float = 0.5,
+        kl_weight_max: float = 1e-1,
+        kl_cycle_ramp_frac: float = 0.2,
         monitor_genes: Optional[List[str]] = None,
         output_dir: str = ".",
         monitor_negative_velo: bool = True,
@@ -435,8 +394,7 @@ class _Trainer:
         for epoch in range(1, epochs + 1):
             current_kl_weight = _kl_weight_from_schedule(
                 epoch, epochs, kl_weight_schedule, kl_weight,
-                kl_weight_min, kl_weight_max, kl_weight_n_cycles,
-                kl_cyclical_style, kl_cycle_ramp_frac,
+                kl_weight_min, kl_weight_max, kl_cycle_ramp_frac,
             )
             self.model.train()
             running = 0.0
@@ -779,8 +737,8 @@ class _Trainer:
         if self.verbose:
             print(f"Generated monitoring plots for regime {regime}, epoch {epoch} → {base_plots_dir}")
 
-    def _plot_loss_curves(self, history: Dict[str, List[float]], output_dir: str) -> None:
-        """Plot and save training/validation loss curves to output_dir/training_plots/loss_curves.png."""
+    def _plot_loss_curves(self, history: Dict[str, List[float]], output_dir: str, show_metrics: bool = True) -> None:
+        """Plot and save training/validation loss curves to output_dir/training_plots/loss_curves.png. If show_metrics, also display the figure."""
         import os
         import matplotlib.pyplot as plt
 
@@ -789,8 +747,10 @@ class _Trainer:
         has_val = "regime1_val_loss" in history
 
         fig, axes = plt.subplots(2, 4, figsize=(14, 8))
-        epochs_r1 = list(range(1, len(history["regime1_loss"]) + 1))
-        epochs_r2 = list(range(1, len(history["regime2_velocity_loss"]) + 1))
+        n_epochs_r1 = len(history["regime1_loss"])
+        epochs_r1 = list(range(1, n_epochs_r1 + 1))
+        # Regime 2 x-axis continues after last regime 1 epoch
+        epochs_r2 = list(range(n_epochs_r1 + 1, n_epochs_r1 + len(history["regime2_velocity_loss"]) + 1))
 
         # Regime 1: total, recon, kl, KL weight
         ax = axes[0, 0]
@@ -865,6 +825,8 @@ class _Trainer:
         plt.tight_layout()
         save_path = os.path.join(base_plots_dir, "loss_curves.png")
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        if show_metrics:
+            plt.show()
         plt.close(fig)
         if self.verbose:
             print(f"Saved loss curves → {save_path}")

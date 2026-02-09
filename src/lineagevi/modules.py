@@ -186,12 +186,13 @@ class MaskedLinearDecoder(nn.Module):
 
 class VelocityDecoder(nn.Module):
     """
-    Velocity decoder that predicts RNA velocities in gene and gene program spaces.
+    Velocity decoder that predicts gene-level RNA velocities (no GP velocity prediction).
     
     This decoder takes latent representations and predicts:
-    1. Gene program velocities in latent space
-    2. Gene-level velocities using kinetic parameters (α, β, γ)
-    3. Kinetic parameters for RNA velocity modeling
+    1. Gene-level velocities using kinetic parameters (α, β, γ)
+    2. Kinetic parameters for RNA velocity modeling
+    
+    velocity_gp is returned as zeros of shape (batch_size, n_latent) for API compatibility.
     
     The gene-level velocity is computed using the kinetic model:
     - velocity_u = α - β * unspliced
@@ -206,16 +207,12 @@ class VelocityDecoder(nn.Module):
     n_output : int
         Output dimension (2 * number of genes for unspliced+spliced velocities).
     n_latent : int
-        Number of gene programs (latent dimensions) for gp_velocity_decoder output.
+        Number of gene programs (used only for velocity_gp output shape; returned as zeros).
     
     Attributes
     ----------
-    shared_decoder : nn.Sequential
-        Shared decoder network with LayerNorm and ReLU activation.
-    gp_velocity_decoder : nn.Linear
-        Linear layer for gene program velocities.
-    gene_velocity_decoder : nn.Sequential
-        Network for kinetic parameters with Softplus activation.
+    decoder : nn.Sequential
+        Single decoder: Linear(n_input, n_hidden) -> LayerNorm -> ReLU -> Linear(n_hidden, 3*G) -> Softplus.
     _G : int
         Number of genes (n_output // 2).
     
@@ -226,7 +223,7 @@ class VelocityDecoder(nn.Module):
     >>> 
     >>> # Forward pass
     >>> vel, vel_gp, α, β, γ = decoder(z, x)
-    >>> # vel shape: (batch, 4000), vel_gp shape: (batch, 50)
+    >>> # vel shape: (batch, 4000), vel_gp shape: (batch, 50) zeros
     >>> # α, β, γ shape: (batch, 2000)
     """
 
@@ -243,24 +240,19 @@ class VelocityDecoder(nn.Module):
         n_output : int
             Output dimension (2 * number of genes for unspliced+spliced velocities).
         n_latent : int
-            Number of gene programs (latent dimensions) for gp_velocity_decoder output.
+            Number of gene programs (used for velocity_gp output shape; returned as zeros).
         """
         super().__init__()
-        self.shared_decoder = nn.Sequential(
+        self.n_latent = n_latent  # kept for velocity_gp output shape (returned as zeros)
+        # n_output is 2G, so G = n_output // 2; decoder outputs [alpha, beta, gamma] in R^G each
+        G2 = n_output
+        G = G2 // 2
+        self.decoder = nn.Sequential(
             nn.Linear(n_input, n_hidden),
             nn.LayerNorm(n_hidden),
             nn.ReLU(),
-        )
-
-        # latent GP-ish velocity head (L-dim)
-        self.gp_velocity_decoder = nn.Linear(n_hidden, n_latent)
-
-        # outputs [alpha, beta, gamma] each in R^G; n_output here is 2G, so G = n_output//2
-        G2 = n_output
-        G = G2 // 2
-        self.gene_velocity_decoder = nn.Sequential(
             nn.Linear(n_hidden, 3 * G),
-            nn.Softplus()
+            nn.Softplus(),
         )
         self._G = G
 
@@ -283,7 +275,7 @@ class VelocityDecoder(nn.Module):
             Gene-level velocities of shape (batch_size, 2*n_genes) with
             concatenated unspliced and spliced velocities.
         velocity_gp : torch.Tensor
-            Gene program velocities of shape (batch_size, n_latent).
+            Gene program velocities of shape (batch_size, n_latent). Not predicted; returned as zeros.
         alpha : torch.Tensor
             Transcription rate parameters of shape (batch_size, n_genes).
         beta : torch.Tensor
@@ -297,10 +289,8 @@ class VelocityDecoder(nn.Module):
         - velocity_u = α - β * unspliced
         - velocity_s = β * unspliced - γ * spliced
         """
-        h = self.shared_decoder(z)
-        velocity_gp = self.gp_velocity_decoder(h)
-
-        kinetic_params = self.gene_velocity_decoder(h)  # (B, 3G)
+        kinetic_params = self.decoder(z)  # (B, 3G)
+        velocity_gp = z.new_zeros(z.size(0), self.n_latent)
         alpha, beta, gamma = torch.split(kinetic_params, self._G, dim=1)
         unspliced, spliced = torch.split(x, x.size(1) // 2, dim=1)
         velocity_u = alpha - beta * unspliced
