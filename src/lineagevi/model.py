@@ -6,10 +6,53 @@ import torch.nn.functional as F
 import scanpy as sc
 import pandas as pd
 import scipy.sparse as sp
+from scipy.stats import wilcoxon
 from joblib import Parallel, delayed
 from typing import Tuple, Optional, List
 
 from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder, ClusterEmbedding
+
+
+def _wilcoxon_per_column(diffs: np.ndarray) -> np.ndarray:
+    """Run Wilcoxon signed-rank test per column (alternative='two-sided'). Returns p-values; NaN if n_cells < 2."""
+    diffs = np.atleast_2d(diffs)
+    n_cells, n_features = diffs.shape
+    if n_cells < 2:
+        return np.full(n_features, np.nan)
+    pvals = np.full(n_features, np.nan)
+    for j in range(n_features):
+        try:
+            r = wilcoxon(diffs[:, j], alternative="two-sided")
+            pvals[j] = r.pvalue
+        except (ValueError, ZeroDivisionError):
+            pvals[j] = np.nan
+    return pvals
+
+
+def _fdr_bh(pvals: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg FDR adjustment. NaN p-values are preserved."""
+    pvals = np.asarray(pvals, dtype=float)
+    n = np.sum(~np.isnan(pvals))
+    if n == 0:
+        return pvals
+    padj = np.full_like(pvals, np.nan)
+    valid = ~np.isnan(pvals)
+    padj[valid] = _fdr_bh_valid(pvals[valid])
+    return padj
+
+
+def _fdr_bh_valid(p: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg on a 1D array of valid p-values."""
+    n = len(p)
+    order = np.argsort(p)
+    p_sorted = p[order]
+    padj_sorted = np.minimum(1.0, p_sorted * n / np.arange(1, n + 1, dtype=float))
+    # monotonicity
+    for i in range(n - 2, -1, -1):
+        padj_sorted[i] = min(padj_sorted[i], padj_sorted[i + 1])
+    padj = np.empty_like(p)
+    padj[order] = padj_sorted
+    return padj
 
 
 def seed_everything(seed: int):
@@ -1542,9 +1585,12 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         df_genes : pd.DataFrame
-            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, recon, etc.)
+            and Wilcoxon signed-rank p-values + FDR-adjusted p-values per entity
+            (pval_*, padj_* columns).
         df_gp : pd.DataFrame
-            DataFrame with GP-level differences (GP velocity, mean, logvar, etc.).
+            DataFrame with GP-level differences (mean, logvar, gp_velocity) and
+            Wilcoxon p-values + FDR (pval_*, padj_*).
         perturbed_outputs : dict
             Dictionary of perturbed model outputs (recon, mean, logvar, velocity_gp, velo_u_pert, velo_pert, alpha_pert, beta_pert, gamma_pert).
         
@@ -1667,40 +1713,95 @@ class LineageVIModel(nn.Module):
         beta_diff = beta_pert - beta_unpert
         gamma_diff = gamma_pert - gamma_unpert
 
-        recon_diff = to_numpy(recon_diff).mean(0)
-        mean_diff = to_numpy(mean_diff).mean(0)
-        logvar_diff = to_numpy(logvar_diff).mean(0)
-        gp_velo_diff = to_numpy(gp_velo_diff).mean(0)
-        velo_u_diff = to_numpy(velo_u_diff).mean(0)
-        velo_diff = to_numpy(velo_diff).mean(0)
-        alpha_diff = to_numpy(alpha_diff).mean(0)
-        beta_diff = to_numpy(beta_diff).mean(0)
-        gamma_diff = to_numpy(gamma_diff).mean(0)
+        # Convert to numpy and ensure 2D (n_cells, n_features) for Wilcoxon
+        def to_2d(t):
+            a = t.cpu().numpy()
+            return np.atleast_2d(a)
+
+        recon_2d = to_2d(recon_diff)
+        mean_2d = to_2d(mean_diff)
+        logvar_2d = to_2d(logvar_diff)
+        gp_velo_2d = to_2d(gp_velo_diff)
+        velo_u_2d = to_2d(velo_u_diff)
+        velo_2d = to_2d(velo_diff)
+        alpha_2d = to_2d(alpha_diff)
+        beta_2d = to_2d(beta_diff)
+        gamma_2d = to_2d(gamma_diff)
+
+        # Mean differences (for existing columns)
+        mean_diff_np = mean_2d.mean(0)
+        logvar_diff_np = logvar_2d.mean(0)
+        gp_velo_diff_np = gp_velo_2d.mean(0)
+        recon_diff_np = recon_2d.mean(0)
+        velo_u_diff_np = velo_u_2d.mean(0)
+        velo_diff_np = velo_2d.mean(0)
+        alpha_diff_np = alpha_2d.mean(0)
+        beta_diff_np = beta_2d.mean(0)
+        gamma_diff_np = gamma_2d.mean(0)
+
+        # Wilcoxon signed-rank + FDR per entity
+        pval_mean = _wilcoxon_per_column(mean_2d)
+        padj_mean = _fdr_bh(pval_mean)
+        pval_logvar = _wilcoxon_per_column(logvar_2d)
+        padj_logvar = _fdr_bh(pval_logvar)
+        pval_gp_velo = _wilcoxon_per_column(gp_velo_2d)
+        padj_gp_velo = _fdr_bh(pval_gp_velo)
+
+        pval_recon = _wilcoxon_per_column(recon_2d)
+        padj_recon = _fdr_bh(pval_recon)
+        pval_velo_u = _wilcoxon_per_column(velo_u_2d)
+        padj_velo_u = _fdr_bh(pval_velo_u)
+        pval_velo = _wilcoxon_per_column(velo_2d)
+        padj_velo = _fdr_bh(pval_velo)
+        pval_alpha = _wilcoxon_per_column(alpha_2d)
+        padj_alpha = _fdr_bh(pval_alpha)
+        pval_beta = _wilcoxon_per_column(beta_2d)
+        padj_beta = _fdr_bh(pval_beta)
+        pval_gamma = _wilcoxon_per_column(gamma_2d)
+        padj_gamma = _fdr_bh(pval_gamma)
 
         df_gp = pd.DataFrame({
-            'terms' : adata.uns['terms'],
-            'mean_diff' : mean_diff,
-            'abs_mean_diff' : abs(mean_diff),
-            'logvar_diff' : logvar_diff,
-            'abs_logvar_diff' : abs(logvar_diff),
-            'gp_velocity_diff' : gp_velo_diff,
-            'abs_gp_velocity_diff' : abs(gp_velo_diff),
+            "terms": adata.uns["terms"],
+            "mean_diff": mean_diff_np,
+            "abs_mean_diff": np.abs(mean_diff_np),
+            "logvar_diff": logvar_diff_np,
+            "abs_logvar_diff": np.abs(logvar_diff_np),
+            "gp_velocity_diff": gp_velo_diff_np,
+            "abs_gp_velocity_diff": np.abs(gp_velo_diff_np),
+            "pval_mean": pval_mean,
+            "padj_mean": padj_mean,
+            "pval_logvar": pval_logvar,
+            "padj_logvar": padj_logvar,
+            "pval_gp_velocity": pval_gp_velo,
+            "padj_gp_velocity": padj_gp_velo,
         })
 
         df_genes = pd.DataFrame({
-            'genes' : adata.var_names,
-            'recon_diff' : recon_diff,
-            'abs_recon_diff' : abs(recon_diff),
-            'unspliced_velocity_diff' : velo_u_diff,
-            'abs_unspliced_velocity_diff' : abs(velo_u_diff),
-            'velocity_diff' : velo_diff,
-            'abs_velocity_diff' : abs(velo_diff),
-            'alpha_diff' : alpha_diff,
-            'abs_alpha_diff' : abs(alpha_diff),
-            'beta_diff' : beta_diff,
-            'abs_beta_diff' : abs(beta_diff),
-            'gamma_diff' : gamma_diff,
-            'abs_gamma_diff' : abs(gamma_diff),
+            "genes": adata.var_names,
+            "recon_diff": recon_diff_np,
+            "abs_recon_diff": np.abs(recon_diff_np),
+            "unspliced_velocity_diff": velo_u_diff_np,
+            "abs_unspliced_velocity_diff": np.abs(velo_u_diff_np),
+            "velocity_diff": velo_diff_np,
+            "abs_velocity_diff": np.abs(velo_diff_np),
+            "alpha_diff": alpha_diff_np,
+            "abs_alpha_diff": np.abs(alpha_diff_np),
+            "beta_diff": beta_diff_np,
+            "abs_beta_diff": np.abs(beta_diff_np),
+            "gamma_diff": gamma_diff_np,
+            "abs_gamma_diff": np.abs(gamma_diff_np),
+            "pval_recon": pval_recon,
+            "padj_recon": padj_recon,
+            "pval_unspliced_velocity": pval_velo_u,
+            "padj_unspliced_velocity": padj_velo_u,
+            "pval_velocity": pval_velo,
+            "padj_velocity": padj_velo,
+            "pval_alpha": pval_alpha,
+            "padj_alpha": padj_alpha,
+            "pval_beta": pval_beta,
+            "padj_beta": padj_beta,
+            "pval_gamma": pval_gamma,
+            "padj_gamma": padj_gamma,
         })
 
         # Store perturbed outputs in adata
@@ -1806,9 +1907,11 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         genes_df : pd.DataFrame
-            DataFrame with gene-level differences (velocity, alpha, beta, gamma, etc.).
+            DataFrame with gene-level differences (velocity, alpha, beta, gamma, x_dec, etc.)
+            and Wilcoxon signed-rank p-values + FDR-adjusted p-values (pval_*, padj_*).
         gps_df : pd.DataFrame
-            DataFrame with GP-level differences (GP velocity, etc.).
+            DataFrame with GP-level velocity difference and Wilcoxon p-value + FDR
+            (pval_velo_gp, padj_velo_gp).
         
         Notes
         -----
@@ -1891,44 +1994,76 @@ class LineageVIModel(nn.Module):
             'recon' : to_numpy(x_dec_pert), 
         }
 
-        velo_diff = to_numpy(velocity_pert - velocity_unpert)
-        velo_gp_diff = to_numpy(velocity_gp_pert - velocity_gp_unpert)
-        alpha_diff = to_numpy(alpha_pert - alpha_unpert)
-        beta_diff = to_numpy(beta_pert - beta_unpert)
-        gamma_diff = to_numpy(gamma_pert - gamma_unpert)
-        x_dec_diff = to_numpy(x_dec_pert - x_dec_unpert)
+        velo_diff_2d = np.atleast_2d(to_numpy(velocity_pert - velocity_unpert))
+        velo_gp_2d = np.atleast_2d(to_numpy(velocity_gp_pert - velocity_gp_unpert))
+        alpha_2d = np.atleast_2d(to_numpy(alpha_pert - alpha_unpert))
+        beta_2d = np.atleast_2d(to_numpy(beta_pert - beta_unpert))
+        gamma_2d = np.atleast_2d(to_numpy(gamma_pert - gamma_unpert))
+        x_dec_2d = np.atleast_2d(to_numpy(x_dec_pert - x_dec_unpert))
 
-        if velo_diff.shape[0] > 1:
-            velo_diff = velo_diff.mean(0)
-            velo_gp_diff = velo_gp_diff.mean(0)
-            alpha_diff = alpha_diff.mean(0)
-            beta_diff = beta_diff.mean(0)
-            gamma_diff = gamma_diff.mean(0)
-            x_dec_diff = x_dec_diff.mean(0)
+        velo_diff_mean = velo_diff_2d.mean(0)
+        velo_gp_mean = velo_gp_2d.mean(0)
+        alpha_mean = alpha_2d.mean(0)
+        beta_mean = beta_2d.mean(0)
+        gamma_mean = gamma_2d.mean(0)
+        x_dec_mean = x_dec_2d.mean(0)
 
-        velo_diff_u, velo_diff_s = np.split(velo_diff, 2)
+        velo_diff_u, velo_diff_s = np.split(velo_diff_mean, 2)
+
+        n_genes = alpha_2d.shape[1]
+        velo_u_2d = velo_diff_2d[:, :n_genes]
+        velo_s_2d = velo_diff_2d[:, n_genes:]
+
+        pval_velo_u = _wilcoxon_per_column(velo_u_2d)
+        padj_velo_u = _fdr_bh(pval_velo_u)
+        pval_velo_s = _wilcoxon_per_column(velo_s_2d)
+        padj_velo_s = _fdr_bh(pval_velo_s)
+        pval_x_dec = _wilcoxon_per_column(x_dec_2d)
+        padj_x_dec = _fdr_bh(pval_x_dec)
+        pval_alpha = _wilcoxon_per_column(alpha_2d)
+        padj_alpha = _fdr_bh(pval_alpha)
+        pval_beta = _wilcoxon_per_column(beta_2d)
+        padj_beta = _fdr_bh(pval_beta)
+        pval_gamma = _wilcoxon_per_column(gamma_2d)
+        padj_gamma = _fdr_bh(pval_gamma)
+        pval_velo_gp = _wilcoxon_per_column(velo_gp_2d)
+        padj_velo_gp = _fdr_bh(pval_velo_gp)
 
         genes_df = pd.DataFrame({
-            'genes' : adata.var_names,
-            'velo_diff_u' : velo_diff_u,
-            'abs_velo_diff_u' : np.absolute(velo_diff_u),
-            'velo_diff_s' : velo_diff_s,
-            'abs_velo_diff_s' : np.absolute(velo_diff_s),
-            'x_dec_diff' : x_dec_diff,
-            'x_dec_diff_abs' : np.absolute(x_dec_diff),
-            'alpha_diff' : alpha_diff,
-            'alpha_diff_abs' : np.absolute(alpha_diff),
-            'beta_diff' : beta_diff,
-            'beta_diff_abs' : np.absolute(beta_diff),
-            'gamma_diff' : gamma_diff,
-            'gamma_diff_abs' : np.absolute(gamma_diff),
+            "genes": adata.var_names,
+            "velo_diff_u": velo_diff_u,
+            "abs_velo_diff_u": np.abs(velo_diff_u),
+            "velo_diff_s": velo_diff_s,
+            "abs_velo_diff_s": np.abs(velo_diff_s),
+            "x_dec_diff": x_dec_mean,
+            "x_dec_diff_abs": np.abs(x_dec_mean),
+            "alpha_diff": alpha_mean,
+            "alpha_diff_abs": np.abs(alpha_mean),
+            "beta_diff": beta_mean,
+            "beta_diff_abs": np.abs(beta_mean),
+            "gamma_diff": gamma_mean,
+            "gamma_diff_abs": np.abs(gamma_mean),
+            "pval_velo_u": pval_velo_u,
+            "padj_velo_u": padj_velo_u,
+            "pval_velo_s": pval_velo_s,
+            "padj_velo_s": padj_velo_s,
+            "pval_x_dec": pval_x_dec,
+            "padj_x_dec": padj_x_dec,
+            "pval_alpha": pval_alpha,
+            "padj_alpha": padj_alpha,
+            "pval_beta": pval_beta,
+            "padj_beta": padj_beta,
+            "pval_gamma": pval_gamma,
+            "padj_gamma": padj_gamma,
         })
 
         gps_df = pd.DataFrame({
-                'gene_programs' : adata.uns['terms'],
-                'velo_gp' : velo_gp_diff,
-                'abs_velo_gp' : velo_gp_diff,
-            })
+            "gene_programs": adata.uns["terms"],
+            "velo_gp": velo_gp_mean,
+            "abs_velo_gp": np.abs(velo_gp_mean),
+            "pval_velo_gp": pval_velo_gp,
+            "padj_velo_gp": padj_velo_gp,
+        })
         
         # Store perturbed outputs in adata
         # For perturb_gps, outputs are computed only for perturbed cells
