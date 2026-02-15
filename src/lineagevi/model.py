@@ -14,18 +14,23 @@ from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder, ClusterEmbed
 
 
 def _wilcoxon_per_column(diffs: np.ndarray) -> np.ndarray:
-    """Run Wilcoxon signed-rank test per column (alternative='two-sided'). Returns p-values; NaN if n_cells < 2."""
+    """Run Wilcoxon signed-rank test per column (alternative='two-sided'). Returns p-values; NaN if n_cells < 2.
+    Constant columns (zero variance) get p-value 1.0 (no evidence against null)."""
     diffs = np.atleast_2d(diffs)
     n_cells, n_features = diffs.shape
     if n_cells < 2:
         return np.full(n_features, np.nan)
     pvals = np.full(n_features, np.nan)
     for j in range(n_features):
+        col = diffs[:, j]
+        if np.var(col) == 0 or np.allclose(col, col.flat[0]):
+            pvals[j] = 1.0
+            continue
         try:
-            r = wilcoxon(diffs[:, j], alternative="two-sided")
-            pvals[j] = r.pvalue
+            r = wilcoxon(col, alternative="two-sided")
+            pvals[j] = r.pvalue if np.isfinite(r.pvalue) else 1.0
         except (ValueError, ZeroDivisionError):
-            pvals[j] = np.nan
+            pvals[j] = 1.0
     return pvals
 
 
