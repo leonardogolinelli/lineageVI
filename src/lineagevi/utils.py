@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 from typing import Optional, Union, TYPE_CHECKING
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import torch
 import scanpy as sc
@@ -689,4 +694,167 @@ def compute_cluster_embedding_similarity(
     )
     
     return similarity_df
+
+
+# -------------------------------------------------------------------------------
+# Enrichr gene set libraries
+# -------------------------------------------------------------------------------
+
+_ENRICHR_BASE = "https://maayanlab.cloud/Enrichr"
+
+
+def list_enrichr_libraries() -> pd.DataFrame:
+    """\
+    List available Enrichr gene set libraries.
+
+    Fetches library metadata from the Enrichr API (datasetStatistics).
+    Use this to explore library names before downloading with
+    :func:`download_enrichr_library` or :func:`download_enrichr_libraries`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns include ``libraryName``, ``numTerms``, and other stats.
+        Use ``df['libraryName']`` to get names for downloading.
+    """
+    url = f"{_ENRICHR_BASE}/datasetStatistics"
+    with urlopen(url) as resp:
+        data = json.load(resp)
+    rows = []
+    for lib in data.get("statistics", []):
+        row = {
+            "libraryName": lib.get("libraryName"),
+            "numTerms": lib.get("numTerms"),
+        }
+        for k, v in lib.items():
+            if k not in row:
+                row[k] = v
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _enrichr_line_to_gmt_parts(line: str) -> Optional[tuple[str, str, list[str]]]:
+    """Parse one line from Enrichr geneSetLibrary text into (name, description, genes)."""
+    line = line.strip()
+    if not line:
+        return None
+    # Tab-separated: name \t [desc \t] gene1 \t gene2 ...
+    if "\t" in line:
+        parts = line.split("\t")
+        name = parts[0].strip()
+        # If 2 parts only, second might be description or single gene
+        if len(parts) == 2:
+            desc = ""
+            genes = [parts[1].strip()] if parts[1].strip() else []
+        else:
+            desc = parts[1].strip() if len(parts) > 2 else ""
+            genes = [p.strip() for p in parts[2:] if p.strip()]
+        return (name, desc, genes)
+    # Space-separated: infer boundary between set name and genes (gene-like tokens at end)
+    tokens = line.split()
+    if len(tokens) < 2:
+        return None
+    # Gene-like: alphanumeric/dash/dot, typical length
+    def looks_like_gene(t: str) -> bool:
+        return bool(re.match(r"^[A-Za-z0-9\-\.]+$", t) and 2 <= len(t) <= 15)
+
+    best_i = len(tokens)
+    for i in range(1, len(tokens)):
+        tail = tokens[i:]
+        if len(tail) >= 2 and all(looks_like_gene(t) for t in tail):
+            best_i = i
+            break
+    name = " ".join(tokens[:best_i])
+    genes = tokens[best_i:]
+    return (name, "", genes)
+
+
+def download_enrichr_library(
+    library_name: str,
+    output_path: Optional[str] = None,
+    skip_existing: bool = True,
+) -> str:
+    """\
+    Download one Enrichr gene set library and save it as a GMT file.
+
+    Parameters
+    ----------
+    library_name : str
+        Exact library name as returned by :func:`list_enrichr_libraries`
+        (e.g. ``'KEGG_2021_Human'``).
+    output_path : str, optional
+        Path for the output ``.gmt`` file. If None, uses ``{library_name}.gmt``
+        in the current directory (with unsafe characters replaced by underscores).
+    skip_existing : bool, default True
+        If True and the output file already exists, skip the download and return
+        the path without overwriting.
+
+    Returns
+    -------
+    str
+        Path to the written (or existing) GMT file.
+    """
+    if output_path is None:
+        safe = re.sub(r"[^\w\-.]", "_", library_name)
+        output_path = f"{safe}.gmt"
+
+    if skip_existing and os.path.isfile(output_path):
+        return output_path
+
+    params = urlencode({"mode": "text", "libraryName": library_name})
+    url = f"{_ENRICHR_BASE}/geneSetLibrary?{params}"
+    with urlopen(url) as resp:
+        text = resp.read().decode("utf-8")
+
+    lines_out = []
+    for raw_line in text.splitlines():
+        parsed = _enrichr_line_to_gmt_parts(raw_line)
+        if parsed is None:
+            continue
+        name, desc, genes = parsed
+        if not genes:
+            continue
+        line_gmt = "\t".join([name, desc] + genes)
+        lines_out.append(line_gmt)
+
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines_out))
+
+    return output_path
+
+
+def download_enrichr_libraries(
+    library_names: Union[str, list[str]],
+    output_dir: Optional[str] = None,
+    skip_existing: bool = True,
+) -> list[str]:
+    """\
+    Download one or more Enrichr gene set libraries and save them as GMT files.
+
+    Parameters
+    ----------
+    library_names : str or list of str
+        Library name(s) from :func:`list_enrichr_libraries`.
+    output_dir : str, optional
+        Directory to write ``.gmt`` files into. If None, files are written
+        to the current directory. Filenames are derived from library names.
+    skip_existing : bool, default True
+        If True, skip downloading when the output GMT file already exists.
+
+    Returns
+    -------
+    list of str
+        Paths to the written (or existing) GMT files.
+    """
+    names = [library_names] if isinstance(library_names, str) else list(library_names)
+    written = []
+    for lib in names:
+        out_path = None
+        if output_dir is not None:
+            safe = re.sub(r"[^\w\-.]", "_", lib)
+            out_path = os.path.join(output_dir, f"{safe}.gmt")
+        written.append(
+            download_enrichr_library(lib, output_path=out_path, skip_existing=skip_existing)
+        )
+    return written
 
