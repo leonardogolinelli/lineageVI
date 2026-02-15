@@ -71,8 +71,8 @@ class LineageVI:
     >>> # Get model outputs
     >>> linvi.get_model_outputs()
     >>> 
-    >>> # Analyze gene programs
-    >>> linvi.latent_enrich(adata, groups="cell_type")
+    >>> # Differential test (e.g. latent / gene programs)
+    >>> diff = linvi.differential(adata, groupby_key="cell_type", mode="latent")
     """
 
     def __init__(
@@ -385,30 +385,30 @@ class LineageVI:
             max_velocity_magnitude=max_velocity_magnitude,
         )
 
-    def latent_enrich(
+    def differential(
         self,
         adata: Optional[sc.AnnData],
-        groups,
+        groupby_key: str,
+        mode: str = "expression",
         *,
-        comparison: str | list[str] = "rest",
-        n_sample: int = 5000,
-        use_directions: bool = False,
-        directions_key: str = "directions",
-        select_terms=None,
-        exact: bool = True,
-        key_added: str = "bf_scores",
-    ):
-        """See `LineageVIModel.latent_enrich`."""
-        return self.model.latent_enrich(
+        layer: Optional[str] = None,
+        velocity_layer: str = "velocity",
+        ensure_model_outputs: bool = True,
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Differential test (Wilcoxon rank-sum 1 vs rest) by group.
+
+        Returns a dict of DataFrames (one per group), each with columns
+        'difference', 'pval', 'padj' and index = feature names.
+        See LineageVIModel.differential for full documentation.
+        """
+        return self.model.differential(
             (adata or self.adata),
-            groups,
-            comparison=comparison,
-            n_sample=n_sample,
-            use_directions=use_directions,
-            directions_key=directions_key,
-            select_terms=select_terms,
-            exact=exact,
-            key_added=key_added,
+            groupby_key=groupby_key,
+            mode=mode,
+            layer=layer,
+            velocity_layer=velocity_layer,
+            ensure_model_outputs=ensure_model_outputs,
         )
 
     def get_directional_uncertainty(
@@ -451,48 +451,34 @@ class LineageVI:
             base_seed=base_seed,
         )
 
-    def perturb_genes(
+    def perturb(
         self,
         adata: Optional[sc.AnnData],
+        mode: str,
         *,
         groupby_key: str,
         group_to_perturb: str,
-        genes_to_perturb,
         perturb_value: float,
+        genes_to_perturb=None,
+        gp_uns_key: Optional[str] = None,
+        gps_to_perturb=None,
         perturb_spliced: bool = True,
         perturb_unspliced: bool = False,
         perturb_both: bool = False,
     ):
-        """See `LineageVIModel.perturb_genes`."""
-        return self.model.perturb_genes(
+        """See `LineageVIModel.perturb`. Single entry point for mode='genes' or mode='gps'."""
+        return self.model.perturb(
             (adata or self.adata),
+            mode=mode,
             groupby_key=groupby_key,
             group_to_perturb=group_to_perturb,
-            genes_to_perturb=genes_to_perturb,
             perturb_value=perturb_value,
+            genes_to_perturb=genes_to_perturb,
+            gp_uns_key=gp_uns_key,
+            gps_to_perturb=gps_to_perturb,
             perturb_spliced=perturb_spliced,
             perturb_unspliced=perturb_unspliced,
             perturb_both=perturb_both,
-        )
-
-    def perturb_gps(
-        self,
-        adata: Optional[sc.AnnData],
-        *,
-        gp_uns_key: str,
-        gps_to_perturb,
-        groupby_key: str,
-        group_to_perturb: str,
-        perturb_value: float,
-    ):
-        """See `LineageVIModel.perturb_gps`."""
-        return self.model.perturb_gps(
-            (adata or self.adata),
-            gp_uns_key,
-            gps_to_perturb,
-            groupby_key,
-            group_to_perturb,
-            perturb_value,
         )
 
     def map_velocities(

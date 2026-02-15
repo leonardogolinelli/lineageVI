@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 from typing import Optional, Tuple, Union
 from anndata import AnnData
 from scipy import sparse
@@ -802,8 +803,20 @@ def plot_gp_phase_planes(
 
     return fig, axes
 
+def _is_differential_format(scores):
+    """True if scores are differential() output: dict of DataFrames with 'padj' column."""
+    val = next(iter(scores.values()), None)
+    return isinstance(val, pd.DataFrame) and "padj" in val.columns
+
+
 def plot_abs_bfs_key(scores, terms, key, n_points=30, lim_val=2.3, fontsize=8, scale_y=2, yt_step=0.3,
                     title=None, ax=None):
+    """
+    Plot top features by significance for one group.
+    Supports (1) legacy bf format: scores[key]['bf'] array, terms array;
+    (2) differential format: scores[key] is DataFrame with 'padj' and index = feature names.
+    For differential format, y-axis is -log10(padj) (capped); lim_val is -log10(p-threshold).
+    """
     txt_args = dict(
         rotation='vertical',
         verticalalignment='bottom',
@@ -814,61 +827,120 @@ def plot_abs_bfs_key(scores, terms, key, n_points=30, lim_val=2.3, fontsize=8, s
     ax = ax if ax is not None else plt.axes()
     ax.grid(False)
 
-    bfs = np.abs(scores[key]['bf'])
-    srt = np.argsort(bfs)[::-1][:n_points]
-    top = bfs.max()
+    if isinstance(scores[key], pd.DataFrame) and "padj" in scores[key].columns:
+        df = scores[key]
+        padj = df["padj"].values
+        padj = np.where(padj <= 0, np.nan, padj)  # avoid log(0)
+        y_vals = -np.log10(padj)
+        y_vals = np.clip(y_vals, 0, 20)  # cap inf
+        terms_arr = np.asarray(df.index)
+        # already sorted by padj ascending, so first n_points are top
+        n_show = min(n_points, len(terms_arr))
+        y_vals = y_vals[:n_show]
+        terms_arr = terms_arr[:n_show]
+        y_label = "-log10(adj p-value)"
+    else:
+        bfs = np.abs(scores[key]["bf"])
+        srt = np.argsort(bfs)[::-1][:n_points]
+        y_vals = bfs[srt]
+        terms_arr = terms[srt]
+        n_show = len(y_vals)
+        y_label = "Absolute log bayes factors"
 
-    ax.set_ylim(top=top * scale_y)
-    yt = np.arange(0, top * 1.1, yt_step)
-    ax.set_yticks(yt)
+    top = np.nanmax(y_vals) if len(y_vals) else 1.0
+    if not np.isfinite(top) or top <= 0:
+        top = 1.0
 
-    ax.set_xlim(0.1, n_points + 0.9)
-    xt = np.arange(0, n_points + 1, 5)
-    xt[0] = 1
+    y_max = top * scale_y
+    ax.set_ylim(0, y_max)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, integer=False))
+
+    ax.set_xlim(0.1, n_show + 0.9)
+    xt = np.arange(0, n_show + 1, 5)
+    if len(xt) > 0:
+        xt[0] = 1
     ax.set_xticks(xt)
 
-    for i, (bf, term) in enumerate(zip(bfs[srt], terms[srt])):
-        ax.text(i+1, bf, term, **txt_args)
+    for i, (y, term) in enumerate(zip(y_vals, terms_arr)):
+        if np.isfinite(y):
+            ax.text(i + 1, y, str(term), **txt_args)
 
     ax.axhline(y=lim_val, color='red', linestyle='--', label='')
 
     ax.set_xlabel("Rank")
-    ax.set_ylabel("Absolute log bayes factors")
+    ax.set_ylabel(y_label)
     ax.set_title(key if title is None else title)
 
     return ax.figure
 
-def plot_abs_bfs(
+def plot_differential(
     adata,
-    scores_key="bf_scores",
-    terms: Union[str, list] = "terms",
+    scores_key: str,
+    *,
+    terms: Union[str, list, None] = "terms",
     keys=None,
     n_cols=3,
-    figsize=None,   # 👈 new
-    dpi=None,       # 👈 new
+    n_points=30,
+    lim_val=1.3,
+    figsize=None,
+    dpi=None,
+    fontsize=8,
+    scale_y=2,
+    yt_step=0.3,
+    title=None,
     **kwargs,
 ):
     """\
-    Plot the absolute bayes scores rankings.
-    """
+    Plot top features by significance per group (ranked bar chart).
 
+    Use with differential() results: store the returned dict in adata.uns[scores_key],
+    then call this to plot -log10(adj p-value) vs rank for each group.
+
+    Parameters
+    ----------
+    adata : AnnData
+        AnnData with adata.uns[scores_key] = dict of DataFrames (from differential()).
+    scores_key : str
+        Key in adata.uns where the differential results are stored (e.g. 'differential_latent').
+    terms : str, list, or None
+        For legacy bf format only: key in adata.uns for feature names, or list. Ignored for differential format.
+    keys : list, optional
+        Subset of groups to plot. Default: all groups.
+    n_cols : int
+        Number of columns in the subplot grid.
+    n_points : int
+        Number of top features to show per group.
+    lim_val : float
+        Horizontal line threshold; for differential format this is -log10(p), e.g. 1.3 for p=0.05.
+    """
     from itertools import product
 
     scores = adata.uns[scores_key]
 
-    if isinstance(terms, str):
-        terms = np.asarray(adata.uns[terms])
+    if _is_differential_format(scores):
+        terms = None
     else:
-        terms = np.asarray(terms)
-
-    if len(terms) != len(next(iter(scores.values()))["bf"]):
-        raise ValueError('Incorrect length of terms.')
+        if terms is None:
+            terms = "terms"
+        if isinstance(terms, str):
+            terms = np.asarray(adata.uns[terms])
+        else:
+            terms = np.asarray(terms)
+        if len(terms) != len(next(iter(scores.values()))["bf"]):
+            raise ValueError("Incorrect length of terms.")
 
     if keys is None:
         keys = list(scores.keys())
 
     if len(keys) == 1:
         keys = keys[0]
+
+    kwargs.setdefault("n_points", n_points)
+    kwargs.setdefault("lim_val", lim_val)
+    kwargs.setdefault("fontsize", fontsize)
+    kwargs.setdefault("scale_y", scale_y)
+    kwargs.setdefault("yt_step", yt_step)
+    kwargs.setdefault("title", title)
 
     if isinstance(keys, str):
         return plot_abs_bfs_key(scores, terms, keys, **kwargs)
@@ -881,11 +953,13 @@ def plot_abs_bfs(
     else:
         n_rows = int(np.ceil(n_keys / n_cols))
 
-    # default scaling if figsize not provided
     if figsize is None:
         figsize = (4 * n_cols, 8 * n_rows)
 
-    fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize, dpi=dpi)
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=figsize, dpi=dpi,
+        gridspec_kw={"wspace": 0.4},
+    )
 
     for key, ix in zip(keys, product(range(n_rows), range(n_cols))):
         if n_rows == 1:
@@ -899,5 +973,229 @@ def plot_abs_bfs(
         for i in range(n_inactive):
             axs[n_rows - 1, -(i + 1)].axis("off")
 
-    plt.close(fig)  # prevent auto-display
+    plt.close(fig)
     return fig
+
+
+def plot_abs_bfs(
+    adata,
+    scores_key="bf_scores",
+    terms: Union[str, list, None] = "terms",
+    keys=None,
+    n_cols=3,
+    figsize=None,
+    dpi=None,
+    **kwargs,
+):
+    """\
+    Legacy alias for plot_differential. Prefer plot_differential() for differential() results.
+    """
+    return plot_differential(
+        adata,
+        scores_key=scores_key,
+        terms=terms,
+        keys=keys,
+        n_cols=n_cols,
+        figsize=figsize,
+        dpi=dpi,
+        **kwargs,
+    )
+
+
+def _to_list(x):
+    """Return [x] if x is not a list, else x."""
+    return x if isinstance(x, list) else [x]
+
+
+def heatmap(
+    adata: AnnData,
+    var_names: Union[str, list],
+    sortby: str = "latent_time",
+    layer: Optional[str] = "Ms",
+    color_map: str = "viridis",
+    col_color: Optional[Union[str, list]] = None,
+    palette: Union[str, list] = "viridis",
+    n_convolve: Optional[int] = 30,
+    standard_scale: Optional[int] = 0,
+    sort: bool = True,
+    colorbar: Optional[bool] = None,
+    col_cluster: bool = False,
+    row_cluster: bool = False,
+    figsize: Tuple[float, float] = (8, 4),
+    show: Optional[bool] = None,
+    save: Optional[Union[bool, str]] = None,
+    **kwargs,
+):
+    """Plot time series for genes (or gene programs) as heatmap.
+
+    Similar to scvelo.pl.plot_heatmap: cells are ordered by sortby (e.g. latent time),
+    optional smoothing along the x-axis, optional row sort by peak position.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix.
+    var_names : str or list of str
+        Names of variables (genes or gene program names) to plot.
+    sortby : str, default 'latent_time'
+        Key in adata.obs to order cells by (e.g. latent time).
+    layer : str or None, default 'Ms'
+        Layer key for expression. If None, use adata.X.
+    color_map : str, default 'viridis'
+        Matplotlib colormap name for the heatmap.
+    col_color : str or list of str, optional
+        Keys in adata.obs to color the columns (cells) by.
+    palette : str or list, default 'viridis'
+        Palette for categorical column annotations.
+    n_convolve : int or None, default 30
+        If set, smooth data along the x-axis with a rolling mean of this size.
+    standard_scale : int or None, default 0
+        0 = scale each row (gene) to [0,1]; 1 = scale each column (cell).
+    sort : bool, default True
+        If True, sort rows (genes) by position of maximum value (peak order).
+    colorbar : bool or None
+        Whether to show the heatmap colorbar.
+    col_cluster : bool, default False
+        If True, cluster columns (cells).
+    row_cluster : bool, default False
+        If True, cluster rows (genes).
+    figsize : tuple, default (8, 4)
+        Figure size (width, height).
+    show : bool or None
+        If False, return the clustermap object without showing. If True or None, show.
+    save : bool or str or None
+        If True or a path, save the figure.
+    **kwargs
+        Passed to seaborn.clustermap (e.g. yticklabels=True to show all gene names).
+
+    Returns
+    -------
+    seaborn.matrix.ClusterMap or None
+        If show is False, returns the clustermap; otherwise shows and returns None.
+    """
+    var_names = _to_list(var_names)
+    var_names = [n for n in var_names if n in adata.var_names]
+
+    if len(var_names) == 0:
+        raise ValueError("No var_names found in adata.var_names")
+
+    tkey = sortby
+    xkey = layer if layer is not None else "X"
+    time = adata.obs[tkey].values.copy()
+    valid = np.isfinite(time)
+    if not np.any(valid):
+        raise ValueError(f"All values in adata.obs[{tkey!r}] are non-finite.")
+    time = time[valid]
+
+    if layer and layer in adata.layers:
+        X = adata[valid, var_names].layers[layer]
+    else:
+        X = adata[valid, var_names].X
+
+    if sparse.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X)
+
+    order = np.argsort(time)
+    df = pd.DataFrame(X[order], columns=var_names)
+
+    if n_convolve is not None and n_convolve > 1:
+        weights = np.ones(n_convolve) / n_convolve
+        for gene in var_names:
+            try:
+                df[gene] = np.convolve(df[gene].values.astype(float), weights, mode="same")
+            except (ValueError, TypeError):
+                pass
+
+    if sort:
+        try:
+            max_sort = np.argsort(np.argmax(df.values, axis=0))
+            df = pd.DataFrame(df.values[:, max_sort], columns=df.columns[max_sort])
+        except (ValueError, np.AxisError):
+            pass
+
+    col_color_arrays = None
+    if col_color is not None:
+        col_color_list = _to_list(col_color)
+        col_color_arrays = []
+        for col in col_color_list:
+            if col not in adata.obs.columns:
+                continue
+            vals = adata.obs[col].values[valid][order]
+            if pd.api.types.is_categorical_dtype(adata.obs[col]):
+                cats = adata.obs[col].cat.categories
+                n_cat = len(cats)
+                # Use adata.uns[f"{col}_colors"] when available (scanpy convention)
+                palette_colors = None
+                colors_key = f"{col}_colors"
+                if colors_key in adata.uns:
+                    stored = adata.uns[colors_key]
+                    if hasattr(stored, "__len__") and len(stored) >= n_cat:
+                        from matplotlib.colors import to_rgba
+                        palette_colors = []
+                        for c in list(stored)[:n_cat]:
+                            try:
+                                rgba = to_rgba(c)
+                                palette_colors.append(rgba[:3])  # rgb for seaborn
+                            except (ValueError, TypeError):
+                                break
+                        if len(palette_colors) != n_cat:
+                            palette_colors = None
+                if palette_colors is None:
+                    palette_colors = (
+                        sns.color_palette(palette, n_cat)
+                        if isinstance(palette, str)
+                        else list(palette)[:n_cat]
+                    )
+                color_map_cat = dict(zip(cats, palette_colors))
+                col_color_arrays.append([color_map_cat.get(v, (0.5, 0.5, 0.5)) for v in vals])
+            else:
+                v = np.asarray(vals, dtype=float)
+                v = np.ma.masked_invalid(v)
+                if np.ma.is_masked(v) or not np.any(np.isfinite(v)):
+                    col_color_arrays.append([(0.8, 0.8, 0.8)] * len(vals))
+                else:
+                    norm = (v - np.nanmin(v)) / (np.nanmax(v) - np.nanmin(v) + 1e-8)
+                    cmap = plt.get_cmap(palette if isinstance(palette, str) else "viridis")
+                    col_color_arrays.append([cmap(x) for x in norm])
+        if len(col_color_arrays) == 0:
+            col_color_arrays = None
+
+    if "dendrogram_ratio" not in kwargs:
+        kwargs["dendrogram_ratio"] = (
+            0.1 if row_cluster else 0,
+            0.2 if col_cluster else 0,
+        )
+    if colorbar is False or (colorbar is None and col_color_arrays is not None):
+        kwargs["cbar_pos"] = None
+    else:
+        kwargs.setdefault("cbar_pos", (0.02, 0.8, 0.03, 0.18))
+
+    kwargs.update(
+        {
+            "col_colors": col_color_arrays,
+            "col_cluster": col_cluster,
+            "row_cluster": row_cluster,
+            "cmap": color_map,
+            "xticklabels": False,
+            "standard_scale": standard_scale,
+            "figsize": figsize,
+        }
+    )
+
+    try:
+        cm = sns.clustermap(df.T, **kwargs)
+    except (TypeError, ImportError):
+        kwargs.pop("dendrogram_ratio", None)
+        kwargs.pop("cbar_pos", None)
+        cm = sns.clustermap(df.T, **kwargs)
+
+    if save not in (None, False):
+        path = save if isinstance(save, str) else "heatmap.pdf"
+        cm.savefig(path, dpi=150, bbox_inches="tight")
+
+    if show is False:
+        plt.close(cm.fig)
+        return cm
+    plt.show()
+    return None

@@ -6,9 +6,9 @@ import torch.nn.functional as F
 import scanpy as sc
 import pandas as pd
 import scipy.sparse as sp
-from scipy.stats import wilcoxon
+from scipy.stats import wilcoxon, mannwhitneyu
 from joblib import Parallel, delayed
-from typing import Tuple, Optional, List
+from typing import Dict, List, Optional, Tuple
 
 from .modules import Encoder, MaskedLinearDecoder, VelocityDecoder, ClusterEmbedding
 
@@ -58,6 +58,57 @@ def _fdr_bh_valid(p: np.ndarray) -> np.ndarray:
     padj = np.empty_like(p)
     padj[order] = padj_sorted
     return padj
+
+
+def _wilcoxon_1_vs_rest(
+    matrix: np.ndarray,
+    group_mask: np.ndarray,
+    feature_names: List[str],
+) -> pd.DataFrame:
+    """
+    Wilcoxon rank-sum (Mann-Whitney U) test: group vs rest, per feature.
+    Returns DataFrame with columns: difference (median_group - median_rest), pval, padj.
+    """
+    matrix = np.atleast_2d(matrix)
+    if matrix.shape[0] == 0 or matrix.shape[1] == 0:
+        return pd.DataFrame(
+            index=feature_names,
+            columns=["difference", "pval", "padj"],
+            data=np.nan,
+        )
+    x_in = matrix[group_mask]
+    x_rest = matrix[~group_mask]
+    n_features = matrix.shape[1]
+    differences = np.zeros(n_features)
+    pvals = np.ones(n_features)
+
+    for j in range(n_features):
+        a = np.ravel(x_in[:, j])
+        b = np.ravel(x_rest[:, j])
+        if a.size < 1 or b.size < 1:
+            pvals[j] = np.nan
+            differences[j] = 0.0
+            continue
+        if np.var(a) == 0 and np.var(b) == 0:
+            pvals[j] = 1.0
+            differences[j] = float(np.median(a) - np.median(b))
+            continue
+        try:
+            res = mannwhitneyu(a, b, alternative="two-sided")
+            pvals[j] = res.pvalue if np.isfinite(res.pvalue) else 1.0
+        except (ValueError, ZeroDivisionError):
+            pvals[j] = 1.0
+        differences[j] = float(np.median(a) - np.median(b))
+
+    padj = _fdr_bh(pvals)
+    return pd.DataFrame(
+        {
+            "difference": differences,
+            "pval": pvals,
+            "padj": padj,
+        },
+        index=feature_names,
+    )
 
 
 def seed_everything(seed: int):
@@ -464,164 +515,142 @@ class LineageVIModel(nn.Module):
         velocity, velocity_gp, alpha, beta, gamma = self.velocity_decoder(z_with_embeddings, x)
         velocity_gp = self._velocity_gp_from_gene_velocity(velocity)
         return velocity, velocity_gp, alpha, beta, gamma
-    
-    def latent_enrich(
-            self,
-            adata,
-            groups,
-            comparison='rest',
-            n_sample=5000,
-            use_directions=False,
-            directions_key='directions',
-            select_terms=None,
-            exact=True,
-            key_added='bf_scores'
-        ):
-            """Gene set enrichment test for the latent space. Test the hypothesis that latent scores
-            for each term in one group (z_1) is bigger than in the other group (z_2).
 
-            Puts results to `adata.uns[key_added]`. Results are a dictionary with
-            `p_h0` - probability that z_1 > z_2, `p_h1 = 1-p_h0` and `bf` - bayes factors equal to `log(p_h0/p_h1)`.
+    def differential(
+        self,
+        adata,
+        groupby_key: str,
+        mode: str = "expression",
+        *,
+        layer: Optional[str] = None,
+        velocity_layer: str = "velocity",
+        ensure_model_outputs: bool = True,
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Differential test (Wilcoxon rank-sum 1 vs rest) by group.
 
-            Parameters
-            ----------
-            groups: String or Dict
-                    A string with the key in `adata.obs` to look for categories or a dictionary
-                    with categories as keys and lists of cell names as values.
-            comparison: String
-                    The category name to compare against. If 'rest', then compares each category against all others.
-            n_sample: Integer
-                    Number of random samples to draw for each category.
-            use_directions: Boolean
-                    If 'True', multiplies the latent scores by directions in `adata`.
-            directions_key: String
-                    The key in `adata.uns` for directions.
-            select_terms: Array
-                    If not 'None', then an index of terms to select for the test. Only does the test
-                    for these terms.
-            adata: AnnData
-                    An AnnData object to use. If 'None', uses `self.adata`.
-            exact: Boolean
-                    Use exact probabilities for comparisons.
-            key_added: String
-                    key of adata.uns where to put the results of the test.
-            """
-            import pandas as pd
-            if isinstance(groups, str):
-                cats_col = adata.obs[groups]
-                cats = cats_col.unique()
-            elif isinstance(groups, dict):
-                cats = []
-                all_cells = []
-                for group, cells in groups.items():
-                    cats.append(group)
-                    all_cells += cells
-                adata = adata[all_cells]
-                cats_col = pd.Series(index=adata.obs_names, dtype=str)
-                for group, cells in groups.items():
-                    cats_col[cells] = group
+        For each group, compares that group vs all other cells for each feature,
+        and returns difference (median_group - median_rest), p-value, and
+        FDR-adjusted p-value per feature.
+
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data. For mode 'latent', 'gene_velocity', or 'gp_velocity',
+            model outputs must be present (run get_model_outputs(adata, save_to_adata=True)
+            first), unless ensure_model_outputs=False.
+        groupby_key : str
+            Key in adata.obs defining groups (e.g. 'clusters', 'cell_type').
+        mode : str, default 'expression'
+            - 'expression': differential expression (adata.X or adata.layers[layer]).
+            - 'latent': differential latent / gene program activations (adata.obsm['mean']).
+            - 'gene_velocity': differential gene velocity (adata.layers[velocity_layer]).
+            - 'gp_velocity': differential gene program velocity (adata.obsm['velocity_gp']).
+        layer : str, optional
+            Layer for expression mode (e.g. 'Ms', 'Mu'). If None, uses adata.X.
+        velocity_layer : str, default 'velocity'
+            Layer for gene_velocity mode ('velocity' or 'velocity_u').
+        ensure_model_outputs : bool, default True
+            If True and mode is 'latent' or a velocity mode, ensures adata has the
+            required obsm/layers (by calling _get_model_outputs(..., save_to_adata=True)
+            when missing). Requires the model to be trained.
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Keys are group names. Each value is a DataFrame with index = feature names
+            (genes or gene program names) and columns: 'difference', 'pval', 'padj'.
+            difference = median(in group) - median(rest).
+        """
+        if groupby_key not in adata.obs.columns:
+            raise ValueError(f"groupby_key {groupby_key!r} not in adata.obs")
+        groups = adata.obs[groupby_key].astype(str)
+        group_labels = groups.unique()
+
+        if mode == "expression":
+            if layer is not None:
+                if layer not in adata.layers:
+                    raise ValueError(f"layer {layer!r} not in adata.layers")
+                X = adata.layers[layer]
             else:
-                raise ValueError("groups should be a string or a dict.")
-
-            if comparison != "rest" and isinstance(comparison, str):
-                comparison = [comparison]
-
-            if comparison != "rest" and not set(comparison).issubset(cats):
-                raise ValueError("comparison should be 'rest' or among the passed groups")
-
-            scores = {}
-
-            for cat in cats:
-                if cat in comparison:
-                    continue
-
-                cat_mask = cats_col == cat
-                if comparison == "rest":
-                    others_mask = ~cat_mask
+                X = adata.X
+            if sp.issparse(X):
+                X = X.toarray()
+            matrix = np.asarray(X, dtype=np.float64)
+            feature_names = list(adata.var_names)
+        elif mode == "latent":
+            if "mean" not in adata.obsm:
+                if ensure_model_outputs:
+                    self._get_model_outputs(
+                        adata,
+                        n_samples=1,
+                        return_mean=True,
+                        save_to_adata=True,
+                    )
                 else:
-                    others_mask = cats_col.isin(comparison)
-
-                choice_1 = np.random.choice(cat_mask.sum(), n_sample)
-                choice_2 = np.random.choice(others_mask.sum(), n_sample)
-
-                adata_cat = adata[cat_mask][choice_1]
-                adata_others = adata[others_mask][choice_2]
-
-                if use_directions:
-                    directions = adata.uns[directions_key]
+                    raise ValueError(
+                        "adata.obsm['mean'] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
+                    )
+            matrix = np.asarray(adata.obsm["mean"], dtype=np.float64)
+            feature_names = list(
+                adata.uns.get("terms", np.arange(matrix.shape[1]).astype(str))
+            )
+        elif mode == "gene_velocity":
+            if velocity_layer not in adata.layers:
+                if ensure_model_outputs:
+                    self._get_model_outputs(
+                        adata,
+                        n_samples=1,
+                        return_mean=True,
+                        save_to_adata=True,
+                    )
                 else:
-                    directions = None
-
-                u_cat = adata_cat.layers['Mu']
-                s_cat = adata_cat.layers['Ms']
-                u_s = np.concatenate([u_cat, s_cat], axis=1)  # (B, 2G)
-                u_others = adata_others.layers['Mu']
-                s_others = adata_others.layers['Ms']
-                u_s_others = np.concatenate([u_others, s_others], axis=1)  # (B, 2G)
-
-                u_s = torch.tensor(u_s, dtype=torch.float32)
-                u_s_others = torch.tensor(u_s_others, dtype=torch.float32)
-                device = next(self.parameters()).device
-                u_s = u_s.to(device)
-                u_s_others = u_s_others.to(device)
-
-                with torch.no_grad():
-                    z0, means0, logvars0 = self._forward_encoder(u_s)
-                    z1, means1, logvars1 = self._forward_encoder(u_s_others)
-
-                    vars0 = logvars0.exp()
-                    vars1 = logvars1.exp()
-
-                to_numpy = lambda x : x.detach().cpu().numpy()
-                means0 = to_numpy(means0)
-                means1 = to_numpy(means1)
-                vars0 = to_numpy(vars0)
-                vars1 = to_numpy(vars1)
-
-                if not exact:
-                    if directions is not None:
-                        z0 *= directions
-                        z1 *= directions
-
-                    if select_terms is not None:
-                        z0 = z0[:, select_terms]
-                        z1 = z1[:, select_terms]
-
-                    to_reduce = z0 > z1
-
-                    zeros_mask = (np.abs(z0).sum(0) == 0) | (np.abs(z1).sum(0) == 0)
-
+                    raise ValueError(
+                        f"adata.layers[{velocity_layer!r}] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
+                    )
+            matrix = np.asarray(adata.layers[velocity_layer], dtype=np.float64)
+            feature_names = list(adata.var_names)
+        elif mode == "gp_velocity":
+            if "velocity_gp" not in adata.obsm:
+                if ensure_model_outputs:
+                    self._get_model_outputs(
+                        adata,
+                        n_samples=1,
+                        return_mean=True,
+                        save_to_adata=True,
+                    )
                 else:
-                    from scipy.special import erfc
+                    raise ValueError(
+                        "adata.obsm['velocity_gp'] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
+                    )
+            matrix = np.asarray(adata.obsm["velocity_gp"], dtype=np.float64)
+            feature_names = list(
+                adata.uns.get("terms", np.arange(matrix.shape[1]).astype(str))
+            )
+        else:
+            raise ValueError(
+                f"mode must be one of 'expression', 'latent', 'gene_velocity', 'gp_velocity', got {mode!r}"
+            )
 
-                    if directions is not None:
-                        means0 *= directions
-                        means1 *= directions
+        if matrix.shape[1] != len(feature_names):
+            feature_names = [str(i) for i in range(matrix.shape[1])]
 
-                    if select_terms is not None:
-                        means0 = means0[:, select_terms]
-                        means1 = means1[:, select_terms]
-                        vars0 = vars0[:, select_terms]
-                        vars1 = vars1[:, select_terms]
-
-                    to_reduce = (means1 - means0) / np.sqrt(2 * (vars0 + vars1))
-                    to_reduce = 0.5 * erfc(to_reduce)
-
-                    zeros_mask = (np.abs(means0).sum(0) == 0) | (np.abs(means1).sum(0) == 0)
-
-                p_h0 = np.mean(to_reduce, axis=0)
-                p_h1 = 1.0 - p_h0
-                epsilon = 1e-12
-                
-                bf = np.log(p_h0 + epsilon) - np.log(p_h1 + epsilon)
-
-                p_h0[zeros_mask] = 0
-                p_h1[zeros_mask] = 0
-                bf[zeros_mask] = 0
-
-                scores[cat] = dict(p_h0=p_h0, p_h1=p_h1, bf=bf)
-
-            adata.uns[key_added] = scores
+        result = {}
+        for group in group_labels:
+            group_mask = (groups == group).values
+            if group_mask.sum() < 1 or (~group_mask).sum() < 1:
+                result[group] = pd.DataFrame(
+                    index=feature_names,
+                    columns=["rank", "difference", "pval", "padj"],
+                    data=np.nan,
+                )
+                continue
+            df = _wilcoxon_1_vs_rest(matrix, group_mask, feature_names).sort_values(
+                "padj", na_position="last"
+            )
+            df.insert(0, "rank", np.arange(1, len(df) + 1))
+            result[group] = df
+        return result
 
     @torch.inference_mode()
     def _get_model_outputs(
@@ -1551,7 +1580,7 @@ class LineageVIModel(nn.Module):
         return np.where(pd.Series(adata.uns[gp_key]).isin(gps))[0]
     
     @torch.inference_mode()
-    def perturb_genes(
+    def _perturb_genes(
             self, 
             adata, 
             groupby_key, 
@@ -1562,7 +1591,7 @@ class LineageVIModel(nn.Module):
             perturb_unspliced = False,
             perturb_both = False):
         """
-        Perturb gene expression in specific groups and analyze velocity changes.
+        Internal: perturb gene expression in specific groups and analyze velocity changes.
         
         This method artificially modifies gene expression levels in specified groups
         and genes, then analyzes how these perturbations affect velocity predictions.
@@ -1590,14 +1619,14 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         df_genes : pd.DataFrame
-            Gene-level velocity change summary: rank, genes, unspliced_velocity_diff,
-            velocity_diff, pval/padj for unspliced and spliced velocity. Sorted by
-            padj_velocity (most significant first).
+            Gene-level velocity change summary: genes, velocity before/after/diff,
+            pval/padj for unspliced and spliced velocity. Sorted by
+            padj_velocity (spliced velocity adj p-value; most significant first).
         df_gp : pd.DataFrame
-            GP-level velocity change summary: rank, terms, gp_velocity_diff,
+            GP-level velocity change summary: terms, gp_velocity before/after/diff,
             pval_gp_velocity, padj_gp_velocity. Sorted by padj_gp_velocity (most significant first).
         perturbed_outputs : dict
-            Dictionary of perturbed model outputs (recon, mean, logvar, velocity_gp, velo_u_pert, velo_pert, alpha_pert, beta_pert, gamma_pert).
+            Dictionary with velocity before/after (velocity_gp_before, velocity_gp, velo_u_before, velo_u_pert, velo_before, velo_pert) plus other perturbed outputs (recon, mean, logvar, alpha_pert, beta_pert, gamma_pert).
         
         Notes
         -----
@@ -1697,15 +1726,19 @@ class LineageVIModel(nn.Module):
 
 
         perturbed_outputs = {
-            'recon' : to_numpy(recon_pert), 
-            'mean' : to_numpy(mean_pert), 
-            'logvar' : to_numpy(logvar_pert), 
-            'velocity_gp' : to_numpy(gp_velo_pert), 
-            'velo_u_pert' : to_numpy(velo_u_pert), 
-            'velo_pert' : to_numpy(velo_pert),
-            'alpha_pert' : to_numpy(alpha_pert), 
-            'beta_pert' : to_numpy(beta_pert), 
-            'gamma_pert' : to_numpy(gamma_pert), 
+            "recon": to_numpy(recon_pert),
+            "mean": to_numpy(mean_pert),
+            "logvar": to_numpy(logvar_pert),
+            "velocity_gp": to_numpy(gp_velo_pert),
+            "velo_u_pert": to_numpy(velo_u_pert),
+            "velo_pert": to_numpy(velo_pert),
+            "alpha_pert": to_numpy(alpha_pert),
+            "beta_pert": to_numpy(beta_pert),
+            "gamma_pert": to_numpy(gamma_pert),
+            # Velocity before perturbation (same cells, unperturbed input)
+            "velocity_gp_before": to_numpy(gp_velo_unpert),
+            "velo_u_before": to_numpy(velo_u_unpert),
+            "velo_before": to_numpy(velo_unpert),
         }
 
         recon_diff = recon_pert - recon_unpert
@@ -1723,6 +1756,11 @@ class LineageVIModel(nn.Module):
             a = t.cpu().numpy()
             return np.atleast_2d(a)
 
+        def _to_np_2d(x):
+            """Handle both tensor and array for mean-over-cells."""
+            a = x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
+            return np.atleast_2d(a)
+
         gp_velo_2d = to_2d(gp_velo_diff)
         velo_u_2d = to_2d(velo_u_diff)
         velo_2d = to_2d(velo_diff)
@@ -1730,6 +1768,13 @@ class LineageVIModel(nn.Module):
         gp_velo_diff_np = gp_velo_2d.mean(0)
         velo_u_diff_np = velo_u_2d.mean(0)
         velo_diff_np = velo_2d.mean(0)
+        # Mean velocity before/after (over perturbed cells) for the result tables
+        gp_velo_before_np = to_2d(gp_velo_unpert).mean(0)
+        gp_velo_after_np = to_2d(gp_velo_pert).mean(0)
+        velo_u_before_np = _to_np_2d(velo_u_unpert).mean(0)
+        velo_u_after_np = _to_np_2d(velo_u_pert).mean(0)
+        velo_before_np = _to_np_2d(velo_unpert).mean(0)
+        velo_after_np = _to_np_2d(velo_pert).mean(0)
 
         # Wilcoxon + FDR for velocity only (gene velocity + GP velocity)
         pval_gp_velo = _wilcoxon_per_column(gp_velo_2d)
@@ -1739,43 +1784,55 @@ class LineageVIModel(nn.Module):
         pval_velo = _wilcoxon_per_column(velo_2d)
         padj_velo = _fdr_bh(pval_velo)
 
-        # GP table: velocity only, ranked by padj (most significant first)
-        df_gp = pd.DataFrame({
+        # GP table: velocity only (GP velocity), ranked by padj (most significant first)
+        _gp = pd.DataFrame({
             "terms": adata.uns["terms"],
+            "gp_velocity_before": gp_velo_before_np,
+            "gp_velocity_after": gp_velo_after_np,
             "gp_velocity_diff": gp_velo_diff_np,
             "pval_gp_velocity": pval_gp_velo,
             "padj_gp_velocity": padj_gp_velo,
         })
-        df_gp = df_gp.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
-        df_gp.insert(0, "rank", np.arange(1, len(df_gp) + 1))
+        _gp = _gp.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
+        df_gp = _gp[["terms", "gp_velocity_before", "gp_velocity_after", "gp_velocity_diff", "pval_gp_velocity", "padj_gp_velocity"]]
 
-        # Gene table: velocity only, ranked by padj_velocity (spliced; most significant first)
-        df_genes = pd.DataFrame({
+        # Gene table: velocity only (gene velocity), ranked by spliced velocity adj p-value (padj_velocity)
+        _df = pd.DataFrame({
             "genes": adata.var_names,
+            "unspliced_velocity_before": velo_u_before_np,
+            "unspliced_velocity_after": velo_u_after_np,
             "unspliced_velocity_diff": velo_u_diff_np,
+            "velocity_before": velo_before_np,
+            "velocity_after": velo_after_np,
             "velocity_diff": velo_diff_np,
             "pval_unspliced_velocity": pval_velo_u,
             "padj_unspliced_velocity": padj_velo_u,
             "pval_velocity": pval_velo,
             "padj_velocity": padj_velo,
         })
-        df_genes = df_genes.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
-        df_genes.insert(0, "rank", np.arange(1, len(df_genes) + 1))
+        _df = _df.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
+        df_genes = _df[["genes", "unspliced_velocity_before", "unspliced_velocity_after", "unspliced_velocity_diff", "velocity_before", "velocity_after", "velocity_diff", "pval_unspliced_velocity", "padj_unspliced_velocity", "pval_velocity", "padj_velocity"]]
 
         # Store perturbed outputs in adata
-        # For perturb_genes, outputs are computed only for perturbed cells
+        # For _perturb_genes, outputs are computed only for perturbed cells
         # We need to handle full adata shape - initialize arrays if needed
         n_cells = adata.shape[0]
         n_genes = adata.shape[1]
         n_gps = len(perturbed_outputs['velocity_gp'][0]) if len(perturbed_outputs['velocity_gp'].shape) > 1 else 1
         
-        # Initialize full arrays if they don't exist
+        # Initialize full arrays if they don't exist (before = unperturbed, pert = after perturbation)
         if 'velocity_gp_pert' not in adata.obsm:
             adata.obsm['velocity_gp_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        if 'velocity_gp_before' not in adata.obsm:
+            adata.obsm['velocity_gp_before'] = np.zeros((n_cells, n_gps), dtype=np.float32)
         if 'velocity_u_pert' not in adata.layers:
             adata.layers['velocity_u_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_u_before' not in adata.layers:
+            adata.layers['velocity_u_before'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'velocity_pert' not in adata.layers:
             adata.layers['velocity_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_before' not in adata.layers:
+            adata.layers['velocity_before'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'alpha_pert' not in adata.layers:
             adata.layers['alpha_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'beta_pert' not in adata.layers:
@@ -1796,10 +1853,14 @@ class LineageVIModel(nn.Module):
             # Handle both 1D and 2D outputs
             if len(perturbed_outputs['velocity_gp'].shape) == 1:
                 adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp']
+                adata.obsm['velocity_gp_before'][idx] = perturbed_outputs['velocity_gp_before']
             else:
                 adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp'][0]
+                adata.obsm['velocity_gp_before'][idx] = perturbed_outputs['velocity_gp_before'][0]
             adata.layers['velocity_u_pert'][idx] = perturbed_outputs['velo_u_pert'][0] if len(perturbed_outputs['velo_u_pert'].shape) > 1 else perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_u_before'][idx] = perturbed_outputs['velo_u_before'][0] if len(perturbed_outputs['velo_u_before'].shape) > 1 else perturbed_outputs['velo_u_before']
             adata.layers['velocity_pert'][idx] = perturbed_outputs['velo_pert'][0] if len(perturbed_outputs['velo_pert'].shape) > 1 else perturbed_outputs['velo_pert']
+            adata.layers['velocity_before'][idx] = perturbed_outputs['velo_before'][0] if len(perturbed_outputs['velo_before'].shape) > 1 else perturbed_outputs['velo_before']
             adata.layers['alpha_pert'][idx] = perturbed_outputs['alpha_pert'][0] if len(perturbed_outputs['alpha_pert'].shape) > 1 else perturbed_outputs['alpha_pert']
             adata.layers['beta_pert'][idx] = perturbed_outputs['beta_pert'][0] if len(perturbed_outputs['beta_pert'].shape) > 1 else perturbed_outputs['beta_pert']
             adata.layers['gamma_pert'][idx] = perturbed_outputs['gamma_pert'][0] if len(perturbed_outputs['gamma_pert'].shape) > 1 else perturbed_outputs['gamma_pert']
@@ -1815,8 +1876,11 @@ class LineageVIModel(nn.Module):
         else:
             # Multiple cells case
             adata.obsm['velocity_gp_pert'][cell_idx] = perturbed_outputs['velocity_gp']
+            adata.obsm['velocity_gp_before'][cell_idx] = perturbed_outputs['velocity_gp_before']
             adata.layers['velocity_u_pert'][cell_idx] = perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_u_before'][cell_idx] = perturbed_outputs['velo_u_before']
             adata.layers['velocity_pert'][cell_idx] = perturbed_outputs['velo_pert']
+            adata.layers['velocity_before'][cell_idx] = perturbed_outputs['velo_before']
             adata.layers['alpha_pert'][cell_idx] = perturbed_outputs['alpha_pert']
             adata.layers['beta_pert'][cell_idx] = perturbed_outputs['beta_pert']
             adata.layers['gamma_pert'][cell_idx] = perturbed_outputs['gamma_pert']
@@ -1825,7 +1889,9 @@ class LineageVIModel(nn.Module):
             adata.obsm['logvar_pert'][cell_idx] = perturbed_outputs['logvar']
         
         print("\nPerturbed outputs stored in adata:")
-        print(f"  adata.obsm['velocity_gp_pert']: GP velocities (shape: {adata.obsm['velocity_gp_pert'].shape})")
+        print(f"  adata.obsm['velocity_gp_before'] / ['velocity_gp_pert']: GP velocity before/after (shape: {adata.obsm['velocity_gp_pert'].shape})")
+        print(f"  adata.layers['velocity_before'] / ['velocity_pert']: Gene velocity (spliced) before/after (shape: {adata.layers['velocity_pert'].shape})")
+        print(f"  adata.layers['velocity_u_before'] / ['velocity_u_pert']: Gene velocity (unspliced) before/after (shape: {adata.layers['velocity_u_pert'].shape})")
         print(f"  adata.obsm['mean_pert']: Perturbed latent means (shape: {adata.obsm['mean_pert'].shape})")
         print(f"  adata.obsm['logvar_pert']: Perturbed latent logvars (shape: {adata.obsm['logvar_pert'].shape})")
         print(f"  adata.layers['velocity_u_pert']: Unspliced velocities (shape: {adata.layers['velocity_u_pert'].shape})")
@@ -1839,9 +1905,9 @@ class LineageVIModel(nn.Module):
         return df_genes, df_gp, perturbed_outputs
 
     @torch.inference_mode()
-    def perturb_gps(self, adata, gp_uns_key, gps_to_perturb, groupby_key, group_to_perturb, perturb_value):
+    def _perturb_gps(self, adata, gp_uns_key, gps_to_perturb, groupby_key, group_to_perturb, perturb_value):
         """
-        Perturb gene program expression in specific groups and analyze velocity changes.
+        Internal: perturb gene program expression in specific groups and analyze velocity changes.
         
         This method artificially modifies gene program expression levels in specified groups
         and gene programs, then analyzes how these perturbations affect velocity predictions.
@@ -1865,12 +1931,13 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         genes_df : pd.DataFrame
-            Gene-level velocity change summary: rank, genes, unspliced_velocity_diff,
-            velocity_diff, pval/padj for unspliced and spliced velocity. Sorted by
-            padj_velocity (most significant first).
+            Gene-level velocity change summary: genes, velocity before/after/diff,
+            pval/padj. Sorted by spliced velocity padj_velocity (most significant first).
         gps_df : pd.DataFrame
-            GP-level velocity change summary: rank, gene_programs, gp_velocity_diff,
+            GP-level velocity change summary: gene_programs, gp_velocity before/after/diff,
             pval_gp_velocity, padj_gp_velocity. Sorted by padj_gp_velocity (most significant first).
+        perturbed_outputs : dict
+            Velocity before/after (velocity_gp_before, velocity_gp_pert, velo_u_before, velo_u_pert, velo_before, velo_pert) and other outputs.
         
         Notes
         -----
@@ -1941,16 +2008,20 @@ class LineageVIModel(nn.Module):
 
         to_numpy = lambda x : x.cpu().numpy()
         
-        velo_u_pert, velo_pert = np.split(velocity_pert, 2, axis=1)
+        velo_u_unpert, velo_unpert = np.split(to_numpy(velocity_unpert), 2, axis=1)
+        velo_u_pert, velo_pert = np.split(to_numpy(velocity_pert), 2, axis=1)
 
         perturbed_outputs = {
-            'velocity_gp_pert' : to_numpy(velocity_gp_pert), 
-            'velo_u_pert' : to_numpy(velo_u_pert), 
-            'velo_pert' : to_numpy(velo_pert),
-            'alpha_pert' : to_numpy(alpha_pert), 
-            'beta_pert' : to_numpy(beta_pert), 
-            'gamma_pert' : to_numpy(gamma_pert), 
-            'recon' : to_numpy(x_dec_pert), 
+            "velocity_gp_pert": to_numpy(velocity_gp_pert),
+            "velocity_gp_before": to_numpy(velocity_gp_unpert),
+            "velo_u_pert": velo_u_pert,
+            "velo_u_before": velo_u_unpert,
+            "velo_pert": velo_pert,
+            "velo_before": velo_unpert,
+            "alpha_pert": to_numpy(alpha_pert),
+            "beta_pert": to_numpy(beta_pert),
+            "gamma_pert": to_numpy(gamma_pert),
+            "recon": to_numpy(x_dec_pert),
         }
 
         velo_diff_2d = np.atleast_2d(to_numpy(velocity_pert - velocity_unpert))
@@ -1960,6 +2031,13 @@ class LineageVIModel(nn.Module):
         velo_gp_mean = velo_gp_2d.mean(0)
 
         velo_diff_u, velo_diff_s = np.split(velo_diff_mean, 2)
+        # Mean velocity before/after (over perturbed cells) for the result tables
+        velo_gp_before_mean = np.atleast_2d(perturbed_outputs["velocity_gp_before"]).mean(0)
+        velo_gp_after_mean = np.atleast_2d(perturbed_outputs["velocity_gp_pert"]).mean(0)
+        velo_u_before_mean = np.atleast_2d(perturbed_outputs["velo_u_before"]).mean(0)
+        velo_u_after_mean = np.atleast_2d(perturbed_outputs["velo_u_pert"]).mean(0)
+        velo_before_mean = np.atleast_2d(perturbed_outputs["velo_before"]).mean(0)
+        velo_after_mean = np.atleast_2d(perturbed_outputs["velo_pert"]).mean(0)
 
         n_genes = adata.shape[1]
         velo_u_2d = velo_diff_2d[:, :n_genes]
@@ -1973,43 +2051,55 @@ class LineageVIModel(nn.Module):
         pval_velo_gp = _wilcoxon_per_column(velo_gp_2d)
         padj_velo_gp = _fdr_bh(pval_velo_gp)
 
-        # Gene table: velocity only, ranked by padj_velo_s (most significant first)
-        genes_df = pd.DataFrame({
+        # Gene table: velocity only, ranked by spliced velocity adj p-value (padj_velocity)
+        _g = pd.DataFrame({
             "genes": adata.var_names,
+            "unspliced_velocity_before": velo_u_before_mean,
+            "unspliced_velocity_after": velo_u_after_mean,
             "unspliced_velocity_diff": velo_diff_u,
+            "velocity_before": velo_before_mean,
+            "velocity_after": velo_after_mean,
             "velocity_diff": velo_diff_s,
             "pval_unspliced_velocity": pval_velo_u,
             "padj_unspliced_velocity": padj_velo_u,
             "pval_velocity": pval_velo_s,
             "padj_velocity": padj_velo_s,
         })
-        genes_df = genes_df.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
-        genes_df.insert(0, "rank", np.arange(1, len(genes_df) + 1))
+        _g = _g.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
+        genes_df = _g[["genes", "unspliced_velocity_before", "unspliced_velocity_after", "unspliced_velocity_diff", "velocity_before", "velocity_after", "velocity_diff", "pval_unspliced_velocity", "padj_unspliced_velocity", "pval_velocity", "padj_velocity"]]
 
-        # GP table: velocity only, ranked by padj_velo_gp (most significant first)
-        gps_df = pd.DataFrame({
+        # GP table: velocity only, ranked by padj_gp_velocity (most significant first)
+        _gp = pd.DataFrame({
             "gene_programs": adata.uns["terms"],
+            "gp_velocity_before": velo_gp_before_mean,
+            "gp_velocity_after": velo_gp_after_mean,
             "gp_velocity_diff": velo_gp_mean,
             "pval_gp_velocity": pval_velo_gp,
             "padj_gp_velocity": padj_velo_gp,
         })
-        gps_df = gps_df.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
-        gps_df.insert(0, "rank", np.arange(1, len(gps_df) + 1))
+        _gp = _gp.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
+        gps_df = _gp[["gene_programs", "gp_velocity_before", "gp_velocity_after", "gp_velocity_diff", "pval_gp_velocity", "padj_gp_velocity"]]
         
         # Store perturbed outputs in adata
-        # For perturb_gps, outputs are computed only for perturbed cells
+        # For _perturb_gps, outputs are computed only for perturbed cells
         # We need to handle full adata shape - initialize arrays if needed
         n_cells = adata.shape[0]
         n_genes = adata.shape[1]
         n_gps = len(perturbed_outputs['velocity_gp_pert'][0]) if len(perturbed_outputs['velocity_gp_pert'].shape) > 1 else 1
         
-        # Initialize full arrays if they don't exist
+        # Initialize full arrays if they don't exist (before = unperturbed, pert = after)
         if 'velocity_gp_pert' not in adata.obsm:
             adata.obsm['velocity_gp_pert'] = np.zeros((n_cells, n_gps), dtype=np.float32)
+        if 'velocity_gp_before' not in adata.obsm:
+            adata.obsm['velocity_gp_before'] = np.zeros((n_cells, n_gps), dtype=np.float32)
         if 'velocity_u_pert' not in adata.layers:
             adata.layers['velocity_u_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_u_before' not in adata.layers:
+            adata.layers['velocity_u_before'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'velocity_pert' not in adata.layers:
             adata.layers['velocity_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
+        if 'velocity_before' not in adata.layers:
+            adata.layers['velocity_before'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'alpha_pert' not in adata.layers:
             adata.layers['alpha_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         if 'beta_pert' not in adata.layers:
@@ -2019,13 +2109,16 @@ class LineageVIModel(nn.Module):
         if 'recon_pert' not in adata.layers:
             adata.layers['recon_pert'] = np.zeros((n_cells, n_genes), dtype=np.float32)
         
-        # Store perturbed outputs for perturbed cells
+        # Store perturbed outputs for perturbed cells (before + after velocity)
         if isinstance(cell_idx, (int, np.integer)) or (hasattr(cell_idx, '__len__') and len(cell_idx) == 1):
             # Single cell case
             idx = cell_idx if isinstance(cell_idx, (int, np.integer)) else cell_idx[0]
             adata.obsm['velocity_gp_pert'][idx] = perturbed_outputs['velocity_gp_pert'][0] if len(perturbed_outputs['velocity_gp_pert'].shape) > 1 else perturbed_outputs['velocity_gp_pert']
+            adata.obsm['velocity_gp_before'][idx] = perturbed_outputs['velocity_gp_before'][0] if len(perturbed_outputs['velocity_gp_before'].shape) > 1 else perturbed_outputs['velocity_gp_before']
             adata.layers['velocity_u_pert'][idx] = perturbed_outputs['velo_u_pert'][0] if len(perturbed_outputs['velo_u_pert'].shape) > 1 else perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_u_before'][idx] = perturbed_outputs['velo_u_before'][0] if len(perturbed_outputs['velo_u_before'].shape) > 1 else perturbed_outputs['velo_u_before']
             adata.layers['velocity_pert'][idx] = perturbed_outputs['velo_pert'][0] if len(perturbed_outputs['velo_pert'].shape) > 1 else perturbed_outputs['velo_pert']
+            adata.layers['velocity_before'][idx] = perturbed_outputs['velo_before'][0] if len(perturbed_outputs['velo_before'].shape) > 1 else perturbed_outputs['velo_before']
             adata.layers['alpha_pert'][idx] = perturbed_outputs['alpha_pert'][0] if len(perturbed_outputs['alpha_pert'].shape) > 1 else perturbed_outputs['alpha_pert']
             adata.layers['beta_pert'][idx] = perturbed_outputs['beta_pert'][0] if len(perturbed_outputs['beta_pert'].shape) > 1 else perturbed_outputs['beta_pert']
             adata.layers['gamma_pert'][idx] = perturbed_outputs['gamma_pert'][0] if len(perturbed_outputs['gamma_pert'].shape) > 1 else perturbed_outputs['gamma_pert']
@@ -2033,24 +2126,139 @@ class LineageVIModel(nn.Module):
         else:
             # Multiple cells case
             adata.obsm['velocity_gp_pert'][cell_idx] = perturbed_outputs['velocity_gp_pert']
+            adata.obsm['velocity_gp_before'][cell_idx] = perturbed_outputs['velocity_gp_before']
             adata.layers['velocity_u_pert'][cell_idx] = perturbed_outputs['velo_u_pert']
+            adata.layers['velocity_u_before'][cell_idx] = perturbed_outputs['velo_u_before']
             adata.layers['velocity_pert'][cell_idx] = perturbed_outputs['velo_pert']
+            adata.layers['velocity_before'][cell_idx] = perturbed_outputs['velo_before']
             adata.layers['alpha_pert'][cell_idx] = perturbed_outputs['alpha_pert']
             adata.layers['beta_pert'][cell_idx] = perturbed_outputs['beta_pert']
             adata.layers['gamma_pert'][cell_idx] = perturbed_outputs['gamma_pert']
             adata.layers['recon_pert'][cell_idx] = perturbed_outputs['recon']
         
         print("\nPerturbed outputs stored in adata:")
-        print(f"  adata.obsm['velocity_gp_pert']: GP velocities (shape: {adata.obsm['velocity_gp_pert'].shape})")
-        print(f"  adata.layers['velocity_u_pert']: Unspliced velocities (shape: {adata.layers['velocity_u_pert'].shape})")
-        print(f"  adata.layers['velocity_pert']: Spliced velocities (shape: {adata.layers['velocity_pert'].shape})")
+        print(f"  adata.obsm['velocity_gp_before'] / ['velocity_gp_pert']: GP velocity before/after (shape: {adata.obsm['velocity_gp_pert'].shape})")
+        print(f"  adata.layers['velocity_before'] / ['velocity_pert']: Gene velocity (spliced) before/after (shape: {adata.layers['velocity_pert'].shape})")
+        print(f"  adata.layers['velocity_u_before'] / ['velocity_u_pert']: Gene velocity (unspliced) before/after (shape: {adata.layers['velocity_u_pert'].shape})")
         print(f"  adata.layers['alpha_pert']: Transcription rates (shape: {adata.layers['alpha_pert'].shape})")
         print(f"  adata.layers['beta_pert']: Splicing rates (shape: {adata.layers['beta_pert'].shape})")
         print(f"  adata.layers['gamma_pert']: Degradation rates (shape: {adata.layers['gamma_pert'].shape})")
         print(f"  adata.layers['recon_pert']: Reconstructions (shape: {adata.layers['recon_pert'].shape})")
         print(f"  (Stored for {len(cell_idx) if hasattr(cell_idx, '__len__') and not isinstance(cell_idx, (int, np.integer)) else 1} perturbed cell(s))\n")
         
-        return genes_df, gps_df
+        return genes_df, gps_df, perturbed_outputs
+
+    @torch.inference_mode()
+    def perturb(
+        self,
+        adata,
+        mode: str,
+        *,
+        groupby_key: str,
+        group_to_perturb: str,
+        perturb_value: float,
+        genes_to_perturb=None,
+        gp_uns_key: Optional[str] = None,
+        gps_to_perturb=None,
+        perturb_spliced: bool = True,
+        perturb_unspliced: bool = False,
+        perturb_both: bool = False,
+    ):
+        """
+        Perturb genes or gene programs in a cell group and analyze velocity changes.
+
+        Single entry point for perturbation: use ``mode='genes'`` to perturb gene
+        expression (unspliced/spliced) or ``mode='gps'`` to perturb latent gene
+        program activations. Returns velocity-change summaries (ranked by adjusted
+        p-value) and before/after velocity arrays.
+
+        Parameters
+        ----------
+        adata : AnnData
+            Single-cell data to perturb.
+        mode : str
+            ``'genes'`` or ``'gps'``.
+        groupby_key : str
+            Key in adata.obs for group labels (e.g. 'clusters', 'cell_type').
+        group_to_perturb : str
+            Name of the group to perturb (e.g. 'Beta').
+        perturb_value : float
+            Value to set for perturbed entries (e.g. 0 for knockout).
+        genes_to_perturb : list, optional
+            Required if mode='genes'. Gene names to perturb.
+        gp_uns_key : str, optional
+            Required if mode='gps'. Key in adata.uns for GP names (e.g. 'terms').
+        gps_to_perturb : list, optional
+            Required if mode='gps'. Gene program names to perturb.
+        perturb_spliced : bool, default True
+            Used if mode='genes'. Whether to perturb spliced counts.
+        perturb_unspliced : bool, default False
+            Used if mode='genes'. Whether to perturb unspliced counts.
+        perturb_both : bool, default False
+            Used if mode='genes'. If True, set both layers to perturb_value.
+
+        Returns
+        -------
+        df_genes : pd.DataFrame
+            Gene-level velocity change summary (genes, velocity diffs, pval, padj). Sorted by spliced padj_velocity.
+        df_gps : pd.DataFrame
+            GP-level velocity change summary (rank, terms/gene_programs, gp_velocity_diff, pval, padj). Sorted by padj_gp_velocity.
+        perturbed_outputs : dict
+            Velocity before/after and other outputs for the perturbed cells (e.g. velocity_gp_before, velo_before, velo_pert).
+
+        Examples
+        --------
+        Perturb genes (e.g. knockdown to zero in Beta cells):
+
+        >>> df_genes, df_gps, out = vae.perturb(
+        ...     adata,
+        ...     mode='genes',
+        ...     groupby_key='clusters',
+        ...     group_to_perturb='Beta',
+        ...     genes_to_perturb=['Sntg1', 'Snhg6'],
+        ...     perturb_value=0,
+        ...     perturb_spliced=True,
+        ...     perturb_unspliced=True,
+        ... )
+
+        Perturb gene programs (set GP activations to zero in Beta cells):
+
+        >>> df_genes, df_gps, out = vae.perturb(
+        ...     adata,
+        ...     mode='gps',
+        ...     gp_uns_key='terms',
+        ...     gps_to_perturb=['YBX1_TARGETS_DN', 'YBX1_TARGETS_UP'],
+        ...     groupby_key='clusters',
+        ...     group_to_perturb='Beta',
+        ...     perturb_value=0,
+        ... )
+        """
+        if mode not in ("genes", "gps"):
+            raise ValueError(f"mode must be 'genes' or 'gps', got {mode!r}")
+        if mode == "genes":
+            if genes_to_perturb is None:
+                raise ValueError("genes_to_perturb is required when mode='genes'")
+            return self._perturb_genes(
+                adata,
+                groupby_key=groupby_key,
+                group_to_perturb=group_to_perturb,
+                genes_to_perturb=genes_to_perturb,
+                perturb_value=perturb_value,
+                perturb_spliced=perturb_spliced,
+                perturb_unspliced=perturb_unspliced,
+                perturb_both=perturb_both,
+            )
+        else:
+            if gp_uns_key is None or gps_to_perturb is None:
+                raise ValueError("gp_uns_key and gps_to_perturb are required when mode='gps'")
+            return self._perturb_gps(
+                adata,
+                gp_uns_key,
+                gps_to_perturb,
+                groupby_key,
+                group_to_perturb,
+                perturb_value,
+            )
 
     @torch.inference_mode()
     def perturb_cluster_labels(self, adata, source_cluster, target_cluster):
@@ -2187,28 +2395,23 @@ class LineageVIModel(nn.Module):
             
             velo_diff_u, velo_diff_s = np.split(velo_diff, 2)
             
-            # Create DataFrames
-            genes_df = pd.DataFrame({
-                'genes': adata.var_names,
-                'velo_diff_u': velo_diff_u,
-                'abs_velo_diff_u': np.absolute(velo_diff_u),
-                'velo_diff_s': velo_diff_s,
-                'abs_velo_diff_s': np.absolute(velo_diff_s),
-                'x_dec_diff': x_dec_diff,
-                'x_dec_diff_abs': np.absolute(x_dec_diff),
-                'alpha_diff': alpha_diff,
-                'alpha_diff_abs': np.absolute(alpha_diff),
-                'beta_diff': beta_diff,
-                'beta_diff_abs': np.absolute(beta_diff),
-                'gamma_diff': gamma_diff,
-                'gamma_diff_abs': np.absolute(gamma_diff),
+            # DataFrames: velocity only (no p-values in this method; rank by abs velocity diff)
+            _g = pd.DataFrame({
+                "genes": adata.var_names,
+                "unspliced_velocity_diff": velo_diff_u,
+                "velocity_diff": velo_diff_s,
             })
-            
-            gps_df = pd.DataFrame({
-                'gene_programs': adata.uns['terms'],
-                'velo_gp': velo_gp_diff,
-                'abs_velo_gp': np.absolute(velo_gp_diff),
+            _g["abs_velocity_diff"] = np.abs(_g["velocity_diff"])
+            _g = _g.sort_values("abs_velocity_diff", ascending=False, na_position="last").reset_index(drop=True)
+            genes_df = _g[["genes", "unspliced_velocity_diff", "velocity_diff", "abs_velocity_diff"]]
+
+            _gp = pd.DataFrame({
+                "gene_programs": adata.uns["terms"],
+                "gp_velocity_diff": velo_gp_diff,
             })
+            _gp["abs_gp_velocity_diff"] = np.abs(_gp["gp_velocity_diff"])
+            _gp = _gp.sort_values("abs_gp_velocity_diff", ascending=False, na_position="last").reset_index(drop=True)
+            gps_df = _gp[["gene_programs", "gp_velocity_diff", "abs_gp_velocity_diff"]]
             
             # Store perturbed outputs in adata
             # For perturb_cluster_labels, outputs are computed for ALL cells
