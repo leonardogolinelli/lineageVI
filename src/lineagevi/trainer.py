@@ -216,7 +216,7 @@ class _Trainer:
         
         Notes
         -----
-        The model weights are saved to {output_dir}/vae_velocity_model.pt.
+        The model weights are saved to {output_dir}/pretrained_vae.pt.
         After training, call model.get_model_outputs() to annotate adata with velocities.
         """
         os.makedirs(output_dir, exist_ok=True)
@@ -319,20 +319,21 @@ class _Trainer:
         from pathlib import Path
         
         # Save state dict
-        model_path = f"{output_dir}/vae_velocity_model.pt"
+        model_path = f"{output_dir}/pretrained_vae.pt"
         torch.save(self.model.state_dict(), model_path)
         
         # Save model configuration for easy loading later
-        # Infer n_hidden from encoder layer sizes
-        n_hidden = None
-        if hasattr(self.model.encoder, 'encoder') and len(self.model.encoder.encoder) > 0:
+        n_hidden = getattr(self.model, "n_hidden", None)
+        if n_hidden is None and hasattr(self.model.encoder, "encoder") and len(self.model.encoder.encoder) > 0:
             first_layer = self.model.encoder.encoder[0]
             if isinstance(first_layer, torch.nn.Linear):
                 n_hidden = first_layer.out_features
-        
+
         config = {
             "n_hidden": n_hidden,
-            "mask_key": "I",  # Default, could be stored if made configurable
+            "n_layers": getattr(self.model, "n_layers", 1),
+            "dropout": getattr(self.model, "dropout", 0.0),
+            "mask_key": "I",
             "cluster_key": self.model.cluster_key,
             "cluster_embedding_dim": self.model.cluster_embedding_dim if self.model.cluster_embedding is not None else None,
             "n_latent": self.model.n_latent,
@@ -369,7 +370,7 @@ class _Trainer:
         monitor_negative_velo: bool = True,
         monitor_every_epochs: int = 1,
     ) -> Tuple[List[float], Optional[List[float]], List[float], List[float], Optional[List[float]], Optional[List[float]], List[float]]:
-        # Freeze velocity_decoder, cluster_embedding, and CLS embedding; unfreeze encoder & gene_decoder
+        # Freeze velocity_decoder and cluster_embedding; unfreeze encoder & gene_decoder
         for p in self.model.velocity_decoder.parameters():
             p.requires_grad = False
         if self.model.cluster_embedding is not None:
@@ -555,7 +556,7 @@ class _Trainer:
         monitor_negative_velo: bool = True,
         monitor_every_epochs: int = 1,
     ) -> Tuple[List[float], Optional[List[float]], List[float], List[float], Optional[List[float]], Optional[List[float]]]:
-        # Freeze encoder & gene_decoder; unfreeze velocity_decoder, cluster_embedding, and CLS embedding
+        # Freeze encoder & gene_decoder; unfreeze velocity_decoder and cluster_embedding
         for group in (self.model.encoder, self.model.gene_decoder):
             for p in group.parameters():
                 p.requires_grad = False

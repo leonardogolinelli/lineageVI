@@ -27,8 +27,9 @@ def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns
     adata
         Annotated data matrix.
     files
-        Paths to text files with annotations. The function considers rows to be gene sets
-        with name of a gene set in the first column followed by names of genes.
+        Path(s) to annotation file(s). GMT format (tab-separated: name \\t description \\t gene1 \\t gene2 ...)
+        is parsed so the full term name is preserved (including spaces). Space-separated lines
+        are supported as fallback (first token = name, rest = genes).
     min_genes
         Only include gene sets which have the total number of genes in adata
         greater than this value.
@@ -52,12 +53,33 @@ def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns
 
     for file in files:
         with open(file) as f:
-            p_f = [l.upper() for l in f] if genes_use_upper else f
-            terms = [l.strip('\n').split() for l in p_f]
-
+            raw_lines = [l.rstrip("\n") for l in f]
+        terms = []
+        for line in raw_lines:
+            if not line:
+                continue
+            # GMT format is tab-separated: name \t [description] \t gene1 \t gene2 ...
+            if "\t" in line:
+                parts = line.split("\t")
+                name = parts[0].strip()
+                # genes are from part 2 onward (part 1 is often empty description)
+                genes = [p.strip() for p in parts[2:] if p.strip()]
+                if not name:
+                    continue
+                if genes_use_upper:
+                    genes = [g.upper() for g in genes]
+                terms.append([name] + genes)
+            else:
+                # fallback: space-separated (first token = name, rest = genes)
+                toks = line.split()
+                if toks:
+                    if genes_use_upper:
+                        toks = [toks[0]] + [g.upper() for g in toks[1:]]
+                    terms.append(toks)
+        # Apply clean to term names only (strip prefix and/or truncate to 30 chars)
         if clean:
-            terms = [[term[0].split('_', 1)[-1][:30]]+term[1:] for term in terms if term]
-        annot+=terms
+            terms = [[t[0].split("_", 1)[-1][:30]] + t[1:] for t in terms if t]
+        annot += terms
 
     var_names = adata.var_names.str.upper() if genes_use_upper else adata.var_names
     I = [[int(gene in term) for term in annot] for gene in var_names]
@@ -84,6 +106,7 @@ def preprocess_for_lineagevi(
     K_neighbors: int = 20,
     skip_if_preprocessed: bool = True,
     cluster_key: Optional[str] = None,
+    clean_terms: bool = True,
 ) -> sc.AnnData:
     """
     Preprocess AnnData for LineageVI training.
@@ -124,6 +147,9 @@ def preprocess_for_lineagevi(
         If True, skip steps that appear already done (checks for 'Mu', 'Ms', 'I', etc.).
     cluster_key : str, optional
         Key for storing cluster labels. If None, uses 'leiden' after clustering.
+    clean_terms : bool, default True
+        If True, annotation term names are shortened (prefix before first '_' removed,
+        then truncated to 30 characters). If False, full term names from the file are kept.
     
     Returns
     -------
@@ -215,7 +241,7 @@ def preprocess_for_lineagevi(
             min_genes=min_genes_per_term,
             varm_key='I',
             uns_key='terms',
-            clean=True,
+            clean=clean_terms,
             genes_use_upper=True
         )
         print(f"  Added {adata.varm['I'].shape[1]} annotation terms")
@@ -330,6 +356,8 @@ def load_model(
         # Map saved config keys to kwargs (only if not already in kwargs)
         config_mapping = {
             "n_hidden": "n_hidden",
+            "n_layers": "n_layers",
+            "dropout": "dropout",
             "cluster_key": "cluster_key",
             "cluster_embedding_dim": "cluster_embedding_dim",
         }

@@ -10,7 +10,7 @@ class Encoder(nn.Module):
     
     This encoder implements a variational autoencoder (VAE) encoder that:
     1. Takes concatenated unspliced+spliced gene expression as input
-    2. Projects to a shared hidden representation
+    2. Projects through a stack of hidden layers
     3. Outputs mean and log-variance for latent space sampling
     4. Uses reparameterization trick for differentiable sampling
     
@@ -22,11 +22,15 @@ class Encoder(nn.Module):
         Number of hidden units in the encoder network.
     n_latent : int
         Dimension of the latent space (number of gene programs).
+    n_layers : int, default 1
+        Number of hidden layers (each: Linear -> LayerNorm -> ReLU -> [Dropout]).
+    dropout : float, default 0.0
+        Dropout probability applied after each hidden layer (0 = no dropout).
     
     Attributes
     ----------
     encoder : nn.Sequential
-        Shared encoder network with LayerNorm and ReLU activation.
+        Shared encoder network (stack of hidden blocks).
     mean_layer : nn.Linear
         Linear layer that outputs latent mean.
     logvar_layer : nn.Linear
@@ -42,14 +46,24 @@ class Encoder(nn.Module):
     >>> # z, mean, logvar shape: (batch, 50)
     """
     
-    def __init__(self, n_input: int, n_hidden: int, n_latent: int):
+    def __init__(
+        self,
+        n_input: int,
+        n_hidden: int,
+        n_latent: int,
+        n_layers: int = 1,
+        dropout: float = 0.0,
+    ):
         super().__init__()
-        # shared encoder MLP
-        self.encoder = nn.Sequential(
-            nn.Linear(n_input, n_hidden),
-            nn.LayerNorm(n_hidden),
-            nn.ReLU(),
-        )
+        layers = []
+        for i in range(n_layers):
+            in_dim = n_input if i == 0 else n_hidden
+            layers.append(nn.Linear(in_dim, n_hidden))
+            layers.append(nn.LayerNorm(n_hidden))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
+        self.encoder = nn.Sequential(*layers)
 
         # project to mean and log-variance
         self.mean_layer = nn.Linear(n_hidden, n_latent)
@@ -208,11 +222,15 @@ class VelocityDecoder(nn.Module):
         Output dimension (2 * number of genes for unspliced+spliced velocities).
     n_latent : int
         Number of gene programs (used only for velocity_gp output shape; returned as zeros).
+    n_layers : int, default 1
+        Number of hidden layers (each: Linear -> LayerNorm -> ReLU -> [Dropout]) before output layer.
+    dropout : float, default 0.0
+        Dropout probability applied after each hidden layer (0 = no dropout).
     
     Attributes
     ----------
     decoder : nn.Sequential
-        Single decoder: Linear(n_input, n_hidden) -> LayerNorm -> ReLU -> Linear(n_hidden, 3*G) -> Softplus.
+        Hidden stack then Linear -> Softplus to kinetic parameters.
     _G : int
         Number of genes (n_output // 2).
     
@@ -227,7 +245,15 @@ class VelocityDecoder(nn.Module):
     >>> # α, β, γ shape: (batch, 2000)
     """
 
-    def __init__(self, n_input: int, n_hidden: int, n_output: int, n_latent: int):
+    def __init__(
+        self,
+        n_input: int,
+        n_hidden: int,
+        n_output: int,
+        n_latent: int,
+        n_layers: int = 1,
+        dropout: float = 0.0,
+    ):
         """
         Initialize velocity decoder.
         
@@ -241,20 +267,29 @@ class VelocityDecoder(nn.Module):
             Output dimension (2 * number of genes for unspliced+spliced velocities).
         n_latent : int
             Number of gene programs (used for velocity_gp output shape; returned as zeros).
+        n_layers : int
+            Number of hidden layers.
+        dropout : float
+            Dropout probability (0 = no dropout).
         """
         super().__init__()
         self.n_latent = n_latent  # kept for velocity_gp output shape (returned as zeros)
         # n_output is 2G, so G = n_output // 2; decoder outputs [alpha, beta, gamma] in R^G each
         G2 = n_output
         G = G2 // 2
-        self.decoder = nn.Sequential(
-            nn.Linear(n_input, n_hidden),
-            nn.LayerNorm(n_hidden),
-            nn.ReLU(),
-            nn.Linear(n_hidden, 3 * G),
-            nn.Softplus(),
-        )
         self._G = G
+
+        layers = []
+        for i in range(n_layers):
+            in_dim = n_input if i == 0 else n_hidden
+            layers.append(nn.Linear(in_dim, n_hidden))
+            layers.append(nn.LayerNorm(n_hidden))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
+        layers.append(nn.Linear(n_hidden, 3 * G))
+        layers.append(nn.Softplus())
+        self.decoder = nn.Sequential(*layers)
 
     def forward(self, z: torch.Tensor, x: torch.Tensor):
         """
@@ -298,77 +333,6 @@ class VelocityDecoder(nn.Module):
         velocity = torch.cat([velocity_u, velocity_s], dim=1)  # (B, 2G)
         
         return velocity, velocity_gp, alpha, beta, gamma
-
-
-class CLSEmbedding(nn.Module):
-    """
-    CLS (classification) embedding module that learns embeddings for biological processes.
-    
-    This module creates a lookup table of embeddings for each unique biological process.
-    All cells in the same process share the same CLS embedding, which encodes process-specific
-    global dynamics (e.g., pancreas development vs liver development).
-    
-    If all cells belong to the same process (or no process key is provided), a single
-    'Unspecified' process embedding is created, making all cells share the same CLS embedding.
-    
-    The CLS embedding is learned only in regime 2 (velocity prediction) and is frozen
-    during regime 1 (expression reconstruction).
-    
-    Parameters
-    ----------
-    n_processes : int
-        Number of unique biological processes.
-    embedding_dim : int, default 32
-        Dimension of the CLS embedding.
-    
-    Attributes
-    ----------
-    embeddings : nn.Embedding
-        Embedding table with shape (n_processes, embedding_dim).
-    
-    Examples
-    --------
-    >>> # Create CLS embeddings for 3 biological processes with 32-dimensional embeddings
-    >>> cls_emb = CLSEmbedding(n_processes=3, embedding_dim=32)
-    >>> 
-    >>> # Forward pass with process indices
-    >>> process_idx = torch.tensor([0, 1, 2, 0, 1])  # 5 cells, 3 processes
-    >>> emb = cls_emb(process_idx)  # shape: (5, 32)
-    """
-    
-    def __init__(self, n_processes: int, embedding_dim: int = 32):
-        super().__init__()
-        self.embeddings = nn.Embedding(n_processes, embedding_dim)
-        
-        # Initialize with small random values
-        nn.init.normal_(self.embeddings.weight, mean=0.0, std=0.01)
-    
-    def forward(self, process_indices: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass to get CLS embeddings for cells in batch.
-        
-        Parameters
-        ----------
-        process_indices : torch.Tensor
-            Process indices of shape (batch_size,) with integer values in [0, n_processes).
-        
-        Returns
-        -------
-        torch.Tensor
-            CLS embeddings of shape (batch_size, embedding_dim).
-        """
-        return self.embeddings(process_indices)
-    
-    def get_all_embeddings(self) -> torch.Tensor:
-        """
-        Get all CLS embeddings as a lookup table.
-        
-        Returns
-        -------
-        torch.Tensor
-            All CLS embeddings of shape (n_processes, embedding_dim).
-        """
-        return self.embeddings.weight
 
 
 class ClusterEmbedding(nn.Module):

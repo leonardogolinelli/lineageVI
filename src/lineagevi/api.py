@@ -27,6 +27,10 @@ class LineageVI:
         Single-cell RNA-seq data with layers for unspliced and spliced counts.
     n_hidden : int, default 128
         Number of hidden units in the neural network.
+    n_layers : int, default 1
+        Number of hidden layers in the encoder and velocity decoder.
+    dropout : float, default 0.0
+        Dropout probability applied after each hidden layer (0 = no dropout).
     mask_key : str, default "I"
         Key for gene program mask in adata.uns.
     unspliced_key : str, default "unspliced"
@@ -79,6 +83,8 @@ class LineageVI:
         self,
         adata: sc.AnnData,
         n_hidden: int = 128,
+        n_layers: int = 1,
+        dropout: float = 0.0,
         mask_key: str = "I",
         *,
         unspliced_key: str = "unspliced",
@@ -93,6 +99,8 @@ class LineageVI:
         self.model = LineageVIModel(
             adata,
             n_hidden=n_hidden,
+            n_layers=n_layers,
+            dropout=dropout,
             mask_key=mask_key,
             seed=seed,
             cluster_key=cluster_key,

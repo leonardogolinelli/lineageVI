@@ -188,6 +188,10 @@ class LineageVIModel(nn.Module):
         Single-cell RNA-seq data with gene program mask in adata.varm[mask_key].
     n_hidden : int, default 128
         Number of hidden units in the neural network layers.
+    n_layers : int, default 1
+        Number of hidden layers in the encoder and velocity decoder (each block: Linear -> LayerNorm -> ReLU -> [Dropout]).
+    dropout : float, default 0.0
+        Dropout probability applied after each hidden layer (0 = no dropout).
     mask_key : str, default "I"
         Key for gene program mask in adata.varm.
     seed : int, optional
@@ -234,6 +238,8 @@ class LineageVIModel(nn.Module):
         self,
         adata: sc.AnnData,
         n_hidden: int = 128,
+        n_layers: int = 1,
+        dropout: float = 0.0,
         mask_key: str = "I",
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
@@ -256,9 +262,12 @@ class LineageVIModel(nn.Module):
         n_input = G
         n_output = n_input
         
-        # Store dimensions as attributes (needed for RL adapter)
+        # Store dimensions and architecture (needed for RL adapter and config save/load)
         self.n_latent = n_latent
         self.n_genes = G
+        self.n_hidden = n_hidden
+        self.n_layers = n_layers
+        self.dropout = dropout
 
         # Cluster embeddings (optional)
         self.cluster_key = cluster_key
@@ -279,18 +288,17 @@ class LineageVIModel(nn.Module):
         else:
             self.cluster_embedding = None
 
-        # Removed CLS embedding; keep stub for backward compatibility (e.g. old checkpoints or code)
-        self.process_to_idx = {}
-
         # Velocity decoder input dimension: z + cluster_emb (if exists)
         velocity_input_dim = n_latent
         if cluster_key is not None:
             velocity_input_dim += cluster_embedding_dim
 
         # submodules
-        self.encoder = Encoder(n_input, n_hidden, n_latent)
+        self.encoder = Encoder(n_input, n_hidden, n_latent, n_layers=n_layers, dropout=dropout)
         self.gene_decoder = MaskedLinearDecoder(n_latent, n_output, mask)
-        self.velocity_decoder = VelocityDecoder(velocity_input_dim, n_hidden, 2 * G, n_latent)
+        self.velocity_decoder = VelocityDecoder(
+            velocity_input_dim, n_hidden, 2 * G, n_latent, n_layers=n_layers, dropout=dropout
+        )
 
         # keep mask buffer around if needed elsewhere
         self.register_buffer("mask", mask)
