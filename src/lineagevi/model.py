@@ -1590,12 +1590,12 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         df_genes : pd.DataFrame
-            DataFrame with gene-level differences (velocity, alpha, beta, gamma, recon, etc.)
-            and Wilcoxon signed-rank p-values + FDR-adjusted p-values per entity
-            (pval_*, padj_* columns).
+            Gene-level velocity change summary: rank, genes, unspliced_velocity_diff,
+            velocity_diff, pval/padj for unspliced and spliced velocity. Sorted by
+            padj_velocity (most significant first).
         df_gp : pd.DataFrame
-            DataFrame with GP-level differences (mean, logvar, gp_velocity) and
-            Wilcoxon p-values + FDR (pval_*, padj_*).
+            GP-level velocity change summary: rank, terms, gp_velocity_diff,
+            pval_gp_velocity, padj_gp_velocity. Sorted by padj_gp_velocity (most significant first).
         perturbed_outputs : dict
             Dictionary of perturbed model outputs (recon, mean, logvar, velocity_gp, velo_u_pert, velo_pert, alpha_pert, beta_pert, gamma_pert).
         
@@ -1718,96 +1718,49 @@ class LineageVIModel(nn.Module):
         beta_diff = beta_pert - beta_unpert
         gamma_diff = gamma_pert - gamma_unpert
 
-        # Convert to numpy and ensure 2D (n_cells, n_features) for Wilcoxon
+        # Convert to numpy and ensure 2D (n_cells, n_features) for Wilcoxon (velocity only)
         def to_2d(t):
             a = t.cpu().numpy()
             return np.atleast_2d(a)
 
-        recon_2d = to_2d(recon_diff)
-        mean_2d = to_2d(mean_diff)
-        logvar_2d = to_2d(logvar_diff)
         gp_velo_2d = to_2d(gp_velo_diff)
         velo_u_2d = to_2d(velo_u_diff)
         velo_2d = to_2d(velo_diff)
-        alpha_2d = to_2d(alpha_diff)
-        beta_2d = to_2d(beta_diff)
-        gamma_2d = to_2d(gamma_diff)
 
-        # Mean differences (for existing columns)
-        mean_diff_np = mean_2d.mean(0)
-        logvar_diff_np = logvar_2d.mean(0)
         gp_velo_diff_np = gp_velo_2d.mean(0)
-        recon_diff_np = recon_2d.mean(0)
         velo_u_diff_np = velo_u_2d.mean(0)
         velo_diff_np = velo_2d.mean(0)
-        alpha_diff_np = alpha_2d.mean(0)
-        beta_diff_np = beta_2d.mean(0)
-        gamma_diff_np = gamma_2d.mean(0)
 
-        # Wilcoxon signed-rank + FDR per entity
-        pval_mean = _wilcoxon_per_column(mean_2d)
-        padj_mean = _fdr_bh(pval_mean)
-        pval_logvar = _wilcoxon_per_column(logvar_2d)
-        padj_logvar = _fdr_bh(pval_logvar)
+        # Wilcoxon + FDR for velocity only (gene velocity + GP velocity)
         pval_gp_velo = _wilcoxon_per_column(gp_velo_2d)
         padj_gp_velo = _fdr_bh(pval_gp_velo)
-
-        pval_recon = _wilcoxon_per_column(recon_2d)
-        padj_recon = _fdr_bh(pval_recon)
         pval_velo_u = _wilcoxon_per_column(velo_u_2d)
         padj_velo_u = _fdr_bh(pval_velo_u)
         pval_velo = _wilcoxon_per_column(velo_2d)
         padj_velo = _fdr_bh(pval_velo)
-        pval_alpha = _wilcoxon_per_column(alpha_2d)
-        padj_alpha = _fdr_bh(pval_alpha)
-        pval_beta = _wilcoxon_per_column(beta_2d)
-        padj_beta = _fdr_bh(pval_beta)
-        pval_gamma = _wilcoxon_per_column(gamma_2d)
-        padj_gamma = _fdr_bh(pval_gamma)
 
+        # GP table: velocity only, ranked by padj (most significant first)
         df_gp = pd.DataFrame({
             "terms": adata.uns["terms"],
-            "mean_diff": mean_diff_np,
-            "abs_mean_diff": np.abs(mean_diff_np),
-            "logvar_diff": logvar_diff_np,
-            "abs_logvar_diff": np.abs(logvar_diff_np),
             "gp_velocity_diff": gp_velo_diff_np,
-            "abs_gp_velocity_diff": np.abs(gp_velo_diff_np),
-            "pval_mean": pval_mean,
-            "padj_mean": padj_mean,
-            "pval_logvar": pval_logvar,
-            "padj_logvar": padj_logvar,
             "pval_gp_velocity": pval_gp_velo,
             "padj_gp_velocity": padj_gp_velo,
         })
+        df_gp = df_gp.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
+        df_gp.insert(0, "rank", np.arange(1, len(df_gp) + 1))
 
+        # Gene table: velocity only, ranked by padj_velocity (spliced; most significant first)
         df_genes = pd.DataFrame({
             "genes": adata.var_names,
-            "recon_diff": recon_diff_np,
-            "abs_recon_diff": np.abs(recon_diff_np),
             "unspliced_velocity_diff": velo_u_diff_np,
-            "abs_unspliced_velocity_diff": np.abs(velo_u_diff_np),
             "velocity_diff": velo_diff_np,
-            "abs_velocity_diff": np.abs(velo_diff_np),
-            "alpha_diff": alpha_diff_np,
-            "abs_alpha_diff": np.abs(alpha_diff_np),
-            "beta_diff": beta_diff_np,
-            "abs_beta_diff": np.abs(beta_diff_np),
-            "gamma_diff": gamma_diff_np,
-            "abs_gamma_diff": np.abs(gamma_diff_np),
-            "pval_recon": pval_recon,
-            "padj_recon": padj_recon,
             "pval_unspliced_velocity": pval_velo_u,
             "padj_unspliced_velocity": padj_velo_u,
             "pval_velocity": pval_velo,
             "padj_velocity": padj_velo,
-            "pval_alpha": pval_alpha,
-            "padj_alpha": padj_alpha,
-            "pval_beta": pval_beta,
-            "padj_beta": padj_beta,
-            "pval_gamma": pval_gamma,
-            "padj_gamma": padj_gamma,
         })
+        df_genes = df_genes.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
+        df_genes.insert(0, "rank", np.arange(1, len(df_genes) + 1))
 
         # Store perturbed outputs in adata
         # For perturb_genes, outputs are computed only for perturbed cells
@@ -1912,11 +1865,12 @@ class LineageVIModel(nn.Module):
         Returns
         -------
         genes_df : pd.DataFrame
-            DataFrame with gene-level differences (velocity, alpha, beta, gamma, x_dec, etc.)
-            and Wilcoxon signed-rank p-values + FDR-adjusted p-values (pval_*, padj_*).
+            Gene-level velocity change summary: rank, genes, unspliced_velocity_diff,
+            velocity_diff, pval/padj for unspliced and spliced velocity. Sorted by
+            padj_velocity (most significant first).
         gps_df : pd.DataFrame
-            DataFrame with GP-level velocity difference and Wilcoxon p-value + FDR
-            (pval_velo_gp, padj_velo_gp).
+            GP-level velocity change summary: rank, gene_programs, gp_velocity_diff,
+            pval_gp_velocity, padj_gp_velocity. Sorted by padj_gp_velocity (most significant first).
         
         Notes
         -----
@@ -2001,74 +1955,46 @@ class LineageVIModel(nn.Module):
 
         velo_diff_2d = np.atleast_2d(to_numpy(velocity_pert - velocity_unpert))
         velo_gp_2d = np.atleast_2d(to_numpy(velocity_gp_pert - velocity_gp_unpert))
-        alpha_2d = np.atleast_2d(to_numpy(alpha_pert - alpha_unpert))
-        beta_2d = np.atleast_2d(to_numpy(beta_pert - beta_unpert))
-        gamma_2d = np.atleast_2d(to_numpy(gamma_pert - gamma_unpert))
-        x_dec_2d = np.atleast_2d(to_numpy(x_dec_pert - x_dec_unpert))
 
         velo_diff_mean = velo_diff_2d.mean(0)
         velo_gp_mean = velo_gp_2d.mean(0)
-        alpha_mean = alpha_2d.mean(0)
-        beta_mean = beta_2d.mean(0)
-        gamma_mean = gamma_2d.mean(0)
-        x_dec_mean = x_dec_2d.mean(0)
 
         velo_diff_u, velo_diff_s = np.split(velo_diff_mean, 2)
 
-        n_genes = alpha_2d.shape[1]
+        n_genes = adata.shape[1]
         velo_u_2d = velo_diff_2d[:, :n_genes]
         velo_s_2d = velo_diff_2d[:, n_genes:]
 
+        # Wilcoxon + FDR for velocity only
         pval_velo_u = _wilcoxon_per_column(velo_u_2d)
         padj_velo_u = _fdr_bh(pval_velo_u)
         pval_velo_s = _wilcoxon_per_column(velo_s_2d)
         padj_velo_s = _fdr_bh(pval_velo_s)
-        pval_x_dec = _wilcoxon_per_column(x_dec_2d)
-        padj_x_dec = _fdr_bh(pval_x_dec)
-        pval_alpha = _wilcoxon_per_column(alpha_2d)
-        padj_alpha = _fdr_bh(pval_alpha)
-        pval_beta = _wilcoxon_per_column(beta_2d)
-        padj_beta = _fdr_bh(pval_beta)
-        pval_gamma = _wilcoxon_per_column(gamma_2d)
-        padj_gamma = _fdr_bh(pval_gamma)
         pval_velo_gp = _wilcoxon_per_column(velo_gp_2d)
         padj_velo_gp = _fdr_bh(pval_velo_gp)
 
+        # Gene table: velocity only, ranked by padj_velo_s (most significant first)
         genes_df = pd.DataFrame({
             "genes": adata.var_names,
-            "velo_diff_u": velo_diff_u,
-            "abs_velo_diff_u": np.abs(velo_diff_u),
-            "velo_diff_s": velo_diff_s,
-            "abs_velo_diff_s": np.abs(velo_diff_s),
-            "x_dec_diff": x_dec_mean,
-            "x_dec_diff_abs": np.abs(x_dec_mean),
-            "alpha_diff": alpha_mean,
-            "alpha_diff_abs": np.abs(alpha_mean),
-            "beta_diff": beta_mean,
-            "beta_diff_abs": np.abs(beta_mean),
-            "gamma_diff": gamma_mean,
-            "gamma_diff_abs": np.abs(gamma_mean),
-            "pval_velo_u": pval_velo_u,
-            "padj_velo_u": padj_velo_u,
-            "pval_velo_s": pval_velo_s,
-            "padj_velo_s": padj_velo_s,
-            "pval_x_dec": pval_x_dec,
-            "padj_x_dec": padj_x_dec,
-            "pval_alpha": pval_alpha,
-            "padj_alpha": padj_alpha,
-            "pval_beta": pval_beta,
-            "padj_beta": padj_beta,
-            "pval_gamma": pval_gamma,
-            "padj_gamma": padj_gamma,
+            "unspliced_velocity_diff": velo_diff_u,
+            "velocity_diff": velo_diff_s,
+            "pval_unspliced_velocity": pval_velo_u,
+            "padj_unspliced_velocity": padj_velo_u,
+            "pval_velocity": pval_velo_s,
+            "padj_velocity": padj_velo_s,
         })
+        genes_df = genes_df.sort_values("padj_velocity", na_position="last").reset_index(drop=True)
+        genes_df.insert(0, "rank", np.arange(1, len(genes_df) + 1))
 
+        # GP table: velocity only, ranked by padj_velo_gp (most significant first)
         gps_df = pd.DataFrame({
             "gene_programs": adata.uns["terms"],
-            "velo_gp": velo_gp_mean,
-            "abs_velo_gp": np.abs(velo_gp_mean),
-            "pval_velo_gp": pval_velo_gp,
-            "padj_velo_gp": padj_velo_gp,
+            "gp_velocity_diff": velo_gp_mean,
+            "pval_gp_velocity": pval_velo_gp,
+            "padj_gp_velocity": padj_velo_gp,
         })
+        gps_df = gps_df.sort_values("padj_gp_velocity", na_position="last").reset_index(drop=True)
+        gps_df.insert(0, "rank", np.arange(1, len(gps_df) + 1))
         
         # Store perturbed outputs in adata
         # For perturb_gps, outputs are computed only for perturbed cells
