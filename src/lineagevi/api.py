@@ -419,7 +419,7 @@ class LineageVI:
             ensure_model_outputs=ensure_model_outputs,
         )
 
-    def get_directional_uncertainty(
+    def intrinsic_uncertainty(
         self,
         adata: Optional[sc.AnnData] = None,
         *,
@@ -429,8 +429,8 @@ class LineageVI:
         show_plot: bool = True,
         base_seed: Optional[int] = None,
     ):
-        """See `LineageVIModel.get_directional_uncertainty`."""
-        return self.model.get_directional_uncertainty(
+        """See `LineageVIModel.intrinsic_uncertainty`."""
+        return self.model.intrinsic_uncertainty(
             (adata or self.adata),
             use_gp_velo=use_gp_velo,
             n_samples=n_samples,

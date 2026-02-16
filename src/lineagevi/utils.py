@@ -460,7 +460,7 @@ def build_gp_adata(
         import pandas as pd
         
         # Check for required pre-computed results
-        required_keys = ["mean", "velocity_gp", "z", "logvar"]
+        required_keys = ["mean", "velocity_gp", "logvar"]
         missing_keys = [key for key in required_keys if key not in adata.obsm]
         if missing_keys:
             raise ValueError(
@@ -471,7 +471,6 @@ def build_gp_adata(
         # Get pre-computed results from AnnData
         mu     = np.asarray(adata.obsm["mean"])         # (cells, L)
         v_gp   = np.asarray(adata.obsm["velocity_gp"])  # (cells, L)
-        z_arr  = np.asarray(adata.obsm["z"])            # (cells, L)
         lv_arr = np.asarray(adata.obsm["logvar"])       # (cells, L)
 
         if v_gp.size > 0 and np.allclose(v_gp, 0.0):
@@ -492,7 +491,6 @@ def build_gp_adata(
 
         # Treat μ as "Ms" (state) in this space; stash extras in layers
         adata_gp.layers["Ms"]      = mu.astype(np.float32)
-        adata_gp.layers["z"]       = z_arr.astype(np.float32)
         adata_gp.layers["logvar"]  = lv_arr.astype(np.float32)
 
         # Velocity in GP space goes to obsm (not required by scVelo, just convenient)

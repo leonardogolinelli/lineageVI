@@ -1184,7 +1184,7 @@ class LineageVIModel(nn.Module):
         return None
 
     @torch.inference_mode()
-    def get_directional_uncertainty(
+    def intrinsic_uncertainty(
         self,
         adata,
         use_gp_velo: bool = False,
@@ -1194,7 +1194,7 @@ class LineageVIModel(nn.Module):
         base_seed: Optional[int] = None,
     ):
         """
-        Compute directional uncertainty in velocity predictions.
+        Compute intrinsic uncertainty in velocity predictions.
         
         This method quantifies the uncertainty in velocity direction by sampling
         multiple velocity fields and computing directional statistics including

@@ -476,7 +476,7 @@ def plot_gp_phase_planes(
     save_plot: bool = False,
     save_path: Optional[str] = None,
     # Configurable layer keys
-    latent_key: str = "z",
+    latent_key: str = "Ms",
     velocity_key: str = "velocity",
 ):
     """
@@ -524,8 +524,8 @@ def plot_gp_phase_planes(
         Whether to save the plot (matching plot_phase_plane parameter name).
     save_path : Optional[str], default None
         Path to save the plot.
-    latent_key : str, default "z"
-        Key for latent representations in adata_gp.layers.
+    latent_key : str, default "Ms"
+        Key for latent representations in adata_gp.layers (use "Ms" for mean latent state).
     velocity_key : str, default "velocity"
         Key for velocities in adata_gp.layers.
     
