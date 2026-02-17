@@ -528,10 +528,9 @@ class LineageVIModel(nn.Module):
         self,
         adata,
         groupby_key: str,
-        mode: str = "expression",
         *,
         layer: Optional[str] = None,
-        velocity_layer: str = "velocity",
+        obsm: Optional[str] = None,
         ensure_model_outputs: bool = True,
     ) -> Dict[str, pd.DataFrame]:
         """
@@ -541,27 +540,26 @@ class LineageVIModel(nn.Module):
         and returns difference (median_group - median_rest), p-value, and
         FDR-adjusted p-value per feature.
 
+        Specify the data source with exactly one of layer= or obsm=.
+
         Parameters
         ----------
         adata : AnnData
-            Single-cell data. For mode 'latent', 'gene_velocity', or 'gp_velocity',
-            model outputs must be present (run get_model_outputs(adata, save_to_adata=True)
-            first), unless ensure_model_outputs=False.
+            Single-cell data. For layer/obsm keys that require model outputs
+            (e.g. 'velocity', 'mean', 'velocity_gp'), run get_model_outputs(...)
+            first or set ensure_model_outputs=True.
         groupby_key : str
             Key in adata.obs defining groups (e.g. 'clusters', 'cell_type').
-        mode : str, default 'expression'
-            - 'expression': differential expression (adata.X or adata.layers[layer]).
-            - 'latent': differential latent / gene program activations (adata.obsm['mean']).
-            - 'gene_velocity': differential gene velocity (adata.layers[velocity_layer]).
-            - 'gp_velocity': differential gene program velocity (adata.obsm['velocity_gp']).
         layer : str, optional
-            Layer for expression mode (e.g. 'Ms', 'Mu'). If None, uses adata.X.
-        velocity_layer : str, default 'velocity'
-            Layer for gene_velocity mode ('velocity' or 'velocity_u').
+            Key in adata.layers to use (e.g. 'Ms', 'Mu', 'velocity').
+            Provide exactly one of layer or obsm.
+        obsm : str, optional
+            Key in adata.obsm to use (e.g. 'mean', 'velocity_gp').
+            Provide exactly one of layer or obsm.
         ensure_model_outputs : bool, default True
-            If True and mode is 'latent' or a velocity mode, ensures adata has the
-            required obsm/layers (by calling _get_model_outputs(..., save_to_adata=True)
-            when missing). Requires the model to be trained.
+            If True and the requested layer/obsm is missing, tries to compute
+            it via get_model_outputs(..., save_to_adata=True) when the key is
+            one of 'velocity', 'mean', 'velocity_gp'.
 
         Returns
         -------
@@ -572,73 +570,51 @@ class LineageVIModel(nn.Module):
         """
         if groupby_key not in adata.obs.columns:
             raise ValueError(f"groupby_key {groupby_key!r} not in adata.obs")
+        if (layer is None) == (obsm is None):
+            raise ValueError("Provide exactly one of layer= or obsm= to specify the data source.")
         groups = adata.obs[groupby_key].astype(str)
         group_labels = groups.unique()
 
-        if mode == "expression":
-            if layer is not None:
+        def _ensure_model_outputs():
+            self._get_model_outputs(
+                adata,
+                n_samples=1,
+                return_mean=True,
+                save_to_adata=True,
+            )
+
+        if layer is not None:
+            if layer not in adata.layers:
+                if ensure_model_outputs and layer in ("velocity", "velocity_u"):
+                    _ensure_model_outputs()
                 if layer not in adata.layers:
-                    raise ValueError(f"layer {layer!r} not in adata.layers")
-                X = adata.layers[layer]
-            else:
-                X = adata.X
+                    raise ValueError(
+                        f"layer {layer!r} not in adata.layers. "
+                        "Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True for velocity layers."
+                    )
+            X = adata.layers[layer]
             if sp.issparse(X):
                 X = X.toarray()
             matrix = np.asarray(X, dtype=np.float64)
-            feature_names = list(adata.var_names)
-        elif mode == "latent":
-            if "mean" not in adata.obsm:
-                if ensure_model_outputs:
-                    self._get_model_outputs(
-                        adata,
-                        n_samples=1,
-                        return_mean=True,
-                        save_to_adata=True,
-                    )
-                else:
-                    raise ValueError(
-                        "adata.obsm['mean'] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
-                    )
-            matrix = np.asarray(adata.obsm["mean"], dtype=np.float64)
-            feature_names = list(
-                adata.uns.get("terms", np.arange(matrix.shape[1]).astype(str))
-            )
-        elif mode == "gene_velocity":
-            if velocity_layer not in adata.layers:
-                if ensure_model_outputs:
-                    self._get_model_outputs(
-                        adata,
-                        n_samples=1,
-                        return_mean=True,
-                        save_to_adata=True,
-                    )
-                else:
-                    raise ValueError(
-                        f"adata.layers[{velocity_layer!r}] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
-                    )
-            matrix = np.asarray(adata.layers[velocity_layer], dtype=np.float64)
-            feature_names = list(adata.var_names)
-        elif mode == "gp_velocity":
-            if "velocity_gp" not in adata.obsm:
-                if ensure_model_outputs:
-                    self._get_model_outputs(
-                        adata,
-                        n_samples=1,
-                        return_mean=True,
-                        save_to_adata=True,
-                    )
-                else:
-                    raise ValueError(
-                        "adata.obsm['velocity_gp'] not found. Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True."
-                    )
-            matrix = np.asarray(adata.obsm["velocity_gp"], dtype=np.float64)
-            feature_names = list(
-                adata.uns.get("terms", np.arange(matrix.shape[1]).astype(str))
-            )
+            if matrix.shape[1] == adata.n_vars:
+                feature_names = list(adata.var_names)
+            else:
+                feature_names = [str(i) for i in range(matrix.shape[1])]
         else:
-            raise ValueError(
-                f"mode must be one of 'expression', 'latent', 'gene_velocity', 'gp_velocity', got {mode!r}"
-            )
+            if obsm not in adata.obsm:
+                if ensure_model_outputs and obsm in ("mean", "velocity_gp"):
+                    _ensure_model_outputs()
+                if obsm not in adata.obsm:
+                    raise ValueError(
+                        f"obsm {obsm!r} not in adata.obsm. "
+                        "Run get_model_outputs(adata, save_to_adata=True) or set ensure_model_outputs=True for model outputs."
+                    )
+            matrix = np.asarray(adata.obsm[obsm], dtype=np.float64)
+            terms = adata.uns.get("terms", None)
+            if terms is not None and len(terms) == matrix.shape[1]:
+                feature_names = list(terms)
+            else:
+                feature_names = [str(i) for i in range(matrix.shape[1])]
 
         if matrix.shape[1] != len(feature_names):
             feature_names = [str(i) for i in range(matrix.shape[1])]
@@ -1567,9 +1543,20 @@ class LineageVIModel(nn.Module):
         """
         return np.where(adata.var_names.isin(genes))[0]
     
+    def _normalize_gp_name(self, s: str) -> str:
+        """Strip and collapse internal whitespace for robust GP name matching."""
+        if s is None or not isinstance(s, str):
+            return ""
+        return " ".join(str(s).strip().split())
+
     def _get_gp_idxs(self, adata, gp_key, gps):
         """
         Get gene program indices for specified gene program names.
+        
+        Matching is robust to extra/missing spaces and parentheses: names are
+        stripped and internal whitespace collapsed before comparison. Exact
+        match (after normalization) is tried first; requested names must match
+        exactly one term in adata.uns[gp_key].
         
         Parameters
         ----------
@@ -1585,7 +1572,32 @@ class LineageVIModel(nn.Module):
         np.ndarray
             Array of gene program indices where the specified programs are found.
         """
-        return np.where(pd.Series(adata.uns[gp_key]).isin(gps))[0]
+        terms = np.asarray(adata.uns[gp_key], dtype=object)
+        norm_terms = np.array([self._normalize_gp_name(t) for t in terms])
+        gps = np.atleast_1d(gps)
+        indices = []
+        for g in gps:
+            g_str = str(g).strip()
+            g_norm = self._normalize_gp_name(g)
+            # Exact match (original or normalized)
+            mask = (terms == g_str) | (norm_terms == g_norm)
+            if np.any(mask):
+                indices.append(np.where(mask)[0][0])
+            else:
+                # Suggest similar terms (containing key tokens)
+                key_tokens = [w for w in g_norm.split() if len(w) > 2][:3]
+                similar = [
+                    t for t in terms
+                    if key_tokens and all(tok.lower() in str(t).lower() for tok in key_tokens)
+                ][:5]
+                msg = (
+                    f"No gene program matched {g!r}. Matching uses stripped and "
+                    f"space-normalized names. Check adata.uns[{gp_key!r}] for exact terms."
+                )
+                if similar:
+                    msg += f" Similar terms: {similar}"
+                raise ValueError(msg)
+        return np.unique(np.array(indices, dtype=np.int64))
     
     @torch.inference_mode()
     def _perturb_genes(
@@ -1960,6 +1972,12 @@ class LineageVIModel(nn.Module):
         cell_idx = group_idxs[group_to_perturb]
 
         gp_idx = self._get_gp_idxs(adata, gp_uns_key, gps_to_perturb)
+        if len(gp_idx) == 0:
+            raise ValueError(
+                "No gene programs to perturb: none of gps_to_perturb matched any term in "
+                f"adata.uns[{gp_uns_key!r}]. Names are matched after stripping and collapsing "
+                "spaces. Check the exact strings in adata.uns[gp_uns_key]."
+            )
 
         mu = adata.layers['Mu'][cell_idx, :]
         ms = adata.layers['Ms'][cell_idx, :]

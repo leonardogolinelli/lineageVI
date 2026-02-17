@@ -851,8 +851,18 @@ def plot_abs_bfs_key(scores, terms, key, n_points=30, lim_val=2.3, fontsize=8, s
     if not np.isfinite(top) or top <= 0:
         top = 1.0
 
+    # y_min: smallest -log10(adj p) among shown terms, with margin above bottom of plot
+    finite_vals = y_vals[np.isfinite(y_vals)] if len(y_vals) else np.array([])
+    if len(finite_vals) > 0:
+        bottom_val = np.nanmin(y_vals)
+        y_range = top - bottom_val if (top > bottom_val) else 1.0
+        margin = max(0.2, y_range * 0.08)  # at least 0.2 or 8% of range
+        y_min = max(0.0, bottom_val - margin)
+    else:
+        y_min = 0.0
+
     y_max = top * scale_y
-    ax.set_ylim(0, y_max)
+    ax.set_ylim(y_min, y_max)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=8, integer=False))
 
     ax.set_xlim(0.1, n_show + 0.9)

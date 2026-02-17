@@ -76,7 +76,7 @@ class LineageVI:
     >>> linvi.get_model_outputs()
     >>> 
     >>> # Differential test (e.g. latent / gene programs)
-    >>> diff = linvi.differential(adata, groupby_key="cell_type", mode="latent")
+    >>> diff = linvi.differential(adata, groupby_key="cell_type", obsm="mean")
     """
 
     def __init__(
@@ -397,15 +397,15 @@ class LineageVI:
         self,
         adata: Optional[sc.AnnData],
         groupby_key: str,
-        mode: str = "expression",
         *,
         layer: Optional[str] = None,
-        velocity_layer: str = "velocity",
+        obsm: Optional[str] = None,
         ensure_model_outputs: bool = True,
     ) -> Dict[str, pd.DataFrame]:
         """
         Differential test (Wilcoxon rank-sum 1 vs rest) by group.
 
+        Provide exactly one of layer= (e.g. 'Ms', 'velocity') or obsm= (e.g. 'mean', 'velocity_gp').
         Returns a dict of DataFrames (one per group), each with columns
         'difference', 'pval', 'padj' and index = feature names.
         See LineageVIModel.differential for full documentation.
@@ -413,9 +413,8 @@ class LineageVI:
         return self.model.differential(
             (adata or self.adata),
             groupby_key=groupby_key,
-            mode=mode,
             layer=layer,
-            velocity_layer=velocity_layer,
+            obsm=obsm,
             ensure_model_outputs=ensure_model_outputs,
         )
 
