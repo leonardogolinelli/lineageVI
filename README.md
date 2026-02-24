@@ -1,6 +1,6 @@
 # LineageVI
 
-Deep learning-based RNA velocity with gene programs (masked decoders, two-regime training).
+Deep learning-based RNA velocity with gene programs.
 
 ## Install
 
