@@ -192,7 +192,7 @@ class LineageVIModel(nn.Module):
         Number of hidden layers in the encoder and velocity decoder (each block: Linear -> LayerNorm -> ReLU -> [Dropout]).
     dropout : float, default 0.0
         Dropout probability applied after each hidden layer (0 = no dropout).
-    mask_key : str, default "I"
+    mask_key : str, default "mask"
         Key for gene program mask in adata.varm.
     seed : int, optional
         Random seed for reproducible initialization.
@@ -240,7 +240,7 @@ class LineageVIModel(nn.Module):
         n_hidden: int = 128,
         n_layers: int = 1,
         dropout: float = 0.0,
-        mask_key: str = "I",
+        mask_key: str = "mask",
         seed: Optional[int] = None,
         cluster_key: Optional[str] = None,
         cluster_embedding_dim: int = 32,

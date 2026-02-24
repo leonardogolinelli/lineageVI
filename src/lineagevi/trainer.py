@@ -289,16 +289,155 @@ class _Trainer:
             history["regime1_val_recon_loss"] = r1_val_recon
             history["regime1_val_kl_loss"] = r1_val_kl
 
-        # Latent for all cells (used by regime 2 dataloader)
+        # Latent for all cells (used by regime 2 dataloader or for regime-1-only export)
         full_loader1 = _make_loader(True, None, shuffle=False, seed=None)
         z = self._compute_latent(full_loader1)
         self.adata.obsm[self.latent_key] = z
 
-        # ------- Regime 2 -------
-        loader2 = _make_loader(False, train_indices, shuffle=True, seed=seeds[2])
+        regime1_only = epochs2 == 0
+        if regime1_only:
+            # Empty regime 2 history so _plot_loss_curves can run (regime 1 only)
+            history["regime2_velocity_loss_gene"] = []
+            history["regime2_velocity_loss_gp"] = []
+            if val_indices is not None:
+                history["regime2_velocity_val_loss"] = []
+                history["regime2_velocity_val_loss_gene"] = []
+                history["regime2_velocity_val_loss_gp"] = []
+        else:
+            # ------- Regime 2 -------
+            loader2 = _make_loader(False, train_indices, shuffle=True, seed=seeds[2])
+            val_loader2 = _make_loader(False, val_indices, shuffle=False, seed=None) if val_indices is not None else None
+            r2_losses, r2_val, r2_gene, r2_gp, r2_val_gene, r2_val_gp = self._train_regime2(
+                loader2, lr=lr2, epochs=epochs2, val_loader=val_loader2,
+                velocity_loss_weight_gene=velocity_loss_weight_gene,
+                velocity_loss_weight_gp=velocity_loss_weight_gp,
+                monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs,
+            )
+            history["regime2_velocity_loss"] = r2_losses
+            history["regime2_velocity_loss_gene"] = r2_gene
+            history["regime2_velocity_loss_gp"] = r2_gp
+            if r2_val is not None:
+                history["regime2_velocity_val_loss"] = r2_val
+                history["regime2_velocity_val_loss_gene"] = r2_val_gene
+                history["regime2_velocity_val_loss_gp"] = r2_val_gp
+
+        # Plot loss curves over epochs
+        self._plot_loss_curves(history, output_dir, show_metrics=show_metrics)
+
+        # Save model weights and configuration
+        import json
+        from pathlib import Path
+
+        n_hidden = getattr(self.model, "n_hidden", None)
+        if n_hidden is None and hasattr(self.model.encoder, "encoder") and len(self.model.encoder.encoder) > 0:
+            first_layer = self.model.encoder.encoder[0]
+            if isinstance(first_layer, torch.nn.Linear):
+                n_hidden = first_layer.out_features
+
+        config = {
+            "n_hidden": n_hidden,
+            "n_layers": getattr(self.model, "n_layers", 1),
+            "dropout": getattr(self.model, "dropout", 0.0),
+            "mask_key": "mask",
+            "cluster_key": self.model.cluster_key,
+            "cluster_embedding_dim": self.model.cluster_embedding_dim if self.model.cluster_embedding is not None else None,
+            "n_latent": self.model.n_latent,
+            "n_genes": self.model.n_genes,
+            "lr_regime1": lr1,
+            "lr_regime2": lr2,
+        }
+        config_path = f"{output_dir}/model_config.json"
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        if regime1_only:
+            model_path = f"{output_dir}/pretrained_vae_regime1.pt"
+        else:
+            model_path = f"{output_dir}/pretrained_vae.pt"
+        torch.save(self.model.state_dict(), model_path)
+
+        if self.verbose:
+            print(f"Saved model  → {model_path}")
+            print(f"Saved config → {config_path}")
+            if regime1_only:
+                print("Regime 1 only (epochs2=0). Save adata (with obsm['z']) and run regime 2 script next.")
+            else:
+                print("Note: Call model.get_model_outputs() to annotate adata with velocities")
+
+        return history
+
+    def fit_regime2_only(
+        self,
+        K: int,
+        batch_size: int,
+        lr_regime2: float,
+        epochs2: int,
+        seed_regime2: int,
+        output_dir: str,
+        train_size: Optional[float] = None,
+        velocity_loss_weight_gene: float = 1.0,
+        velocity_loss_weight_gp: float = 1.0,
+        monitor_genes: Optional[List[str]] = None,
+        monitor_negative_velo: bool = True,
+        monitor_every_epochs: int = 1,
+        show_metrics: bool = True,
+    ) -> Dict[str, List[float]]:
+        """
+        Run only regime 2 (velocity) training. Assumes adata.obsm[latent_key] is already set (e.g. from a regime-1-only run).
+        Saves pretrained_vae.pt and model_config.json to output_dir.
+        """
+        import json
+
+        if self.latent_key not in self.adata.obsm:
+            raise ValueError(
+                f"fit_regime2_only requires adata.obsm[{self.latent_key!r}]. "
+                "Run regime 1 first and pass adata with latent."
+            )
+        os.makedirs(output_dir, exist_ok=True)
+        self._set_seeds(seed_regime2)
+
+        history = {"regime2_velocity_loss": []}
+        if train_size is not None:
+            history["regime2_velocity_val_loss"] = []
+
+        n_cells = self.adata.n_obs
+        train_indices = None
+        val_indices = None
+        if train_size is not None:
+            if not 0 < train_size < 1:
+                raise ValueError("train_size must be in (0, 1).")
+            rng = np.random.default_rng(seed_regime2)
+            perm = rng.permutation(n_cells)
+            n_train = int(n_cells * train_size)
+            n_train = max(1, min(n_train, n_cells - 1))
+            train_indices = perm[:n_train]
+            val_indices = perm[n_train:]
+            if self.verbose:
+                print(f"Train/val split: {len(train_indices)} train, {len(val_indices)} val (train_size={train_size})")
+
+        cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
+
+        def _make_loader(regime1: bool, indices, shuffle: bool, seed):
+            return make_dataloader(
+                self.adata,
+                first_regime=regime1,
+                K=K,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                unspliced_key=self.unspliced_key,
+                spliced_key=self.spliced_key,
+                latent_key=self.latent_key,
+                nn_key=self.nn_key,
+                cluster_key=self.model.cluster_key,
+                cluster_to_idx=cluster_to_idx,
+                indices=indices,
+            )
+
+        loader2 = _make_loader(False, train_indices, shuffle=True, seed=seed_regime2)
         val_loader2 = _make_loader(False, val_indices, shuffle=False, seed=None) if val_indices is not None else None
         r2_losses, r2_val, r2_gene, r2_gp, r2_val_gene, r2_val_gp = self._train_regime2(
-            loader2, lr=lr2, epochs=epochs2, val_loader=val_loader2,
+            loader2, lr=lr_regime2, epochs=epochs2, val_loader=val_loader2,
             velocity_loss_weight_gene=velocity_loss_weight_gene,
             velocity_loss_weight_gp=velocity_loss_weight_gp,
             monitor_genes=monitor_genes, output_dir=output_dir, monitor_negative_velo=monitor_negative_velo, monitor_every_epochs=monitor_every_epochs,
@@ -311,45 +450,33 @@ class _Trainer:
             history["regime2_velocity_val_loss_gene"] = r2_val_gene
             history["regime2_velocity_val_loss_gp"] = r2_val_gp
 
-        # Plot loss curves over epochs
         self._plot_loss_curves(history, output_dir, show_metrics=show_metrics)
 
-        # Save model weights and configuration
-        import json
-        from pathlib import Path
-        
-        # Save state dict
-        model_path = f"{output_dir}/pretrained_vae.pt"
-        torch.save(self.model.state_dict(), model_path)
-        
-        # Save model configuration for easy loading later
         n_hidden = getattr(self.model, "n_hidden", None)
         if n_hidden is None and hasattr(self.model.encoder, "encoder") and len(self.model.encoder.encoder) > 0:
             first_layer = self.model.encoder.encoder[0]
             if isinstance(first_layer, torch.nn.Linear):
                 n_hidden = first_layer.out_features
-
         config = {
             "n_hidden": n_hidden,
             "n_layers": getattr(self.model, "n_layers", 1),
             "dropout": getattr(self.model, "dropout", 0.0),
-            "mask_key": "I",
+            "mask_key": "mask",
             "cluster_key": self.model.cluster_key,
             "cluster_embedding_dim": self.model.cluster_embedding_dim if self.model.cluster_embedding is not None else None,
             "n_latent": self.model.n_latent,
             "n_genes": self.model.n_genes,
-            "lr_regime1": lr1,
-            "lr_regime2": lr2,
+            "lr_regime1": None,
+            "lr_regime2": lr_regime2,
         }
         config_path = f"{output_dir}/model_config.json"
-        with open(config_path, 'w') as f:
+        with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
-        
+        model_path = f"{output_dir}/pretrained_vae.pt"
+        torch.save(self.model.state_dict(), model_path)
         if self.verbose:
             print(f"Saved model  → {model_path}")
             print(f"Saved config → {config_path}")
-            print("Note: Call model.get_model_outputs() to annotate adata with velocities")
-
         return history
 
     # ------- Pieces -------
@@ -739,89 +866,109 @@ class _Trainer:
             print(f"Generated monitoring plots for regime {regime}, epoch {epoch} → {base_plots_dir}")
 
     def _plot_loss_curves(self, history: Dict[str, List[float]], output_dir: str, show_metrics: bool = True) -> None:
-        """Plot and save training/validation loss curves to output_dir/training_plots/loss_curves.png. If show_metrics, also display the figure."""
+        """Plot and save training/validation loss curves to output_dir/training_plots/loss_curves.png. If show_metrics, also display the figure.
+        Supports full two-regime history or regime2-only history (no regime1 keys)."""
         import os
         import matplotlib.pyplot as plt
 
         base_plots_dir = os.path.join(output_dir, "training_plots")
         os.makedirs(base_plots_dir, exist_ok=True)
-        has_val = "regime1_val_loss" in history
+        regime2_only = len(history.get("regime1_loss", [])) == 0
+        has_val = "regime2_velocity_val_loss" in history
 
-        fig, axes = plt.subplots(2, 4, figsize=(14, 8))
-        n_epochs_r1 = len(history["regime1_loss"])
-        epochs_r1 = list(range(1, n_epochs_r1 + 1))
-        # Regime 2 x-axis continues after last regime 1 epoch
-        epochs_r2 = list(range(n_epochs_r1 + 1, n_epochs_r1 + len(history["regime2_velocity_loss"]) + 1))
+        if regime2_only:
+            n_epochs_r2 = len(history["regime2_velocity_loss"])
+            epochs_r2 = list(range(1, n_epochs_r2 + 1))
+            fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
+            for i, (key, title) in enumerate([
+                ("regime2_velocity_loss", "Regime 2: velocity loss (total)"),
+                ("regime2_velocity_loss_gene", "Regime 2: velocity loss (gene)"),
+                ("regime2_velocity_loss_gp", "Regime 2: velocity loss (GP)"),
+            ]):
+                ax = axes[i]
+                ax.plot(epochs_r2, history[key], label="train", color="C0")
+                if has_val and key.replace("_loss", "_val_loss") in history:
+                    ax.plot(epochs_r2, history[key.replace("_loss", "_val_loss")], label="val", color="C1", linestyle="--")
+                ax.set_title(title)
+                ax.set_xlabel("Epoch")
+                ax.legend(loc="best", fontsize=8)
+                ax.grid(True, alpha=0.3)
+        else:
+            fig, axes = plt.subplots(2, 4, figsize=(14, 8))
+            has_val = "regime1_val_loss" in history
+            n_epochs_r1 = len(history["regime1_loss"])
+            epochs_r1 = list(range(1, n_epochs_r1 + 1))
+            epochs_r2 = list(range(n_epochs_r1 + 1, n_epochs_r1 + len(history["regime2_velocity_loss"]) + 1))
 
-        # Regime 1: total, recon, kl, KL weight
-        ax = axes[0, 0]
-        ax.plot(epochs_r1, history["regime1_loss"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r1, history["regime1_val_loss"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 1: total loss")
-        ax.set_xlabel("Epoch")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            # Regime 1: total, recon, kl, KL weight
+            ax = axes[0, 0]
+            ax.plot(epochs_r1, history["regime1_loss"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r1, history["regime1_val_loss"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 1: total loss")
+            ax.set_xlabel("Epoch")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax = axes[0, 1]
-        ax.plot(epochs_r1, history["regime1_recon_loss"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r1, history["regime1_val_recon_loss"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 1: recon loss")
-        ax.set_xlabel("Epoch")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            ax = axes[0, 1]
+            ax.plot(epochs_r1, history["regime1_recon_loss"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r1, history["regime1_val_recon_loss"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 1: recon loss")
+            ax.set_xlabel("Epoch")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax = axes[0, 2]
-        ax.plot(epochs_r1, history["regime1_kl_loss"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r1, history["regime1_val_kl_loss"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 1: KL loss")
-        ax.set_xlabel("Epoch")
-        kl_vals = list(history["regime1_kl_loss"])
-        if has_val:
-            kl_vals.extend(history["regime1_val_kl_loss"])
-        if kl_vals:
-            y_max = float(np.percentile(kl_vals, 99))
-            ax.set_ylim(bottom=0, top=y_max)
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            ax = axes[0, 2]
+            ax.plot(epochs_r1, history["regime1_kl_loss"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r1, history["regime1_val_kl_loss"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 1: KL loss")
+            ax.set_xlabel("Epoch")
+            kl_vals = list(history["regime1_kl_loss"])
+            if has_val:
+                kl_vals.extend(history["regime1_val_kl_loss"])
+            if kl_vals:
+                y_max = float(np.percentile(kl_vals, 99))
+                ax.set_ylim(bottom=0, top=y_max)
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax = axes[0, 3]
-        ax.plot(epochs_r1, history["regime1_kl_weight"], color="C2")
-        ax.set_title("Regime 1: KL weight")
-        ax.set_xlabel("Epoch")
-        ax.grid(True, alpha=0.3)
+            ax = axes[0, 3]
+            ax.plot(epochs_r1, history["regime1_kl_weight"], color="C2")
+            ax.set_title("Regime 1: KL weight")
+            ax.set_xlabel("Epoch")
+            ax.grid(True, alpha=0.3)
 
-        # Regime 2: total, gene, gp
-        ax = axes[1, 0]
-        ax.plot(epochs_r2, history["regime2_velocity_loss"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r2, history["regime2_velocity_val_loss"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 2: velocity loss (total)")
-        ax.set_xlabel("Epoch")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            # Regime 2: total, gene, gp
+            ax = axes[1, 0]
+            ax.plot(epochs_r2, history["regime2_velocity_loss"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r2, history["regime2_velocity_val_loss"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 2: velocity loss (total)")
+            ax.set_xlabel("Epoch")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax = axes[1, 1]
-        ax.plot(epochs_r2, history["regime2_velocity_loss_gene"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r2, history["regime2_velocity_val_loss_gene"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 2: velocity loss (gene)")
-        ax.set_xlabel("Epoch")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            ax = axes[1, 1]
+            ax.plot(epochs_r2, history["regime2_velocity_loss_gene"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r2, history["regime2_velocity_val_loss_gene"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 2: velocity loss (gene)")
+            ax.set_xlabel("Epoch")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax = axes[1, 2]
-        ax.plot(epochs_r2, history["regime2_velocity_loss_gp"], label="train", color="C0")
-        if has_val:
-            ax.plot(epochs_r2, history["regime2_velocity_val_loss_gp"], label="val", color="C1", linestyle="--")
-        ax.set_title("Regime 2: velocity loss (GP)")
-        ax.set_xlabel("Epoch")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            ax = axes[1, 2]
+            ax.plot(epochs_r2, history["regime2_velocity_loss_gp"], label="train", color="C0")
+            if has_val:
+                ax.plot(epochs_r2, history["regime2_velocity_val_loss_gp"], label="val", color="C1", linestyle="--")
+            ax.set_title("Regime 2: velocity loss (GP)")
+            ax.set_xlabel("Epoch")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        axes[1, 3].set_visible(False)
+            axes[1, 3].set_visible(False)
 
         plt.tight_layout()
         save_path = os.path.join(base_plots_dir, "loss_curves.png")

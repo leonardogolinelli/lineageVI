@@ -51,7 +51,7 @@ def main():
     
     # Model initialization
     parser.add_argument("--n_hidden", type=int, default=128, help="Hidden units")
-    parser.add_argument("--mask_key", type=str, default="I", help="Gene program mask key")
+    parser.add_argument("--mask_key", type=str, default="mask", help="Gene program mask key")
     parser.add_argument("--unspliced_key", type=str, default="unspliced", help="Unspliced layer key")
     parser.add_argument("--spliced_key", type=str, default="spliced", help="Spliced layer key")
     parser.add_argument("--nn_key", type=str, default="indices", help="Neighbor indices key")

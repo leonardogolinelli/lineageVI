@@ -17,7 +17,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 if TYPE_CHECKING:
     from .api import LineageVI  # Only imported for type checking, not at runtime
 
-def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns_key='terms',
+def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='mask', uns_key='terms',
                 clean=True, genes_use_upper=True):
     """\
     Add annotations to an AnnData object from files.
@@ -38,7 +38,7 @@ def add_annotations(adata, files, min_genes=0, max_genes=None, varm_key='I', uns
         less than this value.
     varm_key
         Store the binary array I of size n_vars x number of annotated terms in files
-        in `adata.varm[varm_key]`. if I[i,j]=1 then the gene i is present in the annotation j.
+        in `adata.varm[varm_key]`. if mask[i,j]=1 then the gene i is present in the annotation j.
     uns_key
         Sore gene sets' names in `adata.uns[uns_key]`.
     clean
@@ -144,7 +144,7 @@ def preprocess_for_lineagevi(
     K_neighbors : int, default 20
         Number of neighbors to extract for model (K+1 including self).
     skip_if_preprocessed : bool, default True
-        If True, skip steps that appear already done (checks for 'Mu', 'Ms', 'I', etc.).
+        If True, skip steps that appear already done (checks for 'Mu', 'Ms', 'mask', etc.).
     cluster_key : str, optional
         Key for storing cluster labels. If None, uses 'leiden' after clustering.
     clean_terms : bool, default True
@@ -213,7 +213,7 @@ def preprocess_for_lineagevi(
     # Check if already preprocessed
     if skip_if_preprocessed:
         has_moments = 'Mu' in adata.layers and 'Ms' in adata.layers
-        has_annotations = 'I' in adata.varm and 'terms' in adata.uns
+        has_annotations = 'mask' in adata.varm and 'terms' in adata.uns
         has_neighbors = 'indices' in adata.uns
         if has_moments and has_annotations and has_neighbors:
             print("Data appears already preprocessed. Skipping preprocessing.")
@@ -239,16 +239,16 @@ def preprocess_for_lineagevi(
             adata,
             files=annotation_files,
             min_genes=min_genes_per_term,
-            varm_key='I',
+            varm_key='mask',
             uns_key='terms',
             clean=clean_terms,
             genes_use_upper=True
         )
-        print(f"  Added {adata.varm['I'].shape[1]} annotation terms")
+        print(f"  Added {adata.varm['mask'].shape[1]} annotation terms")
         
         # Filter genes to only those in at least one annotation
         n_genes_before = adata.n_vars
-        adata._inplace_subset_var(adata.varm['I'].sum(1) > 0)
+        adata._inplace_subset_var(adata.varm['mask'].sum(1) > 0)
         n_genes_after = adata.n_vars
         print(f"  Filtered to {n_genes_after} genes present in annotations (from {n_genes_before})")
     
@@ -266,21 +266,20 @@ def preprocess_for_lineagevi(
     print(f"  Filtered to {n_genes_after} highly variable genes (from {n_genes_before})")
     
     # Step 4: Filter annotation terms (if annotations were added)
-    if 'I' in adata.varm:
+    if 'mask' in adata.varm:
         print(f"Filtering annotation terms (min_genes_per_term={min_genes_per_term})...")
-        n_terms_before = adata.varm['I'].shape[1]
-        select_terms = adata.varm['I'].sum(0) > min_genes_per_term
+        n_terms_before = adata.varm['mask'].shape[1]
+        select_terms = adata.varm['mask'].sum(0) > min_genes_per_term
         adata.uns['terms'] = np.array(adata.uns['terms'])[select_terms].tolist()
-        adata.varm['I'] = adata.varm['I'][:, select_terms]
-        n_terms_after = adata.varm['I'].shape[1]
+        adata.varm['mask'] = adata.varm['mask'][:, select_terms]
+        n_terms_after = adata.varm['mask'].shape[1]
         print(f"  Retained {n_terms_after} terms (from {n_terms_before})")
-        
         # Filter genes not in any retained term
         n_genes_before = adata.n_vars
-        adata._inplace_subset_var(adata.varm['I'].sum(1) > 0)
+        adata._inplace_subset_var(adata.varm['mask'].sum(1) > 0)
         n_genes_after = adata.n_vars
         print(f"  Filtered to {n_genes_after} genes in retained terms (from {n_genes_before})")
-    
+
     # Step 5: Compute moments and neighbors
     print(f"Computing moments (n_pcs={n_pcs}, n_neighbors={n_neighbors})...")
     scv.pp.moments(adata, n_pcs=n_pcs, n_neighbors=n_neighbors)
@@ -299,11 +298,10 @@ def preprocess_for_lineagevi(
     print(f"  Neighbor indices stored in adata.uns['indices']")
     
     print(f"Preprocessing complete! Final data: {adata.n_obs} cells, {adata.n_vars} genes")
-    if 'I' in adata.varm:
-        print(f"  {adata.varm['I'].shape[1]} annotation terms")
+    if 'mask' in adata.varm:
+        print(f"  {adata.varm['mask'].shape[1]} annotation terms")
     
     return adata
-
 
 def load_model(
     adata: sc.AnnData,

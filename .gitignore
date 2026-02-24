@@ -34,6 +34,13 @@ model_config.json
 **/config_iter_*.json
 **/policy_iter_*.pt
 
+# --- Pipeline / SLURM ---
+lineagevi_*.out
+lineagevi_*.err
+outputs/
+*.latest.txt
+gene_sets/*.gmt
+
 # --- Large bio data files anywhere ---
 *.h5ad
 *.loom

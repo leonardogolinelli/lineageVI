@@ -31,7 +31,7 @@ class LineageVI:
         Number of hidden layers in the encoder and velocity decoder.
     dropout : float, default 0.0
         Dropout probability applied after each hidden layer (0 = no dropout).
-    mask_key : str, default "I"
+    mask_key : str, default "mask"
         Key for gene program mask in adata.uns.
     unspliced_key : str, default "unspliced"
         Key for unspliced counts in adata.layers.
@@ -85,7 +85,7 @@ class LineageVI:
         n_hidden: int = 128,
         n_layers: int = 1,
         dropout: float = 0.0,
-        mask_key: str = "I",
+        mask_key: str = "mask",
         *,
         unspliced_key: str = "unspliced",
         spliced_key: str = "spliced",
@@ -283,7 +283,78 @@ class LineageVI:
             show_metrics=show_metrics,
         )
         self.adata = engine.adata
-        return history    
+        return history
+
+    def fit_regime2_only(
+        self,
+        K: int = 10,
+        batch_size: int = 1024,
+        lr_regime2: Optional[float] = None,
+        epochs2: int = 50,
+        seed_regime2: int = 2,
+        train_size: Optional[float] = None,
+        velocity_loss_weight_gene: float = 1.0,
+        velocity_loss_weight_gp: float = 1.0,
+        output_dir: Optional[str] = None,
+        verbose: int = 1,
+        monitor_genes: Optional[List[str]] = None,
+        monitor_negative_velo: bool = True,
+        monitor_every_epochs: int = 1,
+        show_metrics: bool = True,
+    ) -> Dict[str, List[float]]:
+        """
+        Run only regime 2 (velocity) training. Use after loading a regime-1 checkpoint
+        (e.g. via utils.load_model(adata, regime1_pt_path)). adata.obsm[latent_key] must
+        be set (from regime 1); if missing, it is computed once with the current encoder.
+        Saves pretrained_vae.pt and model_config.json to output_dir.
+        """
+        lr2 = lr_regime2 if lr_regime2 is not None else 1e-3
+        if self.latent_key not in self.adata.obsm:
+            if verbose:
+                print("Latent not in adata; computing once from encoder.")
+            _engine = _Trainer(
+                self.model, self.adata, device=self.device, verbose=0,
+                unspliced_key=self.unspliced_key, spliced_key=self.spliced_key,
+                latent_key=self.latent_key, nn_key=self.nn_key,
+            )
+            from .dataloader import make_dataloader
+            cluster_to_idx = self.model.cluster_to_idx if self.model.cluster_key is not None else None
+            loader = make_dataloader(
+                self.adata, first_regime=True, K=K, batch_size=batch_size,
+                shuffle=False, seed=None, unspliced_key=self.unspliced_key,
+                spliced_key=self.spliced_key, latent_key=self.latent_key,
+                nn_key=self.nn_key, cluster_key=self.model.cluster_key,
+                cluster_to_idx=cluster_to_idx, indices=None,
+            )
+            z = _engine._compute_latent(loader)
+            self.adata.obsm[self.latent_key] = z
+        engine = _Trainer(
+            self.model,
+            self.adata,
+            device=self.device,
+            verbose=verbose,
+            unspliced_key=self.unspliced_key,
+            spliced_key=self.spliced_key,
+            latent_key=self.latent_key,
+            nn_key=self.nn_key,
+        )
+        history = engine.fit_regime2_only(
+            K=K,
+            batch_size=batch_size,
+            lr_regime2=lr2,
+            epochs2=epochs2,
+            seed_regime2=seed_regime2,
+            output_dir=(output_dir or "."),
+            train_size=train_size,
+            velocity_loss_weight_gene=velocity_loss_weight_gene,
+            velocity_loss_weight_gp=velocity_loss_weight_gp,
+            monitor_genes=monitor_genes,
+            monitor_negative_velo=monitor_negative_velo,
+            monitor_every_epochs=monitor_every_epochs,
+            show_metrics=show_metrics,
+        )
+        self.adata = engine.adata
+        return history
 
     
     '''def build_gp_adata(
